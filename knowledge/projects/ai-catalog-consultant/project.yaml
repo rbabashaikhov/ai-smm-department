@@ -1,0 +1,50 @@
+name: AI Catalog Consultant
+status: completed portfolio MVP and reference implementation
+dates:
+  backend_closed: '2026-10-02'
+  telegram_accepted: '2026-10-03'
+  neutral_release: '2026-10-03'
+reference_dataset:
+  products: 75
+  available: 66
+  spec_rows: 4151
+  documents: 75
+  chunks: 514
+  embedded_chunks: 514
+  embedding_model: text-embedding-3-small
+  embedding_dim: 1536
+runtime:
+  llm: gpt-4.1-mini
+  temperature: 0
+  image: consultant-core:4f3f
+  memory_window: 6
+  tool_call_cap: 3
+tools:
+- search_tvs
+- get_tv
+- compare_tvs
+- recommend_tvs
+- get_catalog_stats
+retrieval:
+  product_selection: structured SQL + Feature Registry + deterministic ranking
+  semantic: supporting evidence
+  query_embeddings_at_runtime: false
+evaluation:
+  retrieval_cases: 21
+  agent_cases: 42
+  agent_result: 40/42 in accepted 4D–4E run
+  bakeoff_models:
+  - gpt-4.1-mini
+  - gpt-4o-mini
+  - gpt-4.1
+  bakeoff_turns: 246
+  strict_acceptance: HOLD 4/15
+  demo: 7/8 PASS
+  transport_tests: 45
+  final_unit: 938 passed, 142 skipped
+  final_db: 148 passed
+  n8n_tool: 120 passed
+known_limitation: Vague relative numeric requests can lead the model to verbalize
+  a threshold the user never stated; the semantic guard removes the unsupported constraint
+  before the catalog query, but final wording may still mention it.
+repo: https://github.com/rbabashaikhov/ai-automation-lab/tree/main/projects/ai-catalog-consultant
