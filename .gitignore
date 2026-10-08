@@ -16,3 +16,17 @@ wheels/
 
 # Tool caches
 .ruff_cache/
+
+# Local publication state
+/data/publications/
+/backups/
+/logs/
+
+# Local runtime data
+*.sqlite
+*.sqlite3
+*.db
+
+# OS and editor files
+.DS_Store
+.vscode/

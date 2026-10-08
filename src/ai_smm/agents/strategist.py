@@ -25,6 +25,8 @@ class ContentPlan(BaseModel):
 llm = ChatOpenAI(
     model="gpt-4.1-mini",
     temperature=0.4,
+    timeout=30,
+    max_retries=1,
 )
 
 langfuse_handler = CallbackHandler()

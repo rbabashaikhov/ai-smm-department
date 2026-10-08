@@ -1,7 +1,7 @@
 [project]
 name = "ai-smm-department"
 version = "0.1.0"
-description = "Add your description here"
+description = "Multi-agent AI SMM system with LangGraph, Langfuse and Threads publishing"
 readme = "README.md"
 authors = [
     { name = "Ruslan Babashaikhov", email = "ruslan.babashaikhov@gmail.com" }
@@ -19,9 +19,6 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
 ]
-
-[project.scripts]
-ai-smm-department = "ai_smm_department:main"
 
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
