@@ -4,8 +4,8 @@
 > publishing now works. See
 > [file-storage-migration.md](file-storage-migration.md). This document is
 > kept for the diagnosis; the "options" below are historical, and option 3
-> is what was effectively taken (a different network, not a request to
-> Beget).
+> is what was effectively taken: moving to a different network rather than
+> asking the original provider to fix its routing.
 
 ## Symptom
 
@@ -25,12 +25,12 @@ so Meta never has to download anything.
 Meta downloads `image_url` from its own crawler network during container
 creation. Those crawler prefixes (observed: `173.252.64.0/18`,
 `69.63.176.0/20`) are **not routable from the storage VPS**
-(`159.194.239.113`), while Meta's user-facing prefixes (`157.240.0.0/16`,
-`31.13.0.0/16`) are.
+(the original storage host), while Meta's user-facing prefixes
+(`157.240.0.0/16`, `31.13.0.0/16`) are.
 
 The result is a half-open handshake:
 
-1. the crawler sends `SYN` to `159.194.239.113:443`,
+1. the crawler sends `SYN` to the storage host on :443,
 2. Caddy answers `SYN-ACK`,
 3. the `SYN-ACK` never reaches the crawler, so no `ACK` and no TLS
    `ClientHello` ever arrive,

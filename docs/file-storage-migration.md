@@ -1,7 +1,8 @@
 # Public file storage migration
 
-Moves the public file storage off the Beget VPS, whose network Meta's media
-crawlers cannot reach, onto the VPS that already runs the n8n stack.
+Moves the public file storage off the original storage VPS, whose network
+Meta's media crawlers cannot reach, onto the VPS that already runs the n8n
+stack.
 
 Only the storage moved. The AI SMM Department application, LangGraph,
 Langfuse, Threads publishing logic and the n8n workflows are unchanged.
@@ -19,8 +20,8 @@ same JPEG bytes and the same token:
 | host | network | container creation |
 | --- | --- | --- |
 | `gstatic.com` (control) | — | OK |
-| old storage, `files.apps.leadmeter.ru` | Beget LLC, AS198610, RU | FAILED, 2207052 |
-| new storage, n8n VPS | GLOBAL CONNECTIVITY SOLUTIONS, AS215540, LT | OK |
+| old storage, `files.apps.leadmeter.ru` | RU hosting provider | FAILED, 2207052 |
+| new storage, `media.arcade-lab.info` | LT hosting provider | OK |
 
 The control proves the token and the image are fine, so the only variable
 left is the host Meta has to download from.
@@ -38,12 +39,12 @@ creation distinguishes a reachable host from an unreachable one.
 | | old | new |
 | --- | --- | --- |
 | public host | `files.apps.leadmeter.ru` | `media.arcade-lab.info` |
-| host | `159.194.239.113` (Beget, RU) | `138.124.65.203` (LT) |
-| SSH user | `cursor` | `root` |
+| host | `<old-storage-host>` (RU) | `<n8n-vps-host>` (LT) |
+| SSH user | `<old-ssh-user>` | `root` |
 | storage root | `/srv/miniapps/file-storage` | `/srv/file-storage` |
-| web server | Caddy (`miniapps-caddy`, shared edge) | Caddy (`file-storage`, dedicated) |
-| TLS / routing | Caddy, own ACME | Traefik `n8n-compose-traefik-1`, resolver `mytlschallenge` |
-| DNS | Beget (`ns1/ns2.beget.ru`) | Cloudflare, DNS-only record |
+| web server | Caddy, shared edge for many sites | Caddy, dedicated to storage |
+| TLS / routing | Caddy, own ACME | Traefik, ACME TLS-ALPN resolver |
+| DNS | domain registrar's nameservers | Cloudflare, DNS-only record |
 
 Paths below the storage root are identical on both hosts, so any path that
 worked on the old host resolves to the same file on the new one.
@@ -51,7 +52,7 @@ worked on the old host resolves to the same file on the new one.
 `files.apps.leadmeter.ru` was deliberately **left pointing at the old VPS**.
 The new storage got a new hostname instead, which means:
 
-- no DNS change was needed in the Beget zone, and the
+- no DNS change was needed in the `leadmeter.ru` zone, and the
   `*.apps.leadmeter.ru` wildcard is untouched
 - URLs already handed out under `files.apps.leadmeter.ru` keep serving from
   the old host, so nothing that references them breaks
@@ -123,10 +124,10 @@ now returns `404` and serves no files.
 Only `.env` changes; `StorageUploader` is unmodified.
 
 ```
-STORAGE_SSH_HOST=138.124.65.203
+STORAGE_SSH_HOST=<n8n-vps-host>
 STORAGE_SSH_PORT=22
 STORAGE_SSH_USER=root
-STORAGE_SSH_KEY_PATH=~/.ssh/n8n_vps
+STORAGE_SSH_KEY_PATH=<path-to-n8n-vps-ssh-key>
 STORAGE_REMOTE_ROOT=/srv/file-storage
 STORAGE_PUBLIC_BASE_URL=https://media.arcade-lab.info
 ```
@@ -139,9 +140,9 @@ Because the old host kept its hostname and its files, rollback is a `.env`
 revert with no DNS involved:
 
 ```
-STORAGE_SSH_HOST=159.194.239.113
-STORAGE_SSH_USER=cursor
-STORAGE_SSH_KEY_PATH=~/.ssh/cursor_vps
+STORAGE_SSH_HOST=<old-storage-host>
+STORAGE_SSH_USER=<old-ssh-user>
+STORAGE_SSH_KEY_PATH=<path-to-old-storage-ssh-key>
 STORAGE_REMOTE_ROOT=/srv/miniapps/file-storage
 STORAGE_PUBLIC_BASE_URL=https://files.apps.leadmeter.ru
 ```
