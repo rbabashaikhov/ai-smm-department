@@ -115,30 +115,33 @@ attempt and pushed one hour forward; nothing is sent.
 
 Do not do this until the specific post has been approved by the owner.
 
+`publish-now --live` sets `dry_run=False` for its own run only, so
+`AI_SMM_DRY_RUN` stays `true` throughout and the background worker never
+gains the ability to publish. Stop the worker for the duration so exactly
+one process can hold the claim.
+
 ```bash
 cd /root/ai-smm
 
-# 1. Add the credentials that are deliberately absent today.
-#    THREADS_ACCESS_TOKEN, STORAGE_SSH_HOST, STORAGE_SSH_USER
-nano ai-smm.env            # keep mode 600
-
-# 2. Confirm the token is accepted and belongs to the right account.
+# 1. Confirm the token is accepted and belongs to the right account.
 docker compose --profile cli run --rm -T cli token-check --project < /dev/null
 
-# 3. Preview the exact content one more time.
-docker compose --profile cli run --rm -T cli publish-now 2
+# 2. Preview the exact content.
+docker compose --profile cli run --rm -T cli publish-now <id> < /dev/null
 
-# 4. Turn publishing on and restart the worker.
-sed -i 's/^AI_SMM_DRY_RUN=true/AI_SMM_DRY_RUN=false/' ai-smm.env
-docker compose up -d --force-recreate worker
+# 3. Single executor.
+docker compose stop worker
 
-# 5. Publish exactly one post, by hand, watching it.
-docker compose --profile cli run --rm -T cli publish-now 2 --live --confirm-reviewed
+# 4. Publish exactly one post, by hand, watching it.
+docker compose --profile cli run --rm -T cli schedule <id> --at now < /dev/null
+docker compose --profile cli run --rm -T cli publish-now <id> --live --confirm-reviewed < /dev/null
 
-# 6. Turn it back off until the next approved post.
-sed -i 's/^AI_SMM_DRY_RUN=false/AI_SMM_DRY_RUN=true/' ai-smm.env
-docker compose up -d --force-recreate worker
+# 5. Bring the worker back.
+docker compose up -d worker
 ```
+
+The full procedure, with the expected result of every step and what each
+failure outcome means, is in [live-smoke-test.md](live-smoke-test.md).
 
 A real publish is **not reversible from here**: deleting the post is a manual
 action in the Threads app.

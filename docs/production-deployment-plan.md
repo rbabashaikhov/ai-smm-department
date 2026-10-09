@@ -994,10 +994,23 @@ Traefik, firewall, DNS, обновление Postgres.
 | `THREADS_ACCESS_TOKEN` на сервере | **установлен** 2026-10-09, mode 600, проверен read-only |
 | Медиа | **проверено** сквозным preflight: публичный HTTPS отдаёт оригинал побайтно |
 | Адресный dry-run поста 2 | **выполнен**, две попытки `preflight/dry_run`, фаза `publish` не достигалась |
-| `AI_SMM_DRY_RUN=false` | **не переключён** — ожидает отдельной команды |
-| Явная команда публикации | **не отдана** |
+| `AI_SMM_DRY_RUN=false` | **не потребовалось:** `publish-now --live` задаёт `dry_run=False` только для своего запуска |
+| Публикация поста 2 | **выполнена 2026-10-09**, Threads id `18075070049556193` |
 
-Процедура: [live-smoke-test.md](live-smoke-test.md), начиная с шага 4.
+### 15.6 Первая реальная публикация
+
+| | |
+|---|---|
+| Пост | публикация 2, `ai-catalog-consultant`, формат `image` |
+| Threads id | `18075070049556193` |
+| Ссылка | https://www.threads.com/@ruslan.babashaikhov/post/DeRdCDFACXw |
+| Время | 2026-10-09 11:57:20 UTC |
+| Попытка | #3, фаза `publish`, `outcome=success` |
+| Исполнитель | CLI (`cli-vps-worker-1`), фоновый worker остановлен на время |
+| `AI_SMM_DRY_RUN` | оставался `true` на протяжении всей операции |
+| Публикации 1 и 3 | не затронуты, `attempts=0` у обеих |
+
+Процедура: [live-smoke-test.md](live-smoke-test.md).
 
 ### 15.5 Известные ограничения
 

@@ -7,10 +7,10 @@ on. Nothing here is automatic.
 **Target:** publication 2 of `ai-catalog-consultant`, format `image`.
 **Not in scope:** publication 3, and the scheduler. Both stay parked.
 
-Steps 1 to 3 were completed on 2026-10-09: the owner approved the original
-text and `telegram-03-comparison.jpg`, the token is installed on the VPS and
-verified, and the media path was exercised end to end. What remains is step
-4 onwards.
+**Publication 2 was published on 2026-10-09**, following this procedure:
+[post DeRdCDFACXw](https://www.threads.com/@ruslan.babashaikhov/post/DeRdCDFACXw),
+Threads id `18075070049556193`. What follows is kept as the procedure for
+the next one, with the corrections the first run surfaced.
 
 A real publish is irreversible from the command line. Deleting the post
 afterwards is a manual action in the Threads app.
@@ -149,25 +149,34 @@ it creates the post, so a storage problem stops the run with nothing sent.
 
 ---
 
-## Step 4 — allow publishing, for this one record
+## Step 4 — guarantee a single executor
 
-Two gates guard a live post. Step 1 opened the first. This opens the second.
+**Do not change `AI_SMM_DRY_RUN`.** `publish-now --live` sets `dry_run=False`
+for its own run only, so it publishes while the background worker stays in
+dry run and cannot publish anything at all. Flipping the environment
+variable would remove that guarantee for no benefit.
+
+What does need handling is which process does the work. Publishing by hand
+requires the record to be `scheduled`, and a scheduled record is exactly
+what the background worker polls for. Both go through the same atomic
+claim, so `FOR UPDATE SKIP LOCKED` already makes a double publish
+impossible — but the worker could claim it first and record a dry run,
+which would leave the manual command with nothing to claim.
+
+Remove the ambiguity by stopping the worker for the duration. Only this
+project's container is touched:
 
 ```bash
-cp -a ai-smm.env "ai-smm.env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-sed -i 's/^AI_SMM_DRY_RUN=true/AI_SMM_DRY_RUN=false/' ai-smm.env
-docker compose up -d --force-recreate worker
-sleep 15
-docker inspect ai-smm-worker --format 'health={{.State.Health.Status}}'
+docker compose stop worker
+docker inspect ai-smm-worker --format 'running={{.State.Running}} exit={{.State.ExitCode}}'
+docker ps --filter name=ai-smm --format '{{.Names}}'   # must print nothing
 ```
 
-Publication 3 stays safe meanwhile because it is `approved` with
-`sched=none` and `reviewed=no`: the worker only ever claims a `scheduled`
-record, and would refuse an unreviewed one anyway.
+`exit=0` means it finished its cycle and shut down cleanly rather than
+being killed mid-flight.
 
-Publication 2 is now `approved` with no schedule, so the worker will not
-pick it up either. Step 5 publishes it by hand instead, which keeps the
-whole thing under your eye rather than waiting for a poll.
+Publication 3 stays safe throughout: it is `approved` with `sched=none` and
+`reviewed=no`, and the worker only ever claims a `scheduled` record.
 
 ---
 
@@ -258,19 +267,23 @@ This must refuse — the record already carries publish metadata.
 
 ---
 
-## Step 9 — back to the safe state
+## Step 9 — restart the worker
 
-Do this straight away, before anything else:
+Do this straight away, before anything else. `AI_SMM_DRY_RUN` was never
+changed, so there is nothing to put back:
 
 ```bash
-sed -i 's/^AI_SMM_DRY_RUN=false/AI_SMM_DRY_RUN=true/' ai-smm.env
-docker compose up -d --force-recreate worker
-sleep 15
+docker compose up -d worker
+sleep 20
 
+docker inspect ai-smm-worker --format 'health={{.State.Health.Status}}'
 docker exec ai-smm-worker printenv AI_SMM_DRY_RUN   # must print: true
 docker compose --profile cli run --rm -T cli stats < /dev/null
 docker compose --profile cli run --rm -T cli queue < /dev/null
 ```
+
+The published record cannot be claimed again — it carries a
+`threads_post_id` — so the restart is safe even with the worker polling.
 
 Decide separately whether the token stays on the server. Leaving it means
 the only thing between the queue and a live post is `AI_SMM_DRY_RUN`;
@@ -325,6 +338,9 @@ Then return to the safe state (step 9) regardless of which branch you took.
 ### Emergency stop
 
 ```bash
-sed -i 's/^AI_SMM_DRY_RUN=false/AI_SMM_DRY_RUN=true/' /root/ai-smm/ai-smm.env
-docker compose up -d --force-recreate worker
+docker compose -p ai-smm stop worker
 ```
+
+Nothing else on the host is affected. `AI_SMM_DRY_RUN=true` already means
+the worker cannot publish; stopping it also prevents a dry-run cycle from
+claiming a record you are about to handle by hand.
