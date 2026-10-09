@@ -22,12 +22,14 @@ import argparse
 import httpx
 from dotenv import load_dotenv
 
+
 load_dotenv()
 
 from ai_smm.publishing.threads import (
     ThreadsMediaFetchError,
     ThreadsPublisher,
 )
+
 
 CONTROL_IMAGE_URL = "https://www.gstatic.com/webp/gallery/1.jpg"
 

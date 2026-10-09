@@ -9,9 +9,12 @@ wheels/
 # Virtual environments
 .venv
 
-# Local secrets
+# Local secrets. Covers .env, .env.local and the container runtime file
+# ai-smm.env, which holds the database password and API credentials and
+# lives on the VPS at mode 600.
 .env
 .env.*
+*.env
 !.env.example
 
 # Tool caches

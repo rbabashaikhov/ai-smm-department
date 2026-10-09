@@ -30,8 +30,9 @@ class StorageUploader:
         print(url)
     """
 
-    DEFAULT_PUBLIC_BASE_URL: Final[str] = "https://files.apps.leadmeter.ru"
-    DEFAULT_REMOTE_ROOT: Final[str] = "/srv/miniapps/file-storage"
+    # No default host or root: a stale default silently uploaded to the
+    # decommissioned Beget storage while reporting success. Both values are
+    # now required, so a misconfiguration fails loudly instead.
     DEFAULT_SSH_PORT: Final[int] = 22
 
     def __init__(
@@ -55,15 +56,11 @@ class StorageUploader:
         self.ssh_password = ssh_password or os.getenv("STORAGE_SSH_PASSWORD")
 
         self.remote_root = (
-            remote_root
-            or os.getenv("STORAGE_REMOTE_ROOT")
-            or self.DEFAULT_REMOTE_ROOT
+            remote_root or os.getenv("STORAGE_REMOTE_ROOT") or ""
         ).rstrip("/")
 
         self.public_base_url = (
-            public_base_url
-            or os.getenv("STORAGE_PUBLIC_BASE_URL")
-            or self.DEFAULT_PUBLIC_BASE_URL
+            public_base_url or os.getenv("STORAGE_PUBLIC_BASE_URL") or ""
         ).rstrip("/")
 
         self.timeout = timeout
@@ -79,6 +76,22 @@ class StorageUploader:
         if not self.ssh_user:
             raise ValueError(
                 "STORAGE_SSH_USER is not configured."
+            )
+
+        if not self.remote_root:
+            raise ValueError(
+                "STORAGE_REMOTE_ROOT is not configured."
+            )
+
+        if not self.public_base_url:
+            raise ValueError(
+                "STORAGE_PUBLIC_BASE_URL is not configured."
+            )
+
+        if not self.public_base_url.startswith("https://"):
+            raise ValueError(
+                "STORAGE_PUBLIC_BASE_URL must be an https:// URL; Threads "
+                "refuses to fetch media over plain HTTP."
             )
 
         if not self.ssh_key_path and not self.ssh_password:

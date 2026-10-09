@@ -13,6 +13,7 @@ from pprint import pprint
 
 from dotenv import load_dotenv
 
+
 load_dotenv()
 
 from PIL import Image

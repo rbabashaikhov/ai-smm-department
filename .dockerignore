@@ -1,0 +1,36 @@
+# Secrets must never enter the build context: a file copied into any layer
+# stays in the image history even if a later layer deletes it.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_*
+secrets/
+
+# VCS and local tooling
+.git
+.gitignore
+.github
+.ruff_cache
+.pytest_cache
+.mypy_cache
+.venv
+**/__pycache__
+**/*.py[cod]
+
+# Local runtime state and backups (the queue lives in PostgreSQL)
+data/
+backups/
+logs/
+*.sqlite
+*.sqlite3
+*.db
+
+# Docs and screenshots are not needed at runtime.
+# README.md stays: pyproject declares it as the project readme, so the
+# build backend needs it in the context.
+docs/
+
+# Test code is run in CI, not in the runtime image
+tests/

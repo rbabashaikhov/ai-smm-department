@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,13 +10,32 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge"
+#: Default location when the package is used from a source checkout.
+DEFAULT_KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge"
 
-PROJECTS_ROOT = KNOWLEDGE_ROOT / "projects"
 
-EDITORIAL_POLICY_PATH = (
-    KNOWLEDGE_ROOT / "editorial_policy.md"
-)
+def knowledge_root() -> Path:
+    """Where the knowledge base lives.
+
+    Resolved at call time, not import time: inside the container the package
+    is installed under site-packages, so parents[3] points nowhere useful and
+    AI_SMM_KNOWLEDGE_ROOT supplies the real (read-only mounted) path.
+    """
+
+    override = os.getenv("AI_SMM_KNOWLEDGE_ROOT")
+
+    if override and override.strip():
+        return Path(override.strip()).expanduser()
+
+    return DEFAULT_KNOWLEDGE_ROOT
+
+
+# Kept for backwards compatibility with existing scripts and imports.
+KNOWLEDGE_ROOT = DEFAULT_KNOWLEDGE_ROOT
+
+PROJECTS_ROOT = DEFAULT_KNOWLEDGE_ROOT / "projects"
+
+EDITORIAL_POLICY_PATH = DEFAULT_KNOWLEDGE_ROOT / "editorial_policy.md"
 
 
 def load_project_knowledge(
@@ -36,7 +56,11 @@ def load_project_knowledge(
     The editorial policy is shared across all projects.
     """
 
-    project_dir = PROJECTS_ROOT / project_id
+    root = knowledge_root()
+
+    project_dir = root / "projects" / project_id
+
+    editorial_policy_path = root / "editorial_policy.md"
 
     if not project_dir.is_dir():
         raise FileNotFoundError(
@@ -53,16 +77,14 @@ def load_project_knowledge(
 
     # Load global editorial policy.
     # Fail early rather than silently run without it.
-    if not EDITORIAL_POLICY_PATH.is_file():
+    if not editorial_policy_path.is_file():
         raise FileNotFoundError(
             "Global editorial policy not found: "
-            f"{EDITORIAL_POLICY_PATH}"
+            f"{editorial_policy_path}"
         )
 
-    result["editorial_policy"] = (
-        EDITORIAL_POLICY_PATH.read_text(
-            encoding="utf-8"
-        )
+    result["editorial_policy"] = editorial_policy_path.read_text(
+        encoding="utf-8"
     )
 
     if not result["editorial_policy"].strip():

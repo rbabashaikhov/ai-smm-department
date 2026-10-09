@@ -1,12 +1,12 @@
 from typing import Any
 
 from langchain_openai import ChatOpenAI
+from langfuse import observe
+from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
 from ai_smm.state import SMMState
 
-from langfuse import observe
-from langfuse.langchain import CallbackHandler
 
 class ContentIdea(BaseModel):
     title: str = Field(description="Короткий заголовок публикации")

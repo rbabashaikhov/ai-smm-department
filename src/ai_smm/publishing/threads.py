@@ -9,10 +9,13 @@ from uuid import uuid4
 import httpx
 from dotenv import load_dotenv
 
+from ai_smm.logging_setup import get_logger
 from ai_smm.storage import StorageUploader
 
 
 load_dotenv()
+
+logger = get_logger(__name__)
 
 
 class ThreadsMediaFetchError(RuntimeError):
@@ -163,9 +166,15 @@ class ThreadsPublisher:
         )
 
         if response.status_code >= 400:
-            print("\n=== THREADS API ERROR ===")
-            print("status:", response.status_code)
-            print("body:", response.text)
+            logger.error(
+                "Threads API error",
+                extra={
+                    "context": {
+                        "status": response.status_code,
+                        "body": response.text[:2000],
+                    }
+                },
+            )
 
             subcode = None
 
@@ -247,10 +256,15 @@ class ThreadsPublisher:
             )
 
         if width > self.MAX_IMAGE_WIDTH:
-            print(
-                f"WARNING: image width {width}px exceeds the documented "
-                f"maximum of {self.MAX_IMAGE_WIDTH}px; Threads will "
-                "downscale it."
+            logger.warning(
+                "Image is wider than the documented maximum; Threads will "
+                "downscale it",
+                extra={
+                    "context": {
+                        "width": width,
+                        "max_width": self.MAX_IMAGE_WIDTH,
+                    }
+                },
             )
 
         return info
@@ -328,8 +342,10 @@ class ThreadsPublisher:
             local_file
         )
 
-        print("\n=== IMAGE CHECK ===")
-        print(image_info)
+        logger.info(
+            "Image validated against Threads limits",
+            extra={"context": image_info},
+        )
 
         remote_path = self._build_storage_path(
             local_file
@@ -337,9 +353,15 @@ class ThreadsPublisher:
 
         uploader = self._get_storage_uploader()
 
-        print("\n=== STORAGE UPLOAD ===")
-        print("local:", local_file)
-        print("remote:", remote_path)
+        logger.info(
+            "Uploading image to public storage",
+            extra={
+                "context": {
+                    "local": str(local_file),
+                    "remote": remote_path,
+                }
+            },
+        )
 
         public_url = uploader.upload(
             local_path=local_file,
@@ -347,7 +369,10 @@ class ThreadsPublisher:
             verify_public_url=True,
         )
 
-        print("public URL:", public_url)
+        logger.info(
+            "Image is publicly reachable",
+            extra={"context": {"public_url": public_url}},
+        )
 
         return public_url
 
@@ -462,8 +487,10 @@ class ThreadsPublisher:
         Publish an image that is already available by public HTTPS URL.
         """
 
-        print("\n=== THREADS IMAGE POST ===")
-        print("image_url:", image_url)
+        logger.info(
+            "Creating Threads image post",
+            extra={"context": {"image_url": image_url}},
+        )
 
         response = self._create_media_container(
             image_url=image_url,
@@ -484,7 +511,10 @@ class ThreadsPublisher:
                 "Threads did not return image creation id."
             )
 
-        print("creation_id:", creation_id)
+        logger.info(
+            "Media container created",
+            extra={"context": {"creation_id": creation_id}},
+        )
 
         return self.publish_container(
             creation_id
@@ -582,10 +612,16 @@ class ThreadsPublisher:
         ):
             image_url = image["url"]
 
-            print(
-                f"\n=== CAROUSEL IMAGE {index}/{len(images)} ==="
+            logger.info(
+                "Creating carousel item",
+                extra={
+                    "context": {
+                        "index": index,
+                        "total": len(images),
+                        "image_url": image_url,
+                    }
+                },
             )
-            print("image_url:", image_url)
 
             item = self.create_image_item(
                 image_url=image_url,
@@ -602,7 +638,10 @@ class ThreadsPublisher:
                     "Threads did not return image creation id."
                 )
 
-            print("creation_id:", creation_id)
+            logger.info(
+                "Carousel item created",
+                extra={"context": {"creation_id": creation_id}},
+            )
 
             child_ids.append(
                 creation_id
@@ -620,8 +659,10 @@ class ThreadsPublisher:
                 "Threads did not return carousel creation id."
             )
 
-        print("\n=== CAROUSEL CONTAINER ===")
-        print("creation_id:", carousel_id)
+        logger.info(
+            "Carousel container created",
+            extra={"context": {"creation_id": carousel_id}},
+        )
 
         return self.publish_container(
             carousel_id
@@ -667,9 +708,11 @@ class ThreadsPublisher:
                     f"Carousel image {index} has no 'path'."
                 )
 
-            print(
-                f"\n=== UPLOAD CAROUSEL IMAGE "
-                f"{index}/{len(images)} ==="
+            logger.info(
+                "Uploading carousel image",
+                extra={
+                    "context": {"index": index, "total": len(images)}
+                },
             )
 
             public_url = self.upload_image(

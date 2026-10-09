@@ -1,0 +1,98 @@
+# AI SMM Department — separate compose project.
+#
+# Attached to the existing n8n bridge as an EXTERNAL network, so
+# `docker compose -p ai-smm up/down` can never create, recreate or remove
+# the n8n, Traefik, Redis, Postgres or file-storage services.
+#
+# Deliberately absent:
+#   * `ports:`  — this service never listens; a published port would widen
+#                 the host's attack surface for no benefit.
+#   * Traefik router labels — nothing of this project is routed publicly.
+#   * the Docker socket — the worker has no business talking to the daemon.
+#
+# PostgreSQL is reached by container DNS name inside the shared network.
+
+name: ai-smm
+
+x-common: &common
+  image: ai-smm:${AI_SMM_VERSION:?set AI_SMM_VERSION to an image tag, never latest}
+  env_file:
+    - ai-smm.env
+  environment:
+    TZ: UTC
+  networks:
+    - n8n
+  volumes:
+    # Knowledge base and media assets: read-only, the app never writes here.
+    - ${AI_SMM_KNOWLEDGE_HOST_PATH:-/srv/ai-smm/knowledge}:/srv/ai-smm/knowledge:ro
+    # SFTP key for the media storage, root-owned 600 on the host.
+    - ${AI_SMM_SSH_KEY_HOST_PATH:-/srv/ai-smm/ssh/id_storage}:/run/secrets/storage_key:ro
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  user: "10001:10001"
+  labels:
+    # Defence in depth: Traefik already runs with exposedByDefault=false.
+    traefik.enable: "false"
+  logging:
+    driver: json-file
+    options:
+      # Per-service rotation. The host has no /etc/docker/daemon.json and
+      # changing it would alter every other container's behaviour.
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  worker:
+    <<: *common
+    container_name: ai-smm-worker
+    restart: unless-stopped
+    # Long enough for an in-flight publish to record its outcome before the
+    # process is killed; shorter than Docker's default SIGKILL escalation.
+    stop_grace_period: 90s
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/ai-smm-healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    # Service-level limits (not deploy.resources, which is for Swarm and
+    # conflicts with these keys). The host has 2 vCPU and ~2.5 GiB free with
+    # n8n already using 1 GiB, so this service stays small on purpose.
+    cpus: 0.75
+    mem_limit: 384m
+    memswap_limit: 384m
+    pids_limit: 128
+
+  # Operator entry point: `docker compose -p ai-smm run --rm cli queue`
+  # Never started by `up` thanks to the profile.
+  cli:
+    <<: *common
+    profiles:
+      - cli
+    restart: "no"
+    entrypoint: ["/app/.venv/bin/ai-smm"]
+    mem_limit: 512m
+    pids_limit: 128
+
+  # Migrations run as an explicit one-shot command, not on container start,
+  # so two instances can never migrate concurrently:
+  #   docker compose -p ai-smm run --rm migrate upgrade head
+  migrate:
+    <<: *common
+    profiles:
+      - tools
+    restart: "no"
+    working_dir: /app
+    entrypoint: ["/app/.venv/bin/alembic"]
+    mem_limit: 256m
+    pids_limit: 64
+
+networks:
+  n8n:
+    name: ${AI_SMM_NETWORK:?set AI_SMM_NETWORK to the existing Docker network this project joins}
+    external: true

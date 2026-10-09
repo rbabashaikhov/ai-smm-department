@@ -26,6 +26,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_QUEUE = ROOT / "data/publications/ai-catalog-consultant.json"
 

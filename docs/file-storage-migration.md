@@ -66,8 +66,8 @@ The new storage got a new hostname instead, which means:
 ```
 /srv/file-storage/            755 root:root   <- STORAGE_REMOTE_ROOT
 ├── ai-smm/                   755 root:root
-├── ai-food-coach/
-└── other-projects/
+├── <other-project-a>/
+└── <other-project-b>/
 ```
 
 Files are `644 root:root`. Uploads arrive over SFTP as `root`; the web
@@ -76,11 +76,11 @@ container mounts the tree **read-only**, so the serving path cannot write.
 Configuration on the VPS, both new files:
 
 - `/root/file-storage/compose.yml` — Caddy container, Traefik labels,
-  joined to the external `n8n-compose_default` network.
+  joined to the external `<shared-network>` network.
 - `/root/file-storage/Caddyfile` — serving rules, copied from the old
   host's `files.apps.leadmeter.ru` block so the response contract matches.
 
-Nothing in `/root/n8n-compose/` was edited and no existing container was
+Nothing in `<shared-stack-dir>/` was edited and no existing container was
 restarted.
 
 ## Serving contract
@@ -159,8 +159,8 @@ Retire the old copy only once the new storage has been stable for a while.
 
 ## Known limitations
 
-- `media.arcade-lab.info` serves the whole tree, `ai-food-coach/` and
-  `other-projects/` included, exactly as the old host did. Per-project
+- `media.arcade-lab.info` serves the whole tree, `<other-project-a>/` and
+  `<other-project-b>/` included, exactly as the old host did. Per-project
   hostnames would need separate routers.
 - Caddy's `file_server` follows symlinks. The copy was made with
   `rsync --no-links` and the tree is root-owned with root-only writes, but
