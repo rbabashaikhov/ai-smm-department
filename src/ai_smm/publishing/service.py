@@ -9,7 +9,7 @@ Threads are retried.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timezone
+from datetime import timedelta, timezone
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -36,6 +36,7 @@ from ai_smm.queue import (
     start_attempt,
     utcnow,
 )
+from ai_smm.series import check_series_readiness
 
 
 logger = get_logger(__name__)
@@ -59,6 +60,10 @@ class PublisherProtocol(Protocol):
     def publish_thread(
         self, items: list[dict[str, Any]]
     ) -> list[dict[str, Any]]: ...
+
+    def publish_reply(
+        self, text: str, reply_to_id: str
+    ) -> dict[str, Any]: ...
 
 
 #: Errors proving the request never reached a state where a post could exist.
@@ -254,6 +259,35 @@ def publish_claimed_publication(
             detail=str(exc),
         )
 
+    # Series order and reply linkage. Checked before an attempt is opened:
+    # "it is not this part's turn yet" is not a failed attempt, it is a
+    # reason to put the record back and look again later.
+    readiness = check_series_readiness(session, publication)
+
+    if not readiness.ready:
+        logger.info(
+            "Publication is not due yet within its series",
+            extra={"context": {**context, "reason": readiness.reason}},
+        )
+
+        release_claim(
+            session,
+            publication,
+            actor=actor,
+            reason=f"series: {readiness.reason}",
+        )
+        publication.last_error = readiness.reason[:4000]
+        # Do not spin on the same row every poll while the earlier part
+        # is still waiting for a human.
+        publication.next_attempt_at = utcnow() + timedelta(minutes=10)
+        session.commit()
+
+        return PublishOutcome(
+            publication_id=publication.id,
+            status="waiting_for_series",
+            detail=readiness.reason,
+        )
+
     attempt = start_attempt(
         session,
         publication,
@@ -395,7 +429,10 @@ def publish_claimed_publication(
 
     try:
         result = _dispatch_publish(
-            publisher, publication, uploaded
+            publisher,
+            publication,
+            uploaded,
+            reply_to_id=readiness.reply_to_id,
         )
     except AMBIGUOUS_NETWORK_ERRORS as exc:
         # No response was received. Threads may have created the post.
@@ -526,6 +563,16 @@ def publish_claimed_publication(
         threads_post_id=post_id,
         actor=actor,
     )
+
+    if publication.series_id is not None:
+        from ai_smm.db.models import ContentSeries
+        from ai_smm.series import refresh_series_status
+
+        series = session.get(ContentSeries, publication.series_id)
+
+        if series is not None:
+            refresh_series_status(session, series, actor=actor)
+
     session.commit()
 
     logger.info(
@@ -544,7 +591,23 @@ def _dispatch_publish(
     publisher: PublisherProtocol,
     publication: Publication,
     uploaded: list[dict[str, str]],
+    *,
+    reply_to_id: str | None = None,
 ) -> Any:
+    if reply_to_id:
+        # A reply inside a thread. Threads replies carry text only, so a
+        # part with media must be a standalone post rather than a reply.
+        if uploaded:
+            raise ValueError(
+                f"Publication {publication.id} is a reply but carries "
+                f"{len(uploaded)} image(s); Threads replies are text only."
+            )
+
+        return publisher.publish_reply(
+            text=publication.body,
+            reply_to_id=reply_to_id,
+        )
+
     if publication.format == "carousel":
         return publisher.publish_carousel(
             text=publication.body, images=uploaded

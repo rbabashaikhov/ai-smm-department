@@ -666,6 +666,215 @@ def cmd_token_check(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_series_list(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.db.models import ContentSeries
+    from ai_smm.series import count_published_parts, series_parts
+
+    with session_scope(settings) as session:
+        stmt = select(ContentSeries).order_by(ContentSeries.id)
+
+        if args.project:
+            stmt = stmt.where(ContentSeries.project_id == args.project)
+
+        all_series = list(session.execute(stmt).scalars())
+
+        if not all_series:
+            print("No series yet.")
+
+            return 0
+
+        for series in all_series:
+            parts = series_parts(session, series)
+            published = count_published_parts(session, series)
+
+            print(
+                f"[{series.id}] {series.title}  "
+                f"({series.status.value}, {series.publishing_strategy.value})"
+            )
+            print(f"      project : {series.project_id}")
+            print(f"      parts   : {published}/{len(parts)} published")
+
+            if series.narrative_goal:
+                print(f"      goal    : {series.narrative_goal[:70]}")
+
+            print()
+
+    return 0
+
+
+def cmd_series_show(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.db.models import ContentSeries
+    from ai_smm.series import (
+        check_series_readiness,
+        series_parts,
+        validate_series_structure,
+    )
+
+    with session_scope(settings) as session:
+        series = session.get(ContentSeries, args.series)
+
+        if series is None:
+            print(f"Series {args.series} not found.", file=sys.stderr)
+
+            return 1
+
+        print(f"id         : {series.id}")
+        print(f"title      : {series.title}")
+        print(f"project    : {series.project_id}")
+        print(f"strategy   : {series.publishing_strategy.value}")
+        print(f"status     : {series.status.value}")
+        print(f"order      : {'enforced' if series.enforce_order else 'free'}")
+        print(f"audience   : {series.target_audience or '-'}")
+        print(f"goal       : {series.narrative_goal or '-'}")
+
+        if series.description:
+            print(f"about      : {series.description}")
+
+        print()
+        print("--- parts ---")
+
+        for part in series_parts(session, series):
+            readiness = check_series_readiness(session, part)
+            state = (
+                "ready"
+                if readiness.ready
+                else f"waiting ({readiness.reason[:50]})"
+            )
+
+            print(
+                f"  {part.series_position}/{part.series_total or '?'}  "
+                f"id={part.id}  {part.status.value:<12} "
+                f"{part.format:<9} post_id={part.threads_post_id or '-'}"
+            )
+            print(f"      {part.title[:70]}")
+
+            if part.status is not PublicationStatus.PUBLISHED:
+                print(f"      {state}")
+
+            if readiness.reply_to_id:
+                print(f"      replies to {readiness.reply_to_id}")
+
+        issues = validate_series_structure(session, series)
+
+        print()
+
+        if issues:
+            print("--- structural issues ---")
+
+            for issue in issues:
+                print(f"  - {issue}")
+        else:
+            print("structure: consistent")
+
+    return 0
+
+
+def cmd_series_create(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.db.models import PublishingStrategy
+    from ai_smm.series import create_series
+
+    with session_scope(settings) as session:
+        try:
+            series = create_series(
+                session,
+                project_id=args.project,
+                title=args.title,
+                description=args.description or "",
+                narrative_goal=args.goal or "",
+                target_audience=args.audience or "",
+                publishing_strategy=PublishingStrategy(args.strategy),
+                planned_total=args.total,
+                enforce_order=not args.allow_out_of_order,
+                actor=_actor(),
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+
+            return 1
+
+        print(
+            f"Series {series.id} created: {series.title!r} "
+            f"({series.publishing_strategy.value})"
+        )
+
+    return 0
+
+
+def cmd_series_attach(args: argparse.Namespace, settings: Settings) -> int:
+    """Place an existing publication at a position in a series.
+
+    Never touches threads_post_id, published_at or the text, so it is safe
+    to run against publications that are already live.
+    """
+
+    from ai_smm.db.models import ContentSeries
+    from ai_smm.series import attach_publication, refresh_series_status
+
+    with session_scope(settings) as session:
+        series = session.get(ContentSeries, args.series)
+
+        if series is None:
+            print(f"Series {args.series} not found.", file=sys.stderr)
+
+            return 1
+
+        publication = get_publication(session, args.publication)
+
+        if publication is None:
+            print(
+                f"Publication {args.publication} not found.",
+                file=sys.stderr,
+            )
+
+            return 1
+
+        before = (
+            publication.status.value,
+            publication.threads_post_id,
+            publication.published_at,
+        )
+
+        try:
+            attach_publication(
+                session,
+                publication,
+                series=series,
+                position=args.position,
+                total=args.total,
+                actor=_actor(),
+            )
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+
+            return 1
+
+        refresh_series_status(session, series, actor=_actor())
+
+        after = (
+            publication.status.value,
+            publication.threads_post_id,
+            publication.published_at,
+        )
+
+        if before != after:
+            print(
+                "ERROR: attaching changed publish metadata; refusing.",
+                file=sys.stderr,
+            )
+            session.rollback()
+
+            return 1
+
+        print(
+            f"Publication {publication.id} is now part "
+            f"{args.position} of series {series.id}. "
+            f"status={publication.status.value} "
+            f"post_id={publication.threads_post_id or '-'} (unchanged)"
+        )
+
+    return 0
+
+
 def cmd_import(args: argparse.Namespace, settings: Settings) -> int:
     queue_path = Path(args.path).expanduser().resolve()
 
@@ -851,6 +1060,48 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also list the most recent posts on the account",
     )
     p.set_defaults(func=cmd_token_check)
+
+    p = sub.add_parser("series", help="List content series")
+    p.add_argument("--project")
+    p.set_defaults(func=cmd_series_list)
+
+    p = sub.add_parser(
+        "series-show", help="Show one series and the state of its parts"
+    )
+    p.add_argument("series", type=int)
+    p.set_defaults(func=cmd_series_show)
+
+    p = sub.add_parser("series-create", help="Create a content series")
+    p.add_argument("--project", required=True)
+    p.add_argument("--title", required=True)
+    p.add_argument("--description")
+    p.add_argument("--goal", help="What the whole series should land")
+    p.add_argument("--audience")
+    p.add_argument(
+        "--strategy",
+        choices=["standalone_series", "reply_thread"],
+        default="standalone_series",
+    )
+    p.add_argument("--total", type=int, help="Planned number of parts")
+    p.add_argument(
+        "--allow-out-of-order",
+        action="store_true",
+        help="Permit a later part to go out first (never for a thread)",
+    )
+    p.set_defaults(func=cmd_series_create)
+
+    p = sub.add_parser(
+        "series-attach",
+        help=(
+            "Place an existing publication in a series; never changes its "
+            "text or its Threads post id"
+        ),
+    )
+    p.add_argument("series", type=int)
+    p.add_argument("publication", type=int)
+    p.add_argument("--position", type=int, required=True)
+    p.add_argument("--total", type=int)
+    p.set_defaults(func=cmd_series_attach)
 
     p = sub.add_parser(
         "import-json", help="Import a legacy JSON queue (idempotent)"

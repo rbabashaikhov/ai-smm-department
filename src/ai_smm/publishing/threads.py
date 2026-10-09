@@ -415,6 +415,49 @@ class ThreadsPublisher:
 
         return response.json()
 
+    def publish_reply(
+        self,
+        text: str,
+        reply_to_id: str,
+    ) -> dict[str, Any]:
+        """Publish one reply to an existing post.
+
+        publish_thread() posts a whole chain in a single call, which suits
+        a one-shot script. A series keeps each reply as its own queue row,
+        so it needs the two Graph API steps -- create the container, then
+        publish it -- for exactly one reply.
+        """
+
+        if not reply_to_id:
+            raise ValueError(
+                "reply_to_id is required; a reply cannot be published "
+                "without the real id of the post it answers."
+            )
+
+        container = self.create_reply(
+            text=text,
+            reply_to_id=reply_to_id,
+        )
+
+        creation_id = container.get("id")
+
+        if not creation_id:
+            raise RuntimeError(
+                "Threads did not return a reply creation id."
+            )
+
+        logger.info(
+            "Reply container created",
+            extra={
+                "context": {
+                    "creation_id": creation_id,
+                    "reply_to_id": reply_to_id,
+                }
+            },
+        )
+
+        return self.publish_container(creation_id)
+
     def publish_container(
         self,
         creation_id: str,

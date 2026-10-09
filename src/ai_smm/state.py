@@ -18,6 +18,9 @@ class SMMState(TypedDict, total=False):
     editor_feedback: str
     editor_score: float
     editor_approved: bool
+    #: How well the parts read as one series, separate from per-post score.
+    editor_narrative_score: float
+    editor_issues: list[str]
 
     # Revision control
     revision_count: int
@@ -36,3 +39,7 @@ class SMMState(TypedDict, total=False):
 
     # Publishing
     publish_live: bool
+
+    # Series planning (inputs to Strategist)
+    series_size: int
+    publishing_strategy: str

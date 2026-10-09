@@ -8,8 +8,12 @@ from langfuse import observe
 from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
+from ai_smm.agents.continuity import check_series_continuity
+from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
 
+
+logger = get_logger(__name__)
 
 MAX_ITEM_LENGTH = 450
 PILOT_PROJECT_ID = "ai-catalog-consultant"
@@ -25,6 +29,18 @@ class EditorReview(BaseModel):
     score: float = Field(ge=0, le=10)
     feedback: str
     issues: list[str] = Field(default_factory=list)
+
+    #: Judged on the series as a whole, not on any single part.
+    narrative_score: float = Field(
+        default=10.0,
+        ge=0,
+        le=10,
+        description="Насколько части складываются в единое повествование",
+    )
+    narrative_issues: list[str] = Field(
+        default_factory=list,
+        description="Проблемы связности серии",
+    )
 
 
 llm = ChatOpenAI(
@@ -158,9 +174,32 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 
     policy = knowledge.get("editorial_policy", "")
 
+    content_plan = state.get("content_plan") or {}
+
+    strategy = (
+        draft.get("publishing_strategy")
+        or content_plan.get("publishing_strategy")
+        or "standalone_series"
+    )
+    series_title = (
+        draft.get("series_title")
+        or content_plan.get("series_title")
+        or ""
+    )
+    narrative_goal = content_plan.get("narrative_goal", "")
+
     deterministic_issues = validate_draft(
         draft=draft,
         project_id=project_id,
+    )
+
+    # Continuity is checked deterministically before the model sees the
+    # draft, so a judgement call cannot wave through a missing part
+    # number or two parts with identical text.
+    continuity_issues = check_series_continuity(
+        draft,
+        strategy=strategy,
+        series_title=series_title,
     )
 
     prompt = f"""
@@ -182,6 +221,50 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 8. Самостоятельность каждого текста.
 9. Корректное описание ошибок и ограничений.
 10. Разделение результатов разных тестов.
+
+СВЯЗНОСТЬ СЕРИИ
+
+Это не набор независимых постов, а серия.
+Оцени её и как отдельные публикации,
+и как единое повествование.
+
+Общая тема серии: {series_title or "не задана"}
+Цель серии: {narrative_goal or "не задана"}
+Стратегия публикации: {strategy}
+
+Проверь:
+
+1. Каждая часть соответствует общей теме серии.
+2. Порядок частей логичен: часть N опирается
+   на часть N-1, а не повторяет её.
+3. Между частями нет противоречий:
+   одно и то же не описано по-разному.
+4. Нет ненужных повторов: вступление и описание
+   проекта не дублируются в каждой части.
+5. Заголовки понятны и различимы.
+6. Между частями есть переходы:
+   связь с предыдущей и анонс следующей
+   там, где они существуют.
+7. Каждая часть имеет самостоятельную ценность:
+   читатель, увидевший только её, получает
+   законченную мысль.
+8. Нумерация частей корректна и соответствует
+   фактическому порядку.
+9. Соблюдены ограничения Threads: не более
+   {MAX_ITEM_LENGTH} символов в элементе.
+
+Для стратегии standalone_series каждая часть
+обязана обозначать серию и свой номер.
+
+Для стратегии reply_thread нумерация в тексте
+не нужна, но каждый ответ обязан продолжать
+предыдущий, а не начинаться заново.
+
+Заполни narrative_score от 0 до 10 — насколько
+части складываются в единое повествование,
+и narrative_issues — конкретные проблемы связности.
+
+Оценка score остаётся оценкой отдельных публикаций.
 
 Особое внимание:
 
@@ -219,9 +302,18 @@ DRAFT:
     )
 
     all_issues = list(result.issues)
+    all_issues.extend(result.narrative_issues)
     all_issues.extend(deterministic_issues)
+    all_issues.extend(continuity_issues)
 
-    approved = result.approved and not deterministic_issues
+    # Continuity problems block approval the same way factual ones do: a
+    # series whose parts contradict or repeat each other is not publishable
+    # however correct each part is on its own.
+    approved = (
+        result.approved
+        and not deterministic_issues
+        and not continuity_issues
+    )
 
     feedback_parts = []
 
@@ -234,6 +326,18 @@ DRAFT:
             + "\n- ".join(deterministic_issues)
         )
 
+    if continuity_issues:
+        feedback_parts.append(
+            "Связность серии — обязательные исправления:\n- "
+            + "\n- ".join(continuity_issues)
+        )
+
+    if result.narrative_issues:
+        feedback_parts.append(
+            "Замечания по повествованию:\n- "
+            + "\n- ".join(result.narrative_issues)
+        )
+
     feedback = "\n\n".join(feedback_parts)
 
     score = result.score
@@ -241,15 +345,35 @@ DRAFT:
     if deterministic_issues:
         score = min(score, 5.0)
 
-    print(
-        f"[EDITOR] approved={approved}, "
-        f"score={score}, "
-        f"issues={len(all_issues)}"
+    if continuity_issues:
+        score = min(score, 5.0)
+
+    # The series score is the weaker of the two judgements: a set of
+    # individually good posts that do not follow on is still a bad series.
+    narrative_score = result.narrative_score
+
+    if continuity_issues:
+        narrative_score = min(narrative_score, 5.0)
+
+    logger.info(
+        "Editor review complete",
+        extra={
+            "context": {
+                "approved": approved,
+                "score": score,
+                "narrative_score": narrative_score,
+                "issues": len(all_issues),
+                "continuity_issues": len(continuity_issues),
+                "strategy": strategy,
+            }
+        },
     )
 
     return {
         "editor_approved": approved,
         "editor_score": score,
+        "editor_narrative_score": narrative_score,
         "editor_feedback": feedback,
+        "editor_issues": all_issues,
         "current_agent": "editor",
     }

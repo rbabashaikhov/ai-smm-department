@@ -19,7 +19,13 @@ from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from ai_smm.config import Settings, load_settings
-from ai_smm.db.models import Base, Publication, PublicationStatus
+from ai_smm.db.models import (
+    Base,
+    ContentSeries,
+    Publication,
+    PublicationStatus,
+    PublishingStrategy,
+)
 from ai_smm.db.session import create_db_engine
 from ai_smm.queue import ensure_project
 
@@ -119,8 +125,9 @@ def clean_tables(request: pytest.FixtureRequest) -> Iterator[None]:
     with engine.begin() as connection:
         connection.execute(
             text(
-                "TRUNCATE publication_attempts, publications, projects, "
-                "audit_log RESTART IDENTITY CASCADE"
+                "TRUNCATE publication_attempts, publications, "
+                "content_series, projects, audit_log "
+                "RESTART IDENTITY CASCADE"
             )
         )
 
@@ -211,3 +218,62 @@ def make_publication(session: Session, project: str):
         return publication
 
     return factory
+
+
+@pytest.fixture
+def make_series(session: Session, project: str):
+    """Create a series, optionally with its parts already attached."""
+
+    from ai_smm.series import attach_publication, create_series
+
+    def factory(
+        *,
+        strategy: PublishingStrategy = (
+            PublishingStrategy.STANDALONE_SERIES
+        ),
+        title: str = "Test series",
+        planned_total: int | None = None,
+        enforce_order: bool = True,
+        parts: list[Publication] | None = None,
+    ) -> ContentSeries:
+        series = create_series(
+            session,
+            project_id=project,
+            title=title,
+            narrative_goal="what the reader should take away",
+            target_audience="engineers",
+            publishing_strategy=strategy,
+            planned_total=planned_total
+            or (len(parts) if parts else None),
+            enforce_order=enforce_order,
+            actor="test",
+        )
+
+        for position, publication in enumerate(parts or [], start=1):
+            attach_publication(
+                session,
+                publication,
+                series=series,
+                position=position,
+                total=len(parts or []),
+                actor="test",
+            )
+
+        session.commit()
+
+        return series
+
+    return factory
+
+
+@pytest.fixture
+def make_other_project(session: Session) -> str:
+    ensure_project(
+        session,
+        project_id="other-project",
+        display_name="Other Project",
+        knowledge_path="knowledge/projects/other-project",
+    )
+    session.commit()
+
+    return "other-project"

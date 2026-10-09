@@ -8,10 +8,16 @@ from langfuse import observe
 from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
+from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
 
 
+logger = get_logger(__name__)
+
 PILOT_PROJECT_ID = "ai-catalog-consultant"
+
+#: Threads caption limit for a post carrying media.
+MAX_ITEM_LENGTH = 450
 
 
 class DraftItem(BaseModel):
@@ -25,9 +31,18 @@ class DraftPublication(BaseModel):
     items: list[DraftItem]
     key_facts_used: list[str] = Field(default_factory=list)
 
+    position: int = Field(
+        default=0, description="Позиция части в серии, начиная с 1"
+    )
+    main_thesis: str = Field(
+        default="", description="Главный тезис этой части"
+    )
+
 
 class DraftPackage(BaseModel):
     publications: list[DraftPublication]
+    series_title: str = Field(default="")
+    publishing_strategy: str = Field(default="standalone_series")
 
 
 llm = ChatOpenAI(
@@ -53,11 +68,84 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 
     pilot_mode = project_id == PILOT_PROJECT_ID
 
-    print(
-        f"[COPYWRITER] project={project_id}, "
-        f"revision={revision_count}, "
-        f"pilot_mode={pilot_mode}"
+    strategy = (
+        content_plan.get("publishing_strategy") or "standalone_series"
     )
+    series_title = content_plan.get("series_title") or ""
+    planned_total = content_plan.get("planned_total") or len(
+        content_plan.get("ideas", [])
+    )
+
+    logger.info(
+        "Copywriter starting",
+        extra={
+            "context": {
+                "project_id": project_id,
+                "revision": revision_count,
+                "pilot_mode": pilot_mode,
+                "strategy": strategy,
+                "parts": planned_total,
+            }
+        },
+    )
+
+    if strategy == "reply_thread":
+        series_instructions = """
+СТРАТЕГИЯ: reply_thread.
+
+Первая часть — обычный пост, он задаёт тему.
+Остальные части выходят ОТВЕТАМИ на предыдущую.
+
+Правила:
+
+1. Первая часть формулирует проблему или контекст
+   и обозначает, что будет разбор.
+
+2. Каждый следующий ответ ПРОДОЛЖАЕТ предыдущий.
+   Читатель уже прочитал то, что было выше.
+
+3. НЕ повторяй вступление в каждой части.
+   Не начинай несколько частей одинаково.
+   Не представляй проект заново в каждом ответе.
+
+4. Не нумеруй части вручную в тексте: в треде
+   порядок виден сам по себе.
+
+5. Ответы в Threads — только текст, без изображений.
+
+6. Каждый ответ всё равно должен нести
+   законченную мысль, а не обрываться.
+"""
+    else:
+        series_instructions = f"""
+СТРАТЕГИЯ: standalone_series.
+
+Каждая часть — самостоятельный пост. Читатель может
+увидеть любую из них первой.
+
+Для КАЖДОЙ части обязательно:
+
+1. Понятный заголовок в начале текста.
+
+2. Обозначение серии и номера части в формате:
+   «{series_title or "Название серии"} — часть N из {planned_total}»
+   Используй это ровно один раз, рядом с заголовком.
+
+3. Если это НЕ первая часть — одно короткое
+   предложение о том, на чём остановились
+   в предыдущей части. Не пересказывай её целиком.
+
+4. Один главный тезис. Не пытайся вместить всё.
+
+5. Логичное завершение: часть не должна обрываться.
+
+6. Если следующая часть существует — одна короткая
+   строка о том, что будет в ней.
+   Для последней части анонса нет.
+
+7. Текст должен быть понятен тому, кто не читал
+   остальные части.
+"""
 
     if pilot_mode:
         format_instructions = """
@@ -161,6 +249,29 @@ carousel:
     key_facts_used фактами из knowledge base,
     на которых основан текст.
 
+7. Каждый текст должен быть понятен
+   без чтения предыдущих публикаций.
+
+СЕРИЯ
+
+Это не набор независимых постов, а серия:
+части читаются в заданном порядке и развивают
+одну мысль.
+
+Общая тема серии: {series_title or "см. content plan"}
+Количество частей: {planned_total}
+
+{series_instructions}
+
+Для каждой публикации заполни:
+- position — позицию части из content plan;
+- main_thesis — её главный тезис.
+
+Сохрани порядок частей из content plan.
+Используй transition_from_previous и transition_to_next
+из плана как основу для переходов, но пиши их
+естественным языком, а не копируй дословно.
+
 ФОРМАТ ВЫВОДА
 
 {format_instructions}
@@ -193,6 +304,17 @@ REVISION NUMBER:
 
     draft = result.model_dump()
 
+    draft["series_title"] = draft.get("series_title") or series_title
+    draft["publishing_strategy"] = strategy
+
+    # The model is asked for positions, but order is what the series is
+    # built on, so it is assigned here rather than trusted.
+    for index, publication in enumerate(
+        draft.get("publications", []), start=1
+    ):
+        publication["position"] = index
+        publication["series_total"] = len(draft["publications"])
+
     if pilot_mode:
         if len(draft["publications"]) != 3:
             raise ValueError(
@@ -216,9 +338,8 @@ REVISION NUMBER:
         state.get("force_bad_draft", False)
         and revision_count == 0
     ):
-        print(
-            "[COPYWRITER] Injecting intentionally "
-            "bad draft for revision test"
+        logger.warning(
+            "Injecting an intentionally bad draft for the revision test"
         )
 
         draft["publications"][0]["items"][0]["text"] = (
