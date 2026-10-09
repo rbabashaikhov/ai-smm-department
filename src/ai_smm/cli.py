@@ -473,13 +473,42 @@ def cmd_publish_now(args: argparse.Namespace, settings: Settings) -> int:
         print()
 
         if not args.live:
+            print(f"status  : {publication.status.value}")
+            print(f"reviewed: {publication.human_reviewed}")
+            print(f"post id : {publication.threads_post_id or '-'}")
+
+            for index, image in enumerate(publication.images, start=1):
+                print(
+                    f"image {index} : {image.get('path')}  "
+                    f"alt={image.get('alt_text')!r}"
+                )
+
+            print()
+
+            # A preview holds no claim, and an unreviewed record is the
+            # normal thing to preview -- that is how the operator decides
+            # whether to approve it. Both gates are reported separately
+            # below; what is checked here is the content itself.
             try:
-                validate_ready_to_publish(publication)
-                print("Validation passed; nothing was sent.")
+                validate_ready_to_publish(
+                    publication,
+                    require_claimed=False,
+                    require_human_review=False,
+                )
             except Exception as exc:
-                print(f"Validation failed: {exc}", file=sys.stderr)
+                print(f"preflight: BLOCKED — {exc}", file=sys.stderr)
 
                 return 1
+
+            if not publication.human_reviewed:
+                print(
+                    "preflight: content is valid, but the record is not "
+                    "marked human_reviewed, so it cannot be published yet."
+                )
+
+                return 0
+
+            print("preflight: content is valid. Nothing was sent.")
 
             return 0
 

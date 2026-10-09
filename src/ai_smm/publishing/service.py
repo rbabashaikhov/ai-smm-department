@@ -139,8 +139,13 @@ def validate_ready_to_publish(
     publication: Publication,
     *,
     require_human_review: bool = True,
+    require_claimed: bool = True,
 ) -> None:
     """Gates that must hold before any network call.
+
+    require_claimed is relaxed only by the preview command: an operator
+    inspecting a record before publishing it holds no claim, and refusing
+    to show them the content would defeat the point of a preview.
 
     Raises PublishBlocked, which the caller turns into a released claim --
     not into a failed attempt, because nothing was attempted.
@@ -152,13 +157,22 @@ def validate_ready_to_publish(
             "refusing to publish it again."
         )
 
-    if publication.status not in {
+    if require_claimed and publication.status not in {
         PublicationStatus.CLAIMED,
         PublicationStatus.SCHEDULED,
     }:
         raise PublishBlocked(
             f"Publication {publication.id} has status "
             f"{publication.status.value}; only a claimed row is publishable."
+        )
+
+    if not require_claimed and publication.status in {
+        PublicationStatus.PUBLISHED,
+        PublicationStatus.CANCELLED,
+    }:
+        raise PublishBlocked(
+            f"Publication {publication.id} is {publication.status.value}; "
+            "it will not be published again."
         )
 
     if require_human_review and not publication.human_reviewed:

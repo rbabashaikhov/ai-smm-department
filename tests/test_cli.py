@@ -353,3 +353,98 @@ def test_import_json_does_not_touch_the_file(
     out = capsys.readouterr().out
 
     assert "left unchanged" in out
+
+
+def test_preview_works_on_an_approved_record(
+    session: Session, settings: Settings, make_publication, capsys
+) -> None:
+    """approved, not scheduled, is the normal state to preview from."""
+
+    publication = make_publication(
+        status=PublicationStatus.APPROVED, human_reviewed=True
+    )
+
+    assert _run(["publish-now", str(publication.id)], settings) == 0
+
+    out = capsys.readouterr().out
+
+    assert "preflight: content is valid" in out
+    assert publication.body in out
+    assert "status  : approved" in out
+
+
+def test_preview_reports_a_missing_review_without_failing(
+    session: Session, settings: Settings, make_publication, capsys
+) -> None:
+    """The operator previews precisely to decide whether to approve."""
+
+    publication = make_publication(
+        status=PublicationStatus.APPROVED, human_reviewed=False
+    )
+
+    assert _run(["publish-now", str(publication.id)], settings) == 0
+
+    out = capsys.readouterr().out
+
+    assert "not marked human_reviewed" in out
+    assert "reviewed: False" in out
+
+
+def test_preview_reports_invalid_content_as_blocked(
+    session: Session, settings: Settings, make_publication, capsys
+) -> None:
+    publication = make_publication(
+        status=PublicationStatus.APPROVED,
+        publication_format="image",
+        images=[],
+        human_reviewed=True,
+    )
+
+    assert _run(["publish-now", str(publication.id)], settings) == 1
+
+    assert "BLOCKED" in capsys.readouterr().err
+
+
+def test_preview_refuses_an_already_published_record(
+    session: Session, settings: Settings, make_publication, capsys
+) -> None:
+    publication = make_publication(
+        status=PublicationStatus.PUBLISHED,
+        threads_post_id="17900000000000321",
+        published_at=datetime.now(timezone.utc),
+    )
+
+    assert _run(["publish-now", str(publication.id)], settings) == 1
+
+    # The publish-metadata gate catches this first, and says so precisely.
+    assert "already carries publish metadata" in capsys.readouterr().err
+
+
+def test_preview_refuses_a_cancelled_record(
+    session: Session, settings: Settings, make_publication, capsys
+) -> None:
+    """A cancelled record carries no post id, so the status gate is what
+    catches it."""
+
+    publication = make_publication(status=PublicationStatus.CANCELLED)
+
+    assert _run(["publish-now", str(publication.id)], settings) == 1
+
+    assert "will not be published again" in capsys.readouterr().err
+
+
+def test_preview_lists_the_images_it_would_send(
+    session: Session, settings: Settings, make_publication, capsys
+) -> None:
+    publication = make_publication(
+        publication_format="image",
+        images=[{"path": "assets/pic.jpg", "alt_text": "a caption"}],
+        human_reviewed=True,
+    )
+
+    _run(["publish-now", str(publication.id)], settings)
+
+    out = capsys.readouterr().out
+
+    assert "assets/pic.jpg" in out
+    assert "a caption" in out
