@@ -1,0 +1,300 @@
+# First live publish — exact procedure
+
+Audience: whoever runs the first real publication, start to finish, in one
+sitting. Every step is a command to run and a result to check before moving
+on. Nothing here is automatic.
+
+**Target:** publication 2 of `ai-catalog-consultant`, format `image`.
+**Not in scope:** publication 3, and the scheduler. Both stay parked.
+
+A real publish is irreversible from the command line. Deleting the post
+afterwards is a manual action in the Threads app.
+
+All commands run from `/root/ai-smm` on the VPS. `< /dev/null` is required:
+`docker compose run` attaches stdin and would otherwise swallow the rest of
+a pasted block.
+
+> Names in angle brackets — `<postgres-container>`, `<shared-network>`,
+> `<another-service>` — stand for resources belonging to other projects on
+> the same host. They are deliberately not named in a public repository.
+> Substitute the real values from `docker ps` and `/root/ai-smm/.env`
+> before running any command below.
+
+---
+
+## Step 0 — state before you start
+
+```bash
+cd /root/ai-smm
+docker compose --profile cli run --rm -T cli queue < /dev/null
+docker compose --profile cli run --rm -T cli stats < /dev/null
+```
+
+Expected, and worth actually reading rather than skimming:
+
+| | |
+|---|---|
+| publication 1 | `published`, carries `threads_post_id` — out of reach |
+| publication 2 | `approved`, `sched=none`, `reviewed=no` |
+| publication 3 | `approved`, `sched=none`, `reviewed=no` |
+| `dry_run mode` | `True` |
+
+If anything is already `scheduled`, stop and find out why before going on.
+
+---
+
+## Step 1 — you approve the text and the image
+
+```bash
+docker compose --profile cli run --rm -T cli show 2 < /dev/null
+```
+
+Read the caption in full. Open the image:
+`knowledge/projects/ai-catalog-consultant/assets/telegram-03-comparison.jpg`.
+
+Confirm, explicitly:
+
+- [ ] the caption says what you want said, and 433 characters is the whole of it;
+- [ ] the screenshot is the one you want public, including the brand names
+      and the store links visible inside it;
+- [ ] `format` is `image` and exactly one image is attached;
+- [ ] `threads_post_id` is empty.
+
+Only then record the review. This is the first of the two gates and it is
+the one a human owns:
+
+```bash
+docker compose --profile cli run --rm -T cli approve 2 \
+  --note "reviewed text and image before the first live publish" < /dev/null
+```
+
+---
+
+## Step 2 — credentials
+
+The token is not on the server yet. Put it there by hand; it must not pass
+through Git, a log, or a shell history file.
+
+```bash
+# On the VPS, in an editor -- not with echo, which lands in ~/.bash_history
+nano /root/ai-smm/ai-smm.env     # set THREADS_ACCESS_TOKEN=...
+chmod 600 /root/ai-smm/ai-smm.env
+```
+
+Verify it read-only, without publishing anything:
+
+```bash
+docker compose --profile cli run --rm -T cli token-check --project < /dev/null
+```
+
+Expected:
+
+- `account: @ruslan.babashaikhov (id 28375548782128062)` — the right account;
+- `status : token is accepted for reading`;
+- the listed posts include `17956888254278916` (publication 1) and **no**
+  post carrying publication 2's text.
+
+`threads_content_publish` cannot be verified without publishing. If the
+token lacks it, step 5 fails with an HTTP 4xx and the record goes to
+`failed` — no post is created, and that outcome is safe.
+
+---
+
+## Step 3 — media
+
+The media path was verified end to end on 2026-10-09: the worker wrote the
+post-2 image into `/srv/file-storage/ai-smm/threads` and it was fetched from
+outside the VPS as `HTTP 200`, `image/jpeg`, byte-identical to the source.
+
+Re-confirm the mount is live before publishing:
+
+```bash
+docker compose --profile cli run --rm -T --entrypoint sh cli -c '
+  touch /srv/ai-smm/media/.probe && echo "media writable" && rm /srv/ai-smm/media/.probe
+' < /dev/null
+```
+
+The publish path uploads and verifies the image over public HTTPS *before*
+it creates the post, so a storage problem stops the run with nothing sent.
+
+---
+
+## Step 4 — allow publishing, for this one record
+
+Two gates guard a live post. Step 1 opened the first. This opens the second.
+
+```bash
+cp -a ai-smm.env "ai-smm.env.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+sed -i 's/^AI_SMM_DRY_RUN=true/AI_SMM_DRY_RUN=false/' ai-smm.env
+docker compose up -d --force-recreate worker
+sleep 15
+docker inspect ai-smm-worker --format 'health={{.State.Health.Status}}'
+```
+
+Publication 3 stays safe meanwhile because it is `approved` with
+`sched=none` and `reviewed=no`: the worker only ever claims a `scheduled`
+record, and would refuse an unreviewed one anyway.
+
+Publication 2 is now `approved` with no schedule, so the worker will not
+pick it up either. Step 5 publishes it by hand instead, which keeps the
+whole thing under your eye rather than waiting for a poll.
+
+---
+
+## Step 5 — publish exactly one post
+
+Preview once more. This contacts nothing:
+
+```bash
+docker compose --profile cli run --rm -T cli publish-now 2 < /dev/null
+```
+
+Then schedule it for now and publish it. `publish-now --live` takes the same
+claim path the worker would, so the row is reserved exactly as usual:
+
+```bash
+docker compose --profile cli run --rm -T cli schedule 2 --at now \
+  --note "first live publish" < /dev/null
+
+docker compose --profile cli run --rm -T cli publish-now 2 \
+  --live --confirm-reviewed < /dev/null
+```
+
+Expected output:
+
+```
+result : published
+post_id: <numeric id>
+```
+
+**If you see `result : needs_review`, stop.** The outcome of the call could
+not be determined. Do not run the command again — go to "If it goes wrong"
+below.
+
+---
+
+## Step 6 — the post id
+
+The id printed above is also in the database and in the audit log:
+
+```bash
+docker compose --profile cli run --rm -T cli show 2 < /dev/null
+```
+
+---
+
+## Step 7 — check what was published
+
+```bash
+docker compose --profile cli run --rm -T cli token-check --project < /dev/null
+```
+
+The newest entry should be the post you just created, with `media_type`
+`IMAGE` and a permalink. Open the permalink and confirm:
+
+- [ ] the caption is the 433 characters you approved, not truncated;
+- [ ] the image renders, and is the comparison screenshot;
+- [ ] the alt text is present.
+
+---
+
+## Step 8 — check the database
+
+```bash
+PGU=$(docker inspect <postgres-container> \
+  --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '^POSTGRES_USER=' | cut -d= -f2)
+
+docker exec <postgres-container> psql -U "$PGU" -d ai_smm -c "
+  select id, status, threads_post_id, published_at, attempt_count
+    from publications order by id;"
+
+docker exec <postgres-container> psql -U "$PGU" -d ai_smm -c "
+  select publication_id, attempt_number, phase, outcome, threads_post_id
+    from publication_attempts order by id;"
+```
+
+Expected: publication 2 is `published` with the id from step 6 and a
+`published_at`; its last attempt is `phase=publish`, `outcome=success`;
+publication 3 is untouched.
+
+Confirm it cannot happen twice:
+
+```bash
+docker compose --profile cli run --rm -T cli publish-now 2 --live --confirm-reviewed < /dev/null
+```
+
+This must refuse — the record already carries publish metadata.
+
+---
+
+## Step 9 — back to the safe state
+
+Do this straight away, before anything else:
+
+```bash
+sed -i 's/^AI_SMM_DRY_RUN=false/AI_SMM_DRY_RUN=true/' ai-smm.env
+docker compose up -d --force-recreate worker
+sleep 15
+
+docker exec ai-smm-worker printenv AI_SMM_DRY_RUN   # must print: true
+docker compose --profile cli run --rm -T cli stats < /dev/null
+docker compose --profile cli run --rm -T cli queue < /dev/null
+```
+
+Decide separately whether the token stays on the server. Leaving it means
+the only thing between the queue and a live post is `AI_SMM_DRY_RUN`;
+removing it means publishing is impossible until it is put back.
+
+Publication 3 must still read `approved`, `sched=none`, `reviewed=no`.
+
+Turning the scheduler loose — that is, scheduling records and leaving
+`AI_SMM_DRY_RUN=false` — is a separate decision, to be taken after this
+post has been live for a while.
+
+Take a backup of the new state:
+
+```bash
+/root/ai-smm/backup.sh
+```
+
+---
+
+## If it goes wrong
+
+| What you see | What it means | What to do |
+|---|---|---|
+| `result : failed` | Threads rejected the request; **no post was created** | read `cli show 2`, fix the cause, reschedule |
+| `result : retry_scheduled` | the media upload failed; nothing reached Threads | safe; it will retry, or fix the storage first |
+| `result : needs_review` | **the outcome is unknown** — the post may exist | see below |
+| `result : blocked` | a gate refused it; nothing was attempted | `cli show 2` prints the reason |
+
+### needs_review
+
+Threads may or may not hold the post. **Do not retry.**
+
+```bash
+docker compose --profile cli run --rm -T cli errors < /dev/null
+docker compose --profile cli run --rm -T cli token-check --project < /dev/null
+```
+
+Open the account and look for the post.
+
+```bash
+# It exists -> close the record with the real id. No second post is created.
+docker compose --profile cli run --rm -T cli reconcile 2 \
+  --published <id> --note "verified by hand in the account" < /dev/null
+
+# It does not exist -> and only then, retry.
+docker compose --profile cli run --rm -T cli reconcile 2 \
+  --retry --confirm-not-published --note "account checked, nothing created" < /dev/null
+```
+
+Then return to the safe state (step 9) regardless of which branch you took.
+
+### Emergency stop
+
+```bash
+sed -i 's/^AI_SMM_DRY_RUN=false/AI_SMM_DRY_RUN=true/' /root/ai-smm/ai-smm.env
+docker compose up -d --force-recreate worker
+```

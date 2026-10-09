@@ -10,8 +10,9 @@ as root and no other privileges.
 > before running any command below.
 
 Deployed state as of 2026-10-09: worker running in **dry run**, queue parked,
-no Threads credentials on the server. See [production-deployment-plan.md](production-deployment-plan.md)
-for the architecture and the reasoning behind it.
+media storage configured and verified, no Threads credentials on the server.
+See [production-deployment-plan.md](production-deployment-plan.md) for the
+architecture and the reasoning behind it.
 
 ---
 
@@ -25,7 +26,7 @@ for the architecture and the reasoning behind it.
 | `/root/ai-smm/backup.sh` | nightly dump of the `ai_smm` database | 700 |
 | `/srv/ai-smm/knowledge/` | knowledge base and media assets, mounted **read-only** | 755 |
 | `/srv/ai-smm/data/` | JSON queues staged for import | 755 |
-| `/srv/ai-smm/ssh/id_storage` | SFTP key for the media storage | 600 |
+| `/srv/file-storage/ai-smm/threads` | published media, the only path the worker may write | 2775 root:aismm |
 | `/root/backups/ai-smm/` | database dumps and the pre-deployment role snapshot | 700 |
 
 The database lives in the existing `<postgres-container>` container, in its
@@ -121,8 +122,8 @@ cd /root/ai-smm
 #    THREADS_ACCESS_TOKEN, STORAGE_SSH_HOST, STORAGE_SSH_USER
 nano ai-smm.env            # keep mode 600
 
-# 2. Install a real SFTP key for the media storage (see section 9).
-#    /srv/ai-smm/ssh/id_storage is an empty placeholder right now.
+# 2. Confirm the token is accepted and belongs to the right account.
+docker compose --profile cli run --rm -T cli token-check --project < /dev/null
 
 # 3. Preview the exact content one more time.
 docker compose --profile cli run --rm -T cli publish-now 2
@@ -153,7 +154,11 @@ doing anything else.**
 ```bash
 docker compose --profile cli run --rm -T cli errors
 docker compose --profile cli run --rm -T cli show 2
+docker compose --profile cli run --rm -T cli token-check --project
 ```
+
+`token-check --project` lists the most recent posts on the account, which
+is the fastest way to see whether the ambiguous post actually exists.
 
 `show` prints each attempt with its `phase` and `creation_id`. An attempt that
 reached `phase=publish` with `outcome=timeout` or `unknown` is the ambiguous
@@ -252,32 +257,86 @@ reference for what the shared instance looked like beforehand.
 
 ---
 
-## 9. Media upload — not configured yet
+## 9. Media storage
 
-Image and carousel posts need the file reachable over public HTTPS, which the
-existing `file-storage` container serves from `/srv/file-storage` on this same
-host. The worker uploads over SFTP.
+Threads fetches media over public HTTPS, so an image has to be published to
+the storage before the post is created.
 
-Today `/srv/ai-smm/ssh/id_storage` is an **empty placeholder** and
-`STORAGE_SSH_HOST` / `STORAGE_SSH_USER` are empty, so an image publish would
-fail in preflight — safely, before anything reaches Threads. Text posts are
-unaffected.
+`media.arcade-lab.info` resolves to this same VPS: the `file-storage`
+container serves `/srv/file-storage` read-only through Caddy, behind the
+existing Traefik. Because the storage and the worker share a host, the
+worker writes the file directly instead of uploading it over SSH — no key
+in the container, no root login, no network round trip.
 
-Before the first image publish, pick one:
+### What the worker can reach
 
-* **A dedicated SSH key.** Generate a keypair, authorise the public half for a
-  user that may write only to `/srv/file-storage`, and install the private half
-  at `/srv/ai-smm/ssh/id_storage` (mode 600, root-owned). Preferable: the
-  current `.env` uses `root` over SSH, which the worker does not need.
-* **A direct mount.** Since the storage is on this host, bind-mount
-  `/srv/file-storage/ai-smm` into the container read-write and skip SFTP
-  entirely. Cheaper and removes the key, but needs a small change to
-  `StorageUploader`.
+```
+/srv/file-storage                       root:root  755   not visible to the worker
+└── ai-smm
+    ├── ai-catalog-consultant           root:root  755   not visible
+    └── threads                         root:aismm 2775  mounted rw at /srv/ai-smm/media
+```
 
-Note also that `paramiko` is configured with `AutoAddPolicy`, which accepts any
-host key. Pin the known host key before using SFTP across an untrusted path.
+Only `/srv/file-storage/ai-smm/threads` is bind-mounted, read-write, at
+`/srv/ai-smm/media`. The directory stays root-owned; group `aismm`
+(gid 10001, the container's runtime uid) has write access through the
+setgid bit, so files created inside inherit the group. Nothing above the
+directory is group-writable, so the worker cannot escape upwards, and the
+other projects' media under the same public base URL is not mounted at all.
 
----
+`StorageUploader` enforces the same boundary in code rather than trusting
+the mount: a `remote_path` outside `STORAGE_LOCAL_PREFIX` is refused, as is
+traversal, and the resolved target is re-checked after `resolve()` so a
+symlink planted in the directory cannot be used to escape.
+
+Writes are atomic — a temporary file in the same directory, `chmod 644`,
+then a rename — because Meta fetches the URL within seconds of the post
+being created and must never see a partial file.
+
+### Settings
+
+```
+STORAGE_MODE=local
+STORAGE_LOCAL_ROOT=/srv/ai-smm/media       # the mount, inside the container
+STORAGE_LOCAL_PREFIX=ai-smm/threads        # what it maps to in the public URL
+STORAGE_PUBLIC_BASE_URL=https://media.arcade-lab.info
+THREADS_STORAGE_PREFIX=ai-smm/threads
+```
+
+`STORAGE_MODE=sftp` remains available and is still the default outside this
+deployment, for a storage on another host. Switching back is an edit to
+`ai-smm.env` plus a restart; no code change.
+
+### Verifying the path end to end
+
+```bash
+cd /root/ai-smm
+docker compose --profile cli run --rm -T --entrypoint sh cli -c '
+  touch /srv/ai-smm/media/.probe && echo writable && rm /srv/ai-smm/media/.probe
+' < /dev/null
+
+# From a machine that is not the VPS:
+curl -sI https://media.arcade-lab.info/ai-smm/threads/<file>.jpg
+```
+
+A healthy response is `HTTP 200` with `content-type: image/jpeg`. If a
+published image returns 404, check that the file is mode 644: Caddy reads
+it as a different user than the one that wrote it.
+
+### Housekeeping
+
+Published media accumulates: every upload gets a unique filename so that
+Meta's cache cannot serve a stale image, which means a reposted image is
+written again rather than overwritten. Nothing prunes the directory today.
+Check it occasionally:
+
+```bash
+du -sh /srv/file-storage/ai-smm/threads
+ls -lt /srv/file-storage/ai-smm/threads | head
+```
+
+Deleting a file that a live post still references will break the image in
+that post, so only remove media whose publication is no longer public.
 
 ## 10. Health and monitoring
 
