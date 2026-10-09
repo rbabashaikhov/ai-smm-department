@@ -238,21 +238,33 @@ The image stays `telegram-04-tradeoff.jpg`, unchanged.
 
 ---
 
-## 8. Deployment plan
+## 8. Deployment — done 2026-10-09
 
-Not executed. Production currently runs `ai-smm:be3bc75` with the previous
-schema (`a3fbcef157c3`).
+Production runs `ai-smm:706b383` at schema `79731eadacd7`. The series is
+registered as id 1; publication 3 is attached but unscheduled and
+unreviewed, so nothing can publish it.
 
-| Phase | Action | Rollback |
-|---|---|---|
-| 1 | Review and merge the branch | — |
-| 2 | Build and transfer the image; keep `be3bc75` on the host | delete the new image |
-| 3 | `backup.sh` | — |
-| 4 | `compose run --rm migrate upgrade head` → `79731eadacd7` | `downgrade a3fbcef157c3`; the columns are additive, so nothing is lost |
-| 5 | Recreate the worker on the new image, still `AI_SMM_DRY_RUN=true` | `AI_SMM_VERSION=be3bc75` |
-| 6 | Verify: queue unchanged, parts 1–2 still published, worker healthy | as above |
-| 7 | Register the existing series (section 6) | `UPDATE publications SET series_id=NULL, series_position=NULL ...`, `DELETE FROM content_series` |
-| 8 | Leave part 3 unscheduled until its text is approved | — |
+The plan below is kept as the record of what was done and as the
+procedure for the next schema change.
+
+| Phase | Action | Rollback | Status |
+|---|---|---|---|
+| 1 | Rehearse the migration against a restored copy of the production dump | — | done |
+| 2 | Build and transfer the image; keep `be3bc75` on the host | delete the new image | done |
+| 3 | `backup.sh`, and restore it into a throwaway database to prove it works | — | done |
+| 4 | `compose run --rm migrate upgrade head` → `79731eadacd7` | `downgrade a3fbcef157c3`; the columns are additive, so nothing is lost | done |
+| 5 | Recreate the worker on the new image, still `AI_SMM_DRY_RUN=true` | `AI_SMM_VERSION=be3bc75` | done |
+| 6 | Verify: queue unchanged, parts 1–2 still published, worker healthy | as above | done |
+| 7 | Register the existing series (section 6) | `UPDATE publications SET series_id=NULL, series_position=NULL, series_total=NULL, previous_publication_id=NULL WHERE series_id=1; DELETE FROM content_series WHERE id=1;` | done |
+| 8 | Leave part 3 unscheduled until its text is approved | — | done |
+
+**The version pin is the thing to get right.** `AI_SMM_VERSION` in
+`/root/ai-smm/.env` selects the image for *every* service in the project,
+including the one-shot `migrate` container. Running `migrate upgrade head`
+while the pin still named the old image was a no-op that reported success:
+`head` meant the old image's head, which was already applied. Update the
+pin before running the migration, and check the revision afterwards rather
+than trusting the exit code.
 
 The migration can be applied before the new image runs: the previous code
 ignores columns it does not know about. Running the migration and the
@@ -268,3 +280,16 @@ docker exec <postgres-container> psql -U <user> -d ai_smm -c "
 
 Parts 1 and 2 must still be `published` with their original ids, and all
 three must still show `series_id` NULL until phase 7 runs.
+
+### What was verified on the real data
+
+Before touching production, the dump was restored locally and the
+migration *and* the series registration were replayed against it. Body and
+image hashes were compared against a pristine restore of the same dump and
+matched exactly. The same comparison was then run on production either
+side of the registration, and came out identical: no text, image, status,
+Threads post id, publication date or approval flag moved.
+
+Rollback was rehearsed from the migrated state *with the series already
+registered*: the downgrade drops the series and its links and leaves all
+three publications byte-identical to the pre-migration dump.
