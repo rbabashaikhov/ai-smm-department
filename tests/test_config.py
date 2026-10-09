@@ -120,12 +120,15 @@ def test_loader_fails_without_editorial_policy(
 # --- storage defaults ----------------------------------------------------
 
 
-def test_storage_requires_explicit_host(
+def test_storage_requires_a_public_base_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Required in both modes: it is what Threads will fetch."""
+
     from ai_smm.storage import StorageUploader
 
     for name in (
+        "STORAGE_MODE",
         "STORAGE_SSH_HOST",
         "STORAGE_SSH_USER",
         "STORAGE_REMOTE_ROOT",
@@ -135,30 +138,44 @@ def test_storage_requires_explicit_host(
     ):
         monkeypatch.delenv(name, raising=False)
 
-    with pytest.raises(ValueError, match="STORAGE_SSH_HOST"):
+    with pytest.raises(ValueError, match="STORAGE_PUBLIC_BASE_URL"):
         StorageUploader()
 
 
-def test_storage_requires_remote_root_and_public_url(
+def test_sftp_mode_requires_host_user_and_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The regression: a stale default used to point at a dead host."""
 
     from ai_smm.storage import StorageUploader
 
+    monkeypatch.delenv("STORAGE_MODE", raising=False)
+    monkeypatch.setenv("STORAGE_PUBLIC_BASE_URL", "https://media.test")
+    for name in (
+        "STORAGE_SSH_HOST",
+        "STORAGE_SSH_USER",
+        "STORAGE_REMOTE_ROOT",
+        "STORAGE_SSH_KEY_PATH",
+        "STORAGE_SSH_PASSWORD",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValueError, match="STORAGE_SSH_HOST"):
+        StorageUploader()
+
     monkeypatch.setenv("STORAGE_SSH_HOST", "storage.example.test")
+
+    with pytest.raises(ValueError, match="STORAGE_SSH_USER"):
+        StorageUploader()
+
     monkeypatch.setenv("STORAGE_SSH_USER", "deploy")
-    monkeypatch.setenv("STORAGE_SSH_PASSWORD", "irrelevant")
-    monkeypatch.delenv("STORAGE_SSH_KEY_PATH", raising=False)
-    monkeypatch.delenv("STORAGE_REMOTE_ROOT", raising=False)
-    monkeypatch.delenv("STORAGE_PUBLIC_BASE_URL", raising=False)
 
     with pytest.raises(ValueError, match="STORAGE_REMOTE_ROOT"):
         StorageUploader()
 
     monkeypatch.setenv("STORAGE_REMOTE_ROOT", "/srv/storage")
 
-    with pytest.raises(ValueError, match="STORAGE_PUBLIC_BASE_URL"):
+    with pytest.raises(ValueError, match="STORAGE_SSH_KEY_PATH"):
         StorageUploader()
 
 

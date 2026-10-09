@@ -41,7 +41,8 @@ ENV PYTHONUNBUFFERED=1 \
     TZ=UTC \
     PATH="/app/.venv/bin:$PATH" \
     AI_SMM_KNOWLEDGE_ROOT=/srv/ai-smm/knowledge \
-    AI_SMM_MEDIA_ROOT=/srv/ai-smm
+    AI_SMM_MEDIA_ROOT=/srv/ai-smm \
+    STORAGE_LOCAL_ROOT=/srv/ai-smm/media
 
 # A fixed uid/gid so a bind-mounted file's ownership is predictable.
 RUN groupadd --gid 10001 aismm \
@@ -54,8 +55,10 @@ COPY --from=builder --chown=root:root /app/src /app/src
 COPY --from=builder --chown=root:root /app/alembic /app/alembic
 COPY --from=builder --chown=root:root /app/alembic.ini /app/alembic.ini
 
-# Mount point for the read-only knowledge base.
-RUN mkdir -p /srv/ai-smm/knowledge && chown -R root:root /srv/ai-smm
+# Mount points: the knowledge base (read-only) and the media directory
+# the public storage serves from (the only writable path at runtime).
+RUN mkdir -p /srv/ai-smm/knowledge /srv/ai-smm/media \
+ && chown -R root:root /srv/ai-smm
 
 # Nothing in the image is writable by the runtime user; the container also
 # runs with read_only: true and a tmpfs for /tmp.

@@ -542,6 +542,101 @@ def _threads_factory() -> Any:
     return ThreadsPublisher()
 
 
+def cmd_token_check(args: argparse.Namespace, settings: Settings) -> int:
+    """Read-only probe of the Threads credentials. Publishes nothing.
+
+    Threads tokens are not accepted by Meta's /debug_token endpoint, so
+    there is no way to read an expiry date back from the token itself. What
+    can be established is whether the token is accepted right now, and
+    which account it belongs to -- which is the check worth running before
+    a live publish, because a token for the wrong account would publish to
+    the wrong place.
+    """
+
+    import os
+
+    import httpx
+
+    token = os.getenv("THREADS_ACCESS_TOKEN", "").strip()
+    base = os.getenv(
+        "THREADS_API_BASE_URL", "https://graph.threads.net"
+    ).rstrip("/")
+
+    if not token:
+        print(
+            "THREADS_ACCESS_TOKEN is not set. Publishing is impossible "
+            "until it is.",
+            file=sys.stderr,
+        )
+
+        return 1
+
+    print(f"token: present, {len(token)} characters (value not shown)")
+    print(f"api   : {base}")
+
+    try:
+        response = httpx.get(
+            f"{base}/v1.0/me",
+            params={"fields": "id,username"},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+    except httpx.HTTPError as exc:
+        print(f"could not reach the API: {type(exc).__name__}", file=sys.stderr)
+
+        return 1
+
+    if response.status_code != 200:
+        # The body can echo the token back, so it is redacted before print.
+        from ai_smm.logging_setup import get_redacting_filter
+
+        detail = get_redacting_filter().redact(response.text[:300])
+        print(
+            f"token rejected: HTTP {response.status_code} {detail}",
+            file=sys.stderr,
+        )
+
+        return 1
+
+    identity = response.json()
+
+    print(f"account: @{identity.get('username')} (id {identity.get('id')})")
+    print("status : token is accepted for reading")
+    print()
+    print(
+        "Publishing needs threads_content_publish in addition to "
+        "threads_basic. That scope cannot be verified without publishing, "
+        "so the first live post is the real test."
+    )
+    print(
+        "Long-lived tokens last 60 days and are refreshed in place at "
+        f"{base}/refresh_access_token?grant_type=th_refresh_token "
+        "(the token must be at least 24h old and not yet expired)."
+    )
+
+    if args.project:
+        print()
+        print("Recent posts on this account (read-only check):")
+
+        recent = httpx.get(
+            f"{base}/v1.0/me/threads",
+            params={"fields": "id,permalink,timestamp,media_type", "limit": 5},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=20,
+        )
+
+        if recent.status_code == 200:
+            for item in recent.json().get("data", []):
+                print(
+                    f"  {item.get('timestamp')} | {item.get('media_type')} "
+                    f"| {item.get('id')} | {item.get('permalink')}"
+                )
+        else:
+            print(f"  could not list posts: HTTP {recent.status_code}")
+
+    return 0
+
+
 def cmd_import(args: argparse.Namespace, settings: Settings) -> int:
     queue_path = Path(args.path).expanduser().resolve()
 
@@ -716,6 +811,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true")
     p.add_argument("--confirm-reviewed", action="store_true")
     p.set_defaults(func=cmd_publish_now)
+
+    p = sub.add_parser(
+        "token-check",
+        help="Verify the Threads credentials read-only (publishes nothing)",
+    )
+    p.add_argument(
+        "--project",
+        action="store_true",
+        help="Also list the most recent posts on the account",
+    )
+    p.set_defaults(func=cmd_token_check)
 
     p = sub.add_parser(
         "import-json", help="Import a legacy JSON queue (idempotent)"

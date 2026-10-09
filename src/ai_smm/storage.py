@@ -1,22 +1,42 @@
+"""Publishing media to the public HTTPS storage.
+
+Two modes, selected by STORAGE_MODE:
+
+* ``local`` -- the storage directory is bind-mounted into this process.
+  Used on the VPS, where the storage and the worker sit on the same host:
+  writing a file directly removes the SSH key, the root login and the
+  network round trip that SFTP would need.
+* ``sftp`` -- the historical mode, kept for a storage on another host and
+  for existing scripts. Unchanged behaviour.
+
+Both modes return the same public HTTPS URL and verify that the file is
+really reachable from outside before reporting success.
+"""
 from __future__ import annotations
 
 import mimetypes
 import os
+import tempfile
 from pathlib import Path, PurePosixPath
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import httpx
-import paramiko
 from dotenv import load_dotenv
+
+
+if TYPE_CHECKING:
+    import paramiko
 
 
 load_dotenv()
 
+MODE_LOCAL: Final[str] = "local"
+MODE_SFTP: Final[str] = "sftp"
+
 
 class StorageUploader:
     """
-    Uploads local files to the public file storage over SFTP
-    and returns a public HTTPS URL.
+    Publishes a file to the public storage and returns its HTTPS URL.
 
     Example:
 
@@ -24,10 +44,16 @@ class StorageUploader:
 
         url = uploader.upload(
             local_path="artifacts/post-image.jpg",
-            remote_path="ai-smm/ai-catalog-consultant/post-image.jpg",
+            remote_path="ai-smm/threads/post-image.jpg",
         )
 
-        print(url)
+    ``remote_path`` is always relative to the root of the public base URL,
+    in both modes, so callers do not need to know which mode is active.
+
+    In local mode the process is given write access to exactly one
+    directory, which corresponds to STORAGE_LOCAL_PREFIX under the public
+    base URL. A remote_path outside that prefix is refused: the uploader
+    cannot touch another project's media even if asked to.
     """
 
     # No default host or root: a stale default silently uploaded to the
@@ -35,9 +61,16 @@ class StorageUploader:
     # now required, so a misconfiguration fails loudly instead.
     DEFAULT_SSH_PORT: Final[int] = 22
 
+    #: Mode 644: the file is served by a web server running as another
+    #: user, so it must be world-readable.
+    PUBLISHED_FILE_MODE: Final[int] = 0o644
+
     def __init__(
         self,
         *,
+        mode: str | None = None,
+        local_root: str | Path | None = None,
+        local_prefix: str | None = None,
         ssh_host: str | None = None,
         ssh_port: int | None = None,
         ssh_user: str | None = None,
@@ -47,6 +80,26 @@ class StorageUploader:
         public_base_url: str | None = None,
         timeout: float = 30.0,
     ) -> None:
+        # Default stays sftp so existing scripts and .env files keep
+        # working without being edited.
+        self.mode = (
+            mode or os.getenv("STORAGE_MODE") or MODE_SFTP
+        ).strip().lower()
+
+        self.local_root = (
+            Path(local_root).expanduser()
+            if local_root
+            else Path(os.getenv("STORAGE_LOCAL_ROOT", "")).expanduser()
+            if os.getenv("STORAGE_LOCAL_ROOT")
+            else None
+        )
+
+        self.local_prefix = (
+            local_prefix
+            if local_prefix is not None
+            else os.getenv("STORAGE_LOCAL_PREFIX", "")
+        ).strip("/")
+
         self.ssh_host = ssh_host or os.getenv("STORAGE_SSH_HOST", "")
         self.ssh_port = ssh_port or int(
             os.getenv("STORAGE_SSH_PORT", str(self.DEFAULT_SSH_PORT))
@@ -68,6 +121,64 @@ class StorageUploader:
         self._validate_config()
 
     def _validate_config(self) -> None:
+        if self.mode not in {MODE_LOCAL, MODE_SFTP}:
+            raise ValueError(
+                f"STORAGE_MODE must be {MODE_LOCAL!r} or {MODE_SFTP!r}, "
+                f"got {self.mode!r}."
+            )
+
+        if not self.public_base_url:
+            raise ValueError(
+                "STORAGE_PUBLIC_BASE_URL is not configured."
+            )
+
+        if not self.public_base_url.startswith("https://"):
+            raise ValueError(
+                "STORAGE_PUBLIC_BASE_URL must be an https:// URL; Threads "
+                "refuses to fetch media over plain HTTP."
+            )
+
+        if self.mode == MODE_LOCAL:
+            self._validate_local_config()
+
+            return
+
+        self._validate_sftp_config()
+
+    def _validate_local_config(self) -> None:
+        if self.local_root is None:
+            raise ValueError(
+                "STORAGE_LOCAL_ROOT is not configured; local mode needs the "
+                "directory the public storage is mounted at."
+            )
+
+        if not self.local_prefix:
+            raise ValueError(
+                "STORAGE_LOCAL_PREFIX is not configured; local mode needs "
+                "the path STORAGE_LOCAL_ROOT corresponds to under "
+                "STORAGE_PUBLIC_BASE_URL, for example 'ai-smm/threads'."
+            )
+
+        if ".." in PurePosixPath(self.local_prefix).parts:
+            raise ValueError(
+                "STORAGE_LOCAL_PREFIX cannot contain '..'."
+            )
+
+        self.local_root = self.local_root.resolve()
+
+        if not self.local_root.is_dir():
+            raise FileNotFoundError(
+                f"STORAGE_LOCAL_ROOT is not a directory: {self.local_root}"
+            )
+
+        if not os.access(self.local_root, os.W_OK | os.X_OK):
+            raise PermissionError(
+                f"STORAGE_LOCAL_ROOT is not writable: {self.local_root}. "
+                "Grant the runtime user write access to exactly this "
+                "directory, and nothing above it."
+            )
+
+    def _validate_sftp_config(self) -> None:
         if not self.ssh_host:
             raise ValueError(
                 "STORAGE_SSH_HOST is not configured."
@@ -81,17 +192,6 @@ class StorageUploader:
         if not self.remote_root:
             raise ValueError(
                 "STORAGE_REMOTE_ROOT is not configured."
-            )
-
-        if not self.public_base_url:
-            raise ValueError(
-                "STORAGE_PUBLIC_BASE_URL is not configured."
-            )
-
-        if not self.public_base_url.startswith("https://"):
-            raise ValueError(
-                "STORAGE_PUBLIC_BASE_URL must be an https:// URL; Threads "
-                "refuses to fetch media over plain HTTP."
             )
 
         if not self.ssh_key_path and not self.ssh_password:
@@ -154,41 +254,16 @@ class StorageUploader:
 
         normalized_remote_path = self._normalize_remote_path(remote_path)
 
-        remote_file = str(
-            PurePosixPath(self.remote_root)
-            / PurePosixPath(normalized_remote_path)
-        )
-
-        remote_directory = str(
-            PurePosixPath(remote_file).parent
-        )
-
-        ssh_client = self._create_ssh_client()
-
-        try:
-            sftp = ssh_client.open_sftp()
-
-            try:
-                self._mkdir_recursive(
-                    sftp=sftp,
-                    remote_directory=remote_directory,
-                )
-
-                sftp.put(
-                    str(local_file),
-                    remote_file,
-                )
-
-                sftp.chmod(
-                    remote_file,
-                    0o644,
-                )
-
-            finally:
-                sftp.close()
-
-        finally:
-            ssh_client.close()
+        if self.mode == MODE_LOCAL:
+            self._write_local(
+                content=local_file.read_bytes(),
+                normalized_remote_path=normalized_remote_path,
+            )
+        else:
+            self._put_sftp(
+                local_file=local_file,
+                normalized_remote_path=normalized_remote_path,
+            )
 
         public_url = self.build_public_url(
             normalized_remote_path
@@ -219,13 +294,141 @@ class StorageUploader:
 
         normalized_remote_path = self._normalize_remote_path(remote_path)
 
+        if self.mode == MODE_LOCAL:
+            self._write_local(
+                content=content,
+                normalized_remote_path=normalized_remote_path,
+            )
+        else:
+            self._put_sftp_bytes(
+                content=content,
+                normalized_remote_path=normalized_remote_path,
+            )
+
+        public_url = self.build_public_url(
+            normalized_remote_path
+        )
+
+        if verify_public_url:
+            self.verify_url(public_url)
+
+        return public_url
+
+    # -- local mode -------------------------------------------------------
+
+    def _resolve_local_target(
+        self,
+        normalized_remote_path: str,
+    ) -> Path:
+        """Map a public path onto a file inside the one writable directory.
+
+        The prefix check is the containment guarantee: the process is
+        mounted at exactly one directory, and a remote_path belonging to a
+        different prefix is refused rather than silently redirected.
+        """
+
+        assert self.local_root is not None
+
+        path = PurePosixPath(normalized_remote_path)
+        prefix = PurePosixPath(self.local_prefix)
+
+        if not path.is_relative_to(prefix):
+            raise ValueError(
+                f"remote_path {normalized_remote_path!r} is outside the "
+                f"writable prefix {self.local_prefix!r}; local mode cannot "
+                "write there."
+            )
+
+        relative = path.relative_to(prefix)
+
+        if not relative.parts:
+            raise ValueError(
+                "remote_path must name a file, not the prefix itself."
+            )
+
+        target = (self.local_root / Path(*relative.parts)).resolve()
+
+        # resolve() has followed any symlink; re-check so a link planted
+        # inside the directory cannot be used to escape it.
+        if not target.is_relative_to(self.local_root):
+            raise ValueError(
+                f"remote_path {normalized_remote_path!r} resolves outside "
+                f"{self.local_root}."
+            )
+
+        return target
+
+    def _write_local(
+        self,
+        *,
+        content: bytes,
+        normalized_remote_path: str,
+    ) -> Path:
+        """Publish bytes atomically.
+
+        Meta fetches the URL moments after the post is created, so a reader
+        must never see a half-written file: the bytes land in a temporary
+        file in the same directory and are moved into place with a rename,
+        which is atomic within one filesystem.
+        """
+
+        target = self._resolve_local_target(normalized_remote_path)
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".part",
+            dir=target.parent,
+        )
+        temporary_path = Path(temporary_name)
+
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            # mkstemp creates the file 0600; the web server runs as another
+            # user and has to be able to read it.
+            os.chmod(temporary_path, self.PUBLISHED_FILE_MODE)
+
+            os.replace(temporary_path, target)
+
+            directory = os.open(target.parent, os.O_RDONLY)
+
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+
+        finally:
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+        return target
+
+    # -- sftp mode --------------------------------------------------------
+
+    def _remote_paths(
+        self,
+        normalized_remote_path: str,
+    ) -> tuple[str, str]:
         remote_file = str(
             PurePosixPath(self.remote_root)
             / PurePosixPath(normalized_remote_path)
         )
 
-        remote_directory = str(
-            PurePosixPath(remote_file).parent
+        return remote_file, str(PurePosixPath(remote_file).parent)
+
+    def _put_sftp(
+        self,
+        *,
+        local_file: Path,
+        normalized_remote_path: str,
+    ) -> None:
+        remote_file, remote_directory = self._remote_paths(
+            normalized_remote_path
         )
 
         ssh_client = self._create_ssh_client()
@@ -239,16 +442,8 @@ class StorageUploader:
                     remote_directory=remote_directory,
                 )
 
-                with sftp.file(
-                    remote_file,
-                    mode="wb",
-                ) as remote_handle:
-                    remote_handle.write(content)
-
-                sftp.chmod(
-                    remote_file,
-                    0o644,
-                )
+                sftp.put(str(local_file), remote_file)
+                sftp.chmod(remote_file, self.PUBLISHED_FILE_MODE)
 
             finally:
                 sftp.close()
@@ -256,14 +451,37 @@ class StorageUploader:
         finally:
             ssh_client.close()
 
-        public_url = self.build_public_url(
+    def _put_sftp_bytes(
+        self,
+        *,
+        content: bytes,
+        normalized_remote_path: str,
+    ) -> None:
+        remote_file, remote_directory = self._remote_paths(
             normalized_remote_path
         )
 
-        if verify_public_url:
-            self.verify_url(public_url)
+        ssh_client = self._create_ssh_client()
 
-        return public_url
+        try:
+            sftp = ssh_client.open_sftp()
+
+            try:
+                self._mkdir_recursive(
+                    sftp=sftp,
+                    remote_directory=remote_directory,
+                )
+
+                with sftp.file(remote_file, mode="wb") as remote_handle:
+                    remote_handle.write(content)
+
+                sftp.chmod(remote_file, self.PUBLISHED_FILE_MODE)
+
+            finally:
+                sftp.close()
+
+        finally:
+            ssh_client.close()
 
     def build_public_url(
         self,
@@ -330,9 +548,9 @@ class StorageUploader:
                 f"received: {content_type}"
             )
 
-    def _create_ssh_client(
-        self,
-    ) -> paramiko.SSHClient:
+    def _create_ssh_client(self) -> paramiko.SSHClient:
+        import paramiko
+
         client = paramiko.SSHClient()
 
         client.load_system_host_keys()

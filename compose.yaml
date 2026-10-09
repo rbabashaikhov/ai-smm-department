@@ -25,8 +25,12 @@ x-common: &common
   volumes:
     # Knowledge base and media assets: read-only, the app never writes here.
     - ${AI_SMM_KNOWLEDGE_HOST_PATH:-/srv/ai-smm/knowledge}:/srv/ai-smm/knowledge:ro
-    # SFTP key for the media storage, root-owned 600 on the host.
-    - ${AI_SMM_SSH_KEY_HOST_PATH:-/srv/ai-smm/ssh/id_storage}:/run/secrets/storage_key:ro
+    # The ONE writable path: the directory the public storage serves this
+    # project's Threads media from. Deliberately not /srv/file-storage --
+    # the worker must not be able to touch another project's media, nor the
+    # rest of this project's. Writable by gid 10001 on the host; the
+    # uploader additionally refuses any path outside its own prefix.
+    - ${AI_SMM_MEDIA_HOST_PATH:?set AI_SMM_MEDIA_HOST_PATH to the directory the public storage serves this project's media from}:/srv/ai-smm/media:rw
   read_only: true
   tmpfs:
     - /tmp:size=64m,mode=1777
