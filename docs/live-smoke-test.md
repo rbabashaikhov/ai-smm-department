@@ -7,6 +7,11 @@ on. Nothing here is automatic.
 **Target:** publication 2 of `ai-catalog-consultant`, format `image`.
 **Not in scope:** publication 3, and the scheduler. Both stay parked.
 
+Steps 1 to 3 were completed on 2026-10-09: the owner approved the original
+text and `telegram-03-comparison.jpg`, the token is installed on the VPS and
+verified, and the media path was exercised end to end. What remains is step
+4 onwards.
+
 A real publish is irreversible from the command line. Deleting the post
 afterwards is a manual action in the Threads app.
 
@@ -35,18 +40,30 @@ Expected, and worth actually reading rather than skimming:
 | | |
 |---|---|
 | publication 1 | `published`, carries `threads_post_id` — out of reach |
-| publication 2 | `approved`, `sched=none`, `reviewed=no` |
+| publication 2 | `approved`, `sched=none`, `reviewed=**yes**` |
 | publication 3 | `approved`, `sched=none`, `reviewed=no` |
 | `dry_run mode` | `True` |
+
+Publication 2 is already reviewed, so the only gate left is
+`AI_SMM_DRY_RUN`, plus the fact that it is not scheduled. Both have to be
+opened deliberately, in steps 4 and 5.
 
 If anything is already `scheduled`, stop and find out why before going on.
 
 ---
 
-## Step 1 — you approve the text and the image
+## Step 1 — approve the text and the image — DONE 2026-10-09
+
+Already recorded: the owner confirmed the original caption and
+`telegram-03-comparison.jpg`, including the brand names and store links
+visible in the screenshot, which are intentional and are consistent with
+publication 1. The audit log holds the approval.
+
+To re-read what was approved:
 
 ```bash
 docker compose --profile cli run --rm -T cli show 2 < /dev/null
+docker compose --profile cli run --rm -T cli publish-now 2 < /dev/null
 ```
 
 Read the caption in full. Open the image:
@@ -70,15 +87,20 @@ docker compose --profile cli run --rm -T cli approve 2 \
 
 ---
 
-## Step 2 — credentials
+## Step 2 — credentials — DONE 2026-10-09
 
-The token is not on the server yet. Put it there by hand; it must not pass
-through Git, a log, or a shell history file.
+`THREADS_ACCESS_TOKEN` is installed in `/root/ai-smm/ai-smm.env`, mode 600,
+root-owned. It was piped over the SSH channel on stdin, so it never reached
+a command line, a shell history or a log; it is in no other file on the
+host.
+
+To replace or rotate it later, edit the file in an editor — not with
+`echo`, which lands in `~/.bash_history` — and recreate the container:
 
 ```bash
-# On the VPS, in an editor -- not with echo, which lands in ~/.bash_history
 nano /root/ai-smm/ai-smm.env     # set THREADS_ACCESS_TOKEN=...
 chmod 600 /root/ai-smm/ai-smm.env
+docker compose up -d --force-recreate worker
 ```
 
 Verify it read-only, without publishing anything:
@@ -100,11 +122,19 @@ token lacks it, step 5 fails with an HTTP 4xx and the record goes to
 
 ---
 
-## Step 3 — media
+## Step 3 — media — DONE 2026-10-09
 
-The media path was verified end to end on 2026-10-09: the worker wrote the
-post-2 image into `/srv/file-storage/ai-smm/threads` and it was fetched from
-outside the VPS as `HTTP 200`, `image/jpeg`, byte-identical to the source.
+Verified end to end: `ThreadsPublisher.upload_image` wrote the approved
+original into `/srv/file-storage/ai-smm/threads`, and the result was fetched
+from outside the VPS as `HTTP 200`, `image/jpeg`, 159 554 bytes,
+byte-identical to the source (sha256 `4dd28b93…`).
+
+The artifact of that check is still published. The live publish uploads
+under its own unique filename, so the artifact can be deleted at any time:
+
+```bash
+rm /srv/file-storage/ai-smm/threads/20261009T114652Z-46f9a834-telegram-03-comparison.jpg
+```
 
 Re-confirm the mount is live before publishing:
 

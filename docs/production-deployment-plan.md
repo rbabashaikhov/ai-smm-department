@@ -954,7 +954,7 @@ Traefik, firewall, DNS, обновление Postgres.
 | БД | `ai_smm` в существующем `<postgres-container>`, роль `ai_smm` (NOSUPERUSER, NOCREATEDB) |
 | Миграция | `a3fbcef157c3`, применена разово через `compose run migrate` |
 | Backup | `/root/ai-smm/backup.sh`, cron 03:30, retention 14 дней, restore проверен |
-| Режим | `AI_SMM_DRY_RUN=true`; `THREADS_ACCESS_TOKEN` и `OPENAI_API_KEY` на сервере **пустые** |
+| Режим | `AI_SMM_DRY_RUN=true`; `THREADS_ACCESS_TOKEN` установлен (mode 600), `OPENAI_API_KEY` пуст |
 | Медиа | `STORAGE_MODE=local`; смонтирован только `/srv/file-storage/ai-smm/threads` (rw), `root:aismm 2775`; SSH-ключ больше не нужен |
 
 ### 15.2 Отличия от плана
@@ -988,12 +988,16 @@ Traefik, firewall, DNS, обновление Postgres.
 
 ### 15.4 Что осталось до первой реальной публикации
 
-1. **Q4** — подтверждение конкретного поста (кандидат: пост 2, формат `image`).
-2. **Credentials на сервере** — `THREADS_ACCESS_TOKEN`, `STORAGE_SSH_HOST`,
-   `STORAGE_SSH_USER` сейчас пустые.
-3. **SFTP-ключ для медиа** — `/srv/ai-smm/ssh/id_storage` пустой placeholder;
-   см. [operations.md §9](operations.md).
-4. **`AI_SMM_DRY_RUN=false`** — переключается только под наблюдением.
+| Шаг | Статус |
+|---|---|
+| Утверждение текста и изображения поста 2 | **выполнено 2026-10-09**, `human_reviewed=true`, зафиксировано в `audit_log` |
+| `THREADS_ACCESS_TOKEN` на сервере | **установлен** 2026-10-09, mode 600, проверен read-only |
+| Медиа | **проверено** сквозным preflight: публичный HTTPS отдаёт оригинал побайтно |
+| Адресный dry-run поста 2 | **выполнен**, две попытки `preflight/dry_run`, фаза `publish` не достигалась |
+| `AI_SMM_DRY_RUN=false` | **не переключён** — ожидает отдельной команды |
+| Явная команда публикации | **не отдана** |
+
+Процедура: [live-smoke-test.md](live-smoke-test.md), начиная с шага 4.
 
 ### 15.5 Известные ограничения
 
