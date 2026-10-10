@@ -937,6 +937,89 @@ def cmd_audit(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_user_create_owner(
+    args: argparse.Namespace, settings: Settings
+) -> int:
+    """Create the first user of a project, as its owner.
+
+    This is the only way a user is created: the API has no registration
+    endpoint. The password is read from the terminal with getpass, never
+    from an argument or an environment variable, so it cannot land in the
+    shell history or in a process listing. There is no default password.
+
+    The user and the owner membership are written in one transaction: a
+    user with no membership could sign in and see nothing, which is a
+    half-finished bootstrap that looks like a working one.
+    """
+
+    from ai_smm.application.users import (
+        DuplicateUserError,
+        InvalidEmailError,
+        ProjectNotFoundError,
+        create_owner,
+        normalize_email,
+    )
+    from ai_smm.security.passwords import (
+        MIN_PASSWORD_LENGTH,
+        WeakPasswordError,
+    )
+
+    try:
+        email = normalize_email(args.email)
+    except InvalidEmailError as exc:
+        print(f"error: {exc}")
+
+        return 2
+
+    display_name = (args.display_name or "").strip()
+
+    if not display_name:
+        print("error: --display-name must not be empty.")
+
+        return 2
+
+    password = getpass.getpass(
+        f"Password for {email} (min {MIN_PASSWORD_LENGTH} chars): "
+    )
+    confirmation = getpass.getpass("Repeat password: ")
+
+    if password != confirmation:
+        print("error: the two passwords do not match.")
+
+        return 2
+
+    try:
+        with session_scope(settings) as session:
+            user = create_owner(
+                session,
+                email=email,
+                display_name=display_name,
+                project_id=args.project,
+                password=password,
+            )
+            user_id = str(user.id)
+    except WeakPasswordError as exc:
+        print(f"error: {exc}")
+
+        return 2
+    except (DuplicateUserError, ProjectNotFoundError) as exc:
+        print(f"error: {exc}")
+
+        return 1
+    finally:
+        # The plaintext is of no further use; drop the local reference
+        # rather than leave it bound for the rest of the process.
+        del password, confirmation
+
+    print(f"owner created: {display_name} <{email}>")
+    print(f"user id       : {user_id}")
+    print(f"project       : {args.project}")
+    print("role          : owner")
+    print("Audit entry written as actor system:bootstrap.")
+
+    return 0
+
+
 def cmd_stats(args: argparse.Namespace, settings: Settings) -> int:
     from sqlalchemy import func
 
@@ -1118,6 +1201,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("audit", help="Show the audit log")
     p.add_argument("--limit", type=int, default=40)
     p.set_defaults(func=cmd_audit)
+
+    p = sub.add_parser(
+        "user",
+        help="Manage API users (no publishing, no network access)",
+    )
+    user_sub = p.add_subparsers(dest="user_command", required=True)
+
+    p = user_sub.add_parser(
+        "create-owner",
+        help=(
+            "Create a user and make them owner of an existing project; "
+            "prompts for the password, never takes it as an argument"
+        ),
+    )
+    p.add_argument("--email", required=True)
+    p.add_argument("--display-name", required=True)
+    p.add_argument(
+        "--project",
+        required=True,
+        help="Id of an existing project (see `ai-smm queue`)",
+    )
+    p.set_defaults(func=cmd_user_create_owner)
 
     p = sub.add_parser("stats", help="Queue counters")
     p.set_defaults(func=cmd_stats)

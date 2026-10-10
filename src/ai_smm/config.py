@@ -98,6 +98,13 @@ class Settings:
     # Health
     health_stale_factor: int
 
+    # HTTP API (control plane). The API never publishes: it reads and
+    # writes the queue's metadata, and the worker remains the only
+    # process that talks to Threads.
+    api_session_lifetime_seconds: int
+    api_session_idle_seconds: int
+    api_cookie_secure: bool
+
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
         default=(
@@ -159,6 +166,15 @@ def load_settings() -> Settings:
         log_level=(_env("LOG_LEVEL", "INFO") or "INFO").upper(),
         log_format=(_env("LOG_FORMAT", "json") or "json").lower(),
         health_stale_factor=_env_int("AI_SMM_HEALTH_STALE_FACTOR", 3),
+        api_session_lifetime_seconds=_env_int(
+            "AI_SMM_API_SESSION_LIFETIME_SECONDS", 7 * 24 * 3600
+        ),
+        api_session_idle_seconds=_env_int(
+            "AI_SMM_API_SESSION_IDLE_SECONDS", 24 * 3600
+        ),
+        # Secure by default: an http deployment has to say so explicitly
+        # rather than lose the flag by forgetting to set it.
+        api_cookie_secure=_env_bool("AI_SMM_API_COOKIE_SECURE", True),
     )
 
 

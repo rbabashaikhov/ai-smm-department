@@ -310,6 +310,7 @@ Publication status: blocked
 | [docs/operations.md](docs/operations.md) | команды эксплуатации, разбор `needs_review`, backup, rollback |
 | [docs/live-smoke-test.md](docs/live-smoke-test.md) | пошаговая процедура первой реальной публикации |
 | [docs/content-series.md](docs/content-series.md) | контентные серии: модель, стратегии, регистрация существующей серии |
+| [docs/api.md](docs/api.md) | HTTP API (control plane): локальный запуск, сессии, CSRF, RBAC, ошибки |
 
 ### Устройство
 
@@ -351,6 +352,51 @@ Publication status: blocked
   post ID. Ожидание очереди не расходует попытки. Членство в серии
   необязательно — одиночные публикации работают как прежде.
 
+### HTTP API — control plane
+
+Рядом с worker существует FastAPI-приложение. Оно **не публикует**:
+читает и редактирует метаданные вокруг очереди — пользователей,
+membership, настройки проекта. Публикацию исполняет только worker.
+
+- Нет `POST /publish`, `POST /threads/publish` и эквивалентов; тест
+  проверяет, что ни один route не содержит слова `publish`, а второй —
+  что ни один модуль `src/ai_smm/api/` не импортирует
+  `ai_smm.publishing` или `ai_smm.worker`.
+- Единственный путь в Threads остаётся прежним: worker резервирует
+  запись через `FOR UPDATE SKIP LOCKED`, пишет attempt и вызывает API.
+  Именно это делает осмысленными три барьера от дублей.
+- **Серверные сессии, не JWT.** Cookie `smm_session` (HttpOnly,
+  SameSite=Lax, Path=/, Secure в production). В БД хранится только
+  SHA-256 от токена: дамп `user_sessions` нельзя воспроизвести как
+  логин. Абсолютный срок 7 дней, idle timeout 24 часа, logout отзывает
+  сессию немедленно.
+- **Argon2id** для паролей (argon2-cffi), собственной криптографии нет.
+- **CSRF** обязателен для POST/PUT/PATCH/DELETE и подключён как
+  зависимость всего роутера `/api/v1`, поэтому новый endpoint защищён по
+  умолчанию. Единственное исключение — login, у которого ещё нет сессии.
+  Токен не хранится, а выводится из session token
+  (`HMAC-SHA256`): он одинаков для всех вкладок одной сессии, не
+  раскрывает cookie и перестаёт работать вместе с сессией.
+- **RBAC** `viewer < editor < admin < owner`. Порядок всегда один:
+  проект из БД → membership → проверка роли → действие; `project_id` из
+  тела запроса не используется никогда. Проект без membership отвечает
+  404, как и несуществующий, — API нельзя использовать для перебора id.
+- **Публичной регистрации нет.** Первый пользователь создаётся в консоли:
+  `ai-smm user create-owner` (пароль спрашивается через `getpass`,
+  дефолтного пароля нет).
+
+```bash
+export AI_SMM_API_COOKIE_SECURE=false   # только для локального http
+uvicorn ai_smm.api.app:create_app --factory --host 127.0.0.1 --port 8000
+
+curl -s http://127.0.0.1:8000/health/live    # без БД и внешних API
+curl -s http://127.0.0.1:8000/health/ready   # только SELECT 1
+```
+
+На этом этапе API развёрнут не был: отдельного compose-сервиса нет,
+production-миграция не выполнялась. Подробности — в
+[docs/api.md](docs/api.md).
+
 ### Локальный запуск
 
 ```bash
@@ -372,6 +418,8 @@ ai-smm approve 2                # подтвердить проверку кон
 ai-smm schedule 2 --at "+30m"   # поставить в расписание
 ai-smm reconcile 2 --published 17900000000000123
 ai-smm audit                    # журнал действий
+ai-smm user create-owner --email o@example.com \
+    --display-name "Operator" --project my-project
 ```
 
 Публикация требует двух независимых подтверждений: `human_reviewed` у
@@ -389,10 +437,13 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-128 тестов, все внешние API замоканы. Набор покрывает миграции,
+343 теста, все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
-`needs_review`, dry-run и отсутствие секретов в логах.
+`needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
+хеширование паролей, жизненный цикл сессии, CSRF, RBAC, изоляцию
+проектов, optimistic locking, health endpoints и отсутствие publish
+endpoint.
 
 Набор отказывается работать с базой, в имени которой нет `test`: он
 удаляет таблицы, и указание на рабочую базу уничтожило бы очередь.

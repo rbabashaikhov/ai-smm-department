@@ -7,6 +7,7 @@ converted on the way in.
 from __future__ import annotations
 
 import enum
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -22,6 +23,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
 from sqlalchemy import (
@@ -34,6 +36,12 @@ from sqlalchemy.orm import (
     mapped_column,
     relationship,
 )
+
+
+#: Defaults for a project's editorial settings. The worker does not read
+#: them; they tell the control plane how to present and plan content.
+DEFAULT_PROJECT_TIMEZONE = "Europe/Moscow"
+DEFAULT_PROJECT_LANGUAGE = "ru"
 
 
 class Base(DeclarativeBase):
@@ -111,6 +119,20 @@ class SeriesStatus(str, enum.Enum):
     CANCELLED = "cancelled"
 
 
+class MembershipRole(str, enum.Enum):
+    """What a user may do inside one project.
+
+    The values are ordered: every role contains the rights of the ones
+    before it. The ordering lives in ai_smm.security.rbac so that a
+    comparison is never written by hand at a call site.
+    """
+
+    VIEWER = "viewer"
+    EDITOR = "editor"
+    ADMIN = "admin"
+    OWNER = "owner"
+
+
 class AttemptOutcome(str, enum.Enum):
     SUCCESS = "success"
     ERROR = "error"
@@ -145,6 +167,12 @@ attempt_phase_enum = SAEnum(
     values_callable=lambda enum_cls: [m.value for m in enum_cls],
 )
 
+membership_role_enum = SAEnum(
+    MembershipRole,
+    name="membership_role",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
 publishing_strategy_enum = SAEnum(
     PublishingStrategy,
     name="publishing_strategy",
@@ -163,12 +191,26 @@ class Project(Base):
 
     id: Mapped[str] = mapped_column(String(120), primary_key=True)
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
     knowledge_path: Mapped[str] = mapped_column(Text, nullable=False)
     default_platform: Mapped[str] = mapped_column(
         String(40), nullable=False, server_default="threads"
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
+    )
+    #: Operator defaults for new content; the worker reads neither.
+    default_timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, server_default=DEFAULT_PROJECT_TIMEZONE
+    )
+    default_language: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=DEFAULT_PROJECT_LANGUAGE
+    )
+    #: Optimistic concurrency for edits to the project record itself.
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -182,6 +224,15 @@ class Project(Base):
     )
     series: Mapped[list[ContentSeries]] = relationship(
         back_populates="project"
+    )
+    memberships: Mapped[list[ProjectMembership]] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+    )
+    settings: Mapped[ProjectSettings | None] = relationship(
+        back_populates="project",
+        cascade="all, delete-orphan",
+        uselist=False,
     )
 
 
@@ -528,3 +579,180 @@ class AuditLog(Base):
     details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
+
+
+# --- control plane ------------------------------------------------------
+# Identity, sessions and per-project settings exist for the HTTP API only.
+# The worker reads none of these tables, so its behaviour is unchanged by
+# their presence.
+
+
+class User(Base):
+    """An operator who can sign in to the API.
+
+    There is no public registration: a user is created by an operator
+    command (`ai-smm user create-owner`). The email is stored already
+    normalised (trimmed, lowercased) and the uniqueness constraint is on
+    that normalised form, so no CITEXT extension is required.
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("email", name="uq_users_email"),
+        CheckConstraint("email = lower(email)", name="ck_users_email_lower"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    #: Argon2id, produced by ai_smm.security.passwords. Never a raw password.
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    sessions: Mapped[list[UserSession]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    memberships: Mapped[list[ProjectMembership]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class UserSession(Base):
+    """One server-side session.
+
+    The raw session token exists only in the client cookie: this table
+    stores its SHA-256 hash, so a dump of the database cannot be replayed
+    as a login. The CSRF token is not stored at all -- it is an HMAC of
+    the session token, recomputed from the cookie on each request, which
+    is what keeps it identical across a session's browser tabs.
+
+    Two independent deadlines apply. expires_at is the absolute lifetime,
+    fixed at login. Idleness is derived from last_seen_at by the session
+    service, so the window can be changed without a migration.
+    """
+
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_user_sessions_token_hash"),
+        Index("ix_user_sessions_user", "user_id"),
+        Index("ix_user_sessions_expires_at", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    #: SHA-256 hex digest of the session token.
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    user: Mapped[User] = relationship(back_populates="sessions")
+
+
+class ProjectMembership(Base):
+    """What one user may do in one project.
+
+    Authorisation is always derived from a row here, never from anything
+    the client sends: the project comes from the URL and is loaded from
+    the database, then this table decides.
+    """
+
+    __tablename__ = "project_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "user_id", name="uq_project_memberships_pair"
+        ),
+        Index("ix_project_memberships_user", "user_id"),
+        Index("ix_project_memberships_project", "project_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[MembershipRole] = mapped_column(
+        membership_role_enum, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    project: Mapped[Project] = relationship(back_populates="memberships")
+    user: Mapped[User] = relationship(back_populates="memberships")
+
+
+class ProjectSettings(Base):
+    """Editorial configuration of one project, edited through the API.
+
+    The row is optional: a project that predates this table has no row and
+    the API answers with the documented defaults. The first PATCH creates
+    it. version is the optimistic concurrency token -- a PATCH states the
+    version it read, and a stale number is refused rather than merged.
+    """
+
+    __tablename__ = "project_settings"
+
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    content_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    publishing_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    brand_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    project: Mapped[Project] = relationship(back_populates="settings")
