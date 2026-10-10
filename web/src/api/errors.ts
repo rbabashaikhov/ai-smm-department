@@ -19,6 +19,8 @@ export const ErrorCode = {
   PUBLICATION_NOT_EDITABLE: "PUBLICATION_NOT_EDITABLE",
   DEPENDENCY_UNAVAILABLE: "DEPENDENCY_UNAVAILABLE",
   METHOD_NOT_ALLOWED: "METHOD_NOT_ALLOWED",
+  /** The deployment runs read-only; no role can make the change. */
+  MUTATIONS_DISABLED: "MUTATIONS_DISABLED",
   INTERNAL_ERROR: "INTERNAL_ERROR",
   // Client-side only: the request never produced an HTTP response, or the
   // response was not the API's envelope (a proxy page, for example).

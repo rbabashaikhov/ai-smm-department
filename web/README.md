@@ -31,6 +31,7 @@ No Redux, no SSR, no UI framework.
 # 1. The API, against a local database (never production):
 export AI_SMM_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_dev
 export AI_SMM_API_COOKIE_SECURE=false      # plain http only
+export AI_SMM_API_MUTATIONS_ENABLED=true   # local DB only; default is read-only
 uvicorn ai_smm.api.app:create_app --factory --host 127.0.0.1 --port 8000
 
 # 2. The UI:
@@ -139,6 +140,15 @@ person presses it again.
   commands, no queue commands. admin/owner: everything, including
   schedule / reschedule / cancel and audit. The backend checks every
   request regardless.
+- **A read-only deployment offers no write control at all.** When
+  `GET /auth/me` reports `control_plane.mutations_enabled: false` — or
+  does not report it — every role, owner included, sees only reads and a
+  "Только чтение" notice. A `MUTATIONS_DISABLED` refusal is shown as
+  read-only, not as a role problem.
+- **The worker's mode is never guessed.** The dashboard shows what
+  `/operations/summary` reports as `worker_mode`: `LIVE` or `DRY RUN` only
+  with a source, otherwise `UNKNOWN` with a warning that a scheduled post
+  may go out. The API's own `api_dry_run` is shown labelled as the API's.
 
 ## Known limits
 

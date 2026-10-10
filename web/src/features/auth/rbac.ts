@@ -2,7 +2,10 @@
 // checks the same rules on every request and remains the authority. A
 // control shown by mistake still gets a 403.
 //
-// Mirrors the RBAC table in docs/api.md.
+// Mirrors the RBAC table in docs/api.md. On a read-only deployment
+// (control_plane.mutations_enabled = false) no role is offered a write
+// control at all -- the server refuses them with MUTATIONS_DISABLED, so
+// offering one would only produce an error.
 
 import type { Role } from "../../types/api";
 
@@ -11,11 +14,13 @@ const RANK: Record<Role, number> = { viewer: 0, editor: 1, admin: 2, owner: 3 };
 export const atLeast = (role: Role | undefined, minimum: Role): boolean =>
   role !== undefined && RANK[role] >= RANK[minimum];
 
-export const permissions = (role: Role | undefined) => ({
+export const permissions = (role: Role | undefined, mutationsEnabled: boolean) => ({
+  /** The deployment refuses every change, whatever the role. */
+  readOnly: !mutationsEnabled,
   /** create item / revision, submit, approve, reject, materialize */
-  canEditContent: atLeast(role, "editor"),
+  canEditContent: mutationsEnabled && atLeast(role, "editor"),
   /** schedule / reschedule / cancel */
-  canCommandPublications: atLeast(role, "admin"),
+  canCommandPublications: mutationsEnabled && atLeast(role, "admin"),
   canReadAudit: atLeast(role, "admin"),
 });
 

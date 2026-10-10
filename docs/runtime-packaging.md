@@ -2,7 +2,8 @@
 
 This document describes how the private SMM Control Center is packaged as
 containers and how to run that package locally against a disposable
-database. It covers SMM-024A only: nothing here deploys to a server.
+database. It covers SMM-024A and the SMM-024B.2 read-only control plane;
+nothing here deploys to a server.
 
 ## 1. Topology
 
@@ -107,9 +108,10 @@ reads no `env_file`.
 | Variable | Local runtime value | Notes |
 |---|---|---|
 | `AI_SMM_DATABASE_URL` | the local `postgres` service (literal) | not interpolated: a `.env` file next to the compose file cannot redirect it |
-| `AI_SMM_DRY_RUN` | `true` (literal) | |
+| `AI_SMM_DRY_RUN` | `true` (literal) | the **API process's** flag, reported as `api_dry_run`; it gates no API command and is not the worker's mode |
 | `AI_SMM_API_COOKIE_SECURE` | `${SMM_RUNTIME_COOKIE_SECURE:-false}` | `false` for plain-HTTP localhost; HTTPS deployments use `true` |
 | `AI_SMM_API_DOCS_ENABLED` | `${SMM_RUNTIME_API_DOCS_ENABLED:-false}` | the code default stays `true` for local development |
+| `AI_SMM_API_MUTATIONS_ENABLED` | `${SMM_RUNTIME_API_MUTATIONS_ENABLED:-false}` | read-only Control Center; the code default is `false` too. See §7 |
 | `OPENAI_API_KEY`, `THREADS_ACCESS_TOKEN` | empty | defence in depth |
 | `THREADS_API_BASE_URL` | `http://127.0.0.1:9` | unroutable, defence in depth |
 
@@ -122,6 +124,7 @@ production file uses:
 | `SMM_RUNTIME_TAG` | `local` |
 | `SMM_RUNTIME_COOKIE_SECURE` | `false` |
 | `SMM_RUNTIME_API_DOCS_ENABLED` | `false` |
+| `SMM_RUNTIME_API_MUTATIONS_ENABLED` | `false` — `true` only to edit the disposable local database |
 
 The session cookie is unchanged: `smm_session`, HttpOnly, `SameSite=Lax`,
 `Path=/`. The browser talks to one origin, so there is no CORS
@@ -177,7 +180,12 @@ uv run python scripts/runtime_smoke.py --base-url http://127.0.0.1:8088 \
 It checks the SPA and its fallback, that unknown `/api` and `/health`
 paths are API 404 JSON, the health probes through the proxy, docs
 on/off (`--expect-docs`), request-id propagation, cookie attributes, CSRF
-enforcement and session revocation. It never publishes or schedules.
+enforcement and session revocation. With a session it also checks the
+read-only gate (`--expect-mutations`, default `disabled`): `/auth/me`
+reports the mode, and a cancel of publication `0` — an id that never
+exists — is refused with `MUTATIONS_DISABLED` (or is a 404 with mutations
+on). It never publishes or schedules, and writes nothing beyond its own
+login/logout.
 
 ### Teardown
 
@@ -197,3 +205,35 @@ target, the API target running uvicorn only, a Node-free web image, API
 prefixes without SPA fallback, and 404 for missing assets.
 
 `tests/test_api_docs_config.py` covers `AI_SMM_API_DOCS_ENABLED`.
+`tests/test_runtime_packaging.py` also pins the read-only default of
+`AI_SMM_API_MUTATIONS_ENABLED`, and `tests/test_api_mutation_gate.py`
+covers the gate itself.
+
+## 7. Read-only Control Center and worker mode
+
+The packaged Control Center is **read-only** (SMM-024B.2,
+[ADR](adr/automation-and-publication-safety.md)). With
+`AI_SMM_API_MUTATIONS_ENABLED=false`:
+
+- every unsafe `/api/v1` request is refused with 403 `MUTATIONS_DISABLED`
+  for every role, owner included, and the database is left unchanged;
+- login and logout still work: they are the gate's only allowlist;
+- reading — projects, queue, content, attempts, audit — works as before;
+- the UI offers no write control and shows a read-only notice. It reads
+  the mode from `GET /api/v1/auth/me` (`control_plane.mutations_enabled`);
+  the server enforces it regardless.
+
+Details, the allowlist and the order of checks: [api.md, Read-only
+mode](api.md#read-only-mode).
+
+**API dry-run is not the worker's mode.** `AI_SMM_DRY_RUN=true` in this
+runtime is the API process's own setting. It gates nothing the API does,
+and the API runs separately from the worker, so it says nothing about
+whether the worker publishes. `/operations/summary` therefore reports it
+as `api_dry_run`, and reports the worker as `worker_mode: "unknown"` —
+there is not yet a source the API can verify. The dashboard shows
+**UNKNOWN** and states that a scheduled publication may be sent. It shows
+`LIVE` or `DRY RUN` only if the API reports one with its source.
+
+The switch belongs to the API alone: the worker never reads it, so turning
+it on or off neither stops nor starts publishing.

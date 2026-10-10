@@ -8,13 +8,58 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { Card, Loading, PageHeader, StatusBadge } from "../components/ui";
 import { useProject, useReportActiveProject } from "../features/projects/hooks";
 import { formatDateTime } from "../lib/time";
-import { CONTENT_STATUSES, PUBLICATION_STATUSES } from "../types/api";
+import { CONTENT_STATUSES, PUBLICATION_STATUSES, type OperationsSummary } from "../types/api";
 
 function Metric({ label, value, to }: { label: string; value: ReactNode; to?: string }) {
   return (
     <div className="metric">
       <div className="metric-label">{label}</div>
       <div className="metric-value">{to ? <Link to={to}>{value}</Link> : value}</div>
+    </div>
+  );
+}
+
+/**
+ * What the worker will do with a due publication, as the API reports it.
+ *
+ * LIVE / DRY RUN only when the API names a verified source. Otherwise
+ * UNKNOWN -- and never derived from api_dry_run, which is the API
+ * process's own setting and says nothing about the worker.
+ */
+function WorkerMode({ summary }: { summary: OperationsSummary }) {
+  const apiDryRun = (
+    <div className="muted small">
+      AI_SMM_DRY_RUN процесса API: <code>{String(summary.api_dry_run)}</code> — относится только к
+      API, не к worker.
+    </div>
+  );
+
+  if (summary.worker_mode === "live") {
+    return (
+      <div className="banner banner-error" role="status" data-testid="worker-mode">
+        Worker: <strong>LIVE</strong> — запланированные публикации отправляются в Threads.
+        {summary.worker_mode_source ? ` Источник: ${summary.worker_mode_source}.` : null}
+        {apiDryRun}
+      </div>
+    );
+  }
+
+  if (summary.worker_mode === "dry_run") {
+    return (
+      <div className="banner banner-info" role="status" data-testid="worker-mode">
+        Worker: <strong>DRY RUN</strong> — worker ничего не отправляет в Threads.
+        {summary.worker_mode_source ? ` Источник: ${summary.worker_mode_source}.` : null}
+        {apiDryRun}
+      </div>
+    );
+  }
+
+  return (
+    <div className="banner banner-warn" role="status" data-testid="worker-mode">
+      Режим worker: <strong>UNKNOWN</strong>. Control Center не получает режим worker из
+      проверяемого источника. Исходите из того, что запланированная публикация может быть
+      отправлена в Threads.
+      {apiDryRun}
     </div>
   );
 }
@@ -74,12 +119,7 @@ export function DashboardPage() {
       ) : null}
       {summary.data ? (
         <>
-          {summary.data.dry_run ? (
-            <div className="banner banner-warn">
-              Deployment в режиме <strong>dry_run</strong>: worker ничего не отправляет в
-              Threads.
-            </div>
-          ) : null}
+          <WorkerMode summary={summary.data} />
           <div className="metrics">
             <Metric label="Publications total" value={summary.data.total} to={`${base}/publications`} />
             <Metric label="Due now" value={summary.data.due_now} />

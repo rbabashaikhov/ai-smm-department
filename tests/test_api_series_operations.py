@@ -184,7 +184,12 @@ def test_summary_counts_by_status(
     assert body["next_scheduled_at"] is not None
     assert body["last_published_at"] is None
     assert body["published_last_24h"] == 0
-    assert isinstance(body["dry_run"], bool)
+    assert isinstance(body["api_dry_run"], bool)
+    assert body["api_mutations_enabled"] is True
+    # No verifiable worker source exists: never reported as dry run.
+    assert body["worker_mode"] == "unknown"
+    assert body["worker_mode_source"] is None
+    assert "dry_run" not in body
 
 
 def test_summary_counts_recent_publishes(

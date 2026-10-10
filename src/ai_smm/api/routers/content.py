@@ -20,6 +20,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response
 
 from ai_smm.api.dependencies import (
+    AppSettings,
     DbSession,
     EditorContentItem,
     EditorProject,
@@ -28,6 +29,7 @@ from ai_smm.api.dependencies import (
     ViewerProject,
 )
 from ai_smm.api.errors import ApiError, ErrorCode, not_found
+from ai_smm.api.mutation_gate import mutations_disabled
 from ai_smm.api.routers.publications import detail_of
 from ai_smm.api.schemas import (
     ApprovalList,
@@ -66,6 +68,7 @@ from ai_smm.application.content import (
     reject_revision,
     submit_for_review,
 )
+from ai_smm.application.control_plane import MutationsDisabled
 from ai_smm.db.models import (
     ContentApproval,
     ContentItem,
@@ -299,6 +302,7 @@ def materialize(
     payload: MaterializeIn,
     response: Response,
     db: DbSession,
+    settings: AppSettings,
     context: EditorContentItem,
 ) -> MaterializeOut:
     result = _run(
@@ -307,6 +311,7 @@ def materialize(
             content_item_id=context.item.id,
             expected_project_id=context.project.id,
             actor_user=context.user,
+            mutations_enabled=settings.api_mutations_enabled,
             revision_id=payload.revision_id,
         )
     )
@@ -333,6 +338,10 @@ def _run(command):
 
     try:
         return command()
+    except MutationsDisabled as exc:
+        # Second barrier behind the router-level gate; see
+        # ai_smm.application.control_plane.
+        raise mutations_disabled(exc.command) from exc
     except ContentUnavailable as exc:
         raise not_found(str(exc)) from exc
     except ContentVersionConflict as exc:

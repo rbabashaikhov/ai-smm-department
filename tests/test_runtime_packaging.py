@@ -159,6 +159,16 @@ def test_cookie_and_docs_defaults_for_local_http(
     )
 
 
+def test_the_packaged_control_center_is_read_only_by_default(
+    services: dict[str, Any],
+) -> None:
+    env = services["smm-api"]["environment"]
+
+    assert env["AI_SMM_API_MUTATIONS_ENABLED"] == (
+        "${SMM_RUNTIME_API_MUTATIONS_ENABLED:-false}"
+    )
+
+
 def test_tools_are_never_started_by_up(services: dict[str, Any]) -> None:
     for name in ("migrate", "cli"):
         assert services[name]["profiles"] == ["tools"], name

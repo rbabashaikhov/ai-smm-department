@@ -355,8 +355,20 @@ Publication status: blocked
 ### HTTP API — control plane
 
 Рядом с worker существует FastAPI-приложение. Оно **не публикует**:
-читает и редактирует метаданные вокруг очереди — пользователей,
-membership, настройки проекта. Публикацию исполняет только worker.
+читает и (если разрешено) редактирует метаданные вокруг очереди —
+пользователей, membership, настройки проекта. Публикацию исполняет только
+worker.
+
+По умолчанию API **только читает**: `AI_SMM_API_MUTATIONS_ENABLED=false`
+отклоняет любое изменение для любой роли, включая owner (403
+`MUTATIONS_DISABLED`); работают только вход и выход. `AI_SMM_DRY_RUN`
+процесса API — не режим worker: API сообщает его как `api_dry_run`, а
+режим worker — как `unknown`, пока нет проверяемого источника. Решение:
+[docs/adr/automation-and-publication-safety.md](docs/adr/automation-and-publication-safety.md).
+
+Production worker, по данным discovery 2026-10-10, работает в режиме
+**LIVE** (`AI_SMM_DRY_RUN=false`): одобренная и запланированная запись
+будет опубликована.
 
 - Нет `POST /publish`, `POST /threads/publish` и эквивалентов; тест
   проверяет, что ни один route не содержит слова `publish`, а второй —
@@ -459,6 +471,9 @@ Publish / Publish Now / Retry Publish нет нигде, тест проверя
   уходит с явным смещением.
 - Никаких optimistic updates для команд; RBAC в UI только скрывает
   кнопки, решает backend.
+- На read-only развёртывании (по умолчанию) UI не предлагает ни одной
+  кнопки изменения и показывает уведомление «Только чтение»; режим
+  worker на dashboard — `UNKNOWN`, а не dry-run.
 
 ```bash
 cd web && npm ci && npm run dev    # http://127.0.0.1:5173, /api проксируется на :8000
@@ -506,10 +521,11 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-576 тестов, все внешние API замоканы. Набор покрывает миграции,
+721 тест на стороне Python (и 98 тестов web), все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
+read-only режим (`MUTATIONS_DISABLED` для любой роли),
 хеширование паролей, жизненный цикл сессии, CSRF, RBAC, изоляцию
 проектов, optimistic locking, health endpoints, отсутствие publish
 endpoint, а также read API существующей очереди, пагинацию, preview,

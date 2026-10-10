@@ -11,6 +11,10 @@ The API is the control plane. It reads and edits the metadata around the
 publication queue -- identity, membership, project settings -- and it never
 publishes: there is no endpoint that calls ThreadsPublisher, and the worker
 remains the only process that can create a post.
+
+Unless AI_SMM_API_MUTATIONS_ENABLED is on, the API is also read-only:
+every business-state change is refused centrally (ai_smm.api.mutation_gate)
+and again at the queue commands (ai_smm.application.control_plane).
 """
 from __future__ import annotations
 
@@ -19,6 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from ai_smm.api.csrf import csrf_guard
 from ai_smm.api.errors import install_error_handlers
+from ai_smm.api.mutation_gate import mutation_gate
 from ai_smm.api.request_id import RequestIdMiddleware
 from ai_smm.api.routers import auth as auth_router
 from ai_smm.api.routers import content as content_router
@@ -78,9 +83,14 @@ def create_app(
     # need a session, and its path must not move when the API is versioned.
     app.include_router(health_router.router)
 
-    # CSRF is a dependency of the whole versioned router, so a route added
-    # later is protected without anyone having to remember to ask.
-    v1 = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(csrf_guard)])
+    # CSRF and the read-only gate are dependencies of the whole versioned
+    # router, so a route added later is protected without anyone having
+    # to remember to ask. Order matters: authentication and CSRF answer
+    # first, then the gate refuses whatever is not on its allowlist.
+    v1 = APIRouter(
+        prefix=API_V1_PREFIX,
+        dependencies=[Depends(csrf_guard), Depends(mutation_gate)],
+    )
     v1.include_router(auth_router.router)
     v1.include_router(projects_router.router)
     v1.include_router(publications_router.router)

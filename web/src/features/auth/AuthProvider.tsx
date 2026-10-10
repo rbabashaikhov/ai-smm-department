@@ -149,6 +149,16 @@ export function useMe(): MeResponse {
   return state.me;
 }
 
+/**
+ * Whether the server accepts changes at all. Anything but an explicit
+ * `true` -- not signed in, an older API without the field -- is read-only.
+ */
+export function useMutationsEnabled(): boolean {
+  const { state } = useAuth();
+
+  return state.status === "authenticated" && state.me.control_plane?.mutations_enabled === true;
+}
+
 export function useProjectAccess(projectId: string | undefined): ProjectAccess | undefined {
   const { state } = useAuth();
 

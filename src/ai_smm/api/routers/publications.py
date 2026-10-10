@@ -24,12 +24,14 @@ from fastapi import APIRouter, Query
 
 from ai_smm.api.dependencies import (
     AdminPublication,
+    AppSettings,
     DbSession,
     PageParams,
     ViewerProject,
     ViewerPublication,
 )
 from ai_smm.api.errors import ApiError, ErrorCode, not_found
+from ai_smm.api.mutation_gate import mutations_disabled
 from ai_smm.api.schemas import (
     AttemptList,
     AttemptOut,
@@ -40,6 +42,7 @@ from ai_smm.api.schemas import (
     PublicationSummary,
     ScheduleRequest,
 )
+from ai_smm.application.control_plane import MutationsDisabled
 from ai_smm.application.publications import (
     InvalidTransition,
     PublicationLocked,
@@ -167,7 +170,10 @@ def list_publication_attempts(
     summary="Put an approved or failed publication on the schedule (admin+)",
 )
 def schedule(
-    payload: ScheduleRequest, db: DbSession, context: AdminPublication
+    payload: ScheduleRequest,
+    db: DbSession,
+    settings: AppSettings,
+    context: AdminPublication,
 ) -> PublicationDetail:
     return _run_command(
         lambda: schedule_publication(
@@ -176,6 +182,7 @@ def schedule(
             expected_project_id=context.project.id,
             scheduled_at=payload.scheduled_at,
             actor=context.actor,
+            mutations_enabled=settings.api_mutations_enabled,
             note=payload.note,
             reset_attempts=payload.reset_attempts,
         )
@@ -188,7 +195,10 @@ def schedule(
     summary="Move the schedule of a scheduled or failed publication (admin+)",
 )
 def reschedule(
-    payload: ScheduleRequest, db: DbSession, context: AdminPublication
+    payload: ScheduleRequest,
+    db: DbSession,
+    settings: AppSettings,
+    context: AdminPublication,
 ) -> PublicationDetail:
     return _run_command(
         lambda: reschedule_publication(
@@ -197,6 +207,7 @@ def reschedule(
             expected_project_id=context.project.id,
             scheduled_at=payload.scheduled_at,
             actor=context.actor,
+            mutations_enabled=settings.api_mutations_enabled,
             note=payload.note,
             reset_attempts=payload.reset_attempts,
         )
@@ -209,7 +220,10 @@ def reschedule(
     summary="Take a publication out of the queue for good (admin+)",
 )
 def cancel(
-    payload: CancelRequest, db: DbSession, context: AdminPublication
+    payload: CancelRequest,
+    db: DbSession,
+    settings: AppSettings,
+    context: AdminPublication,
 ) -> PublicationDetail:
     return _run_command(
         lambda: cancel_publication(
@@ -217,6 +231,7 @@ def cancel(
             publication_id=context.publication.id,
             expected_project_id=context.project.id,
             actor=context.actor,
+            mutations_enabled=settings.api_mutations_enabled,
             note=payload.note,
         )
     )
@@ -236,6 +251,10 @@ def _run_command(command) -> PublicationDetail:
 
     try:
         publication = command()
+    except MutationsDisabled as exc:
+        # Normally unreachable: the router-level gate refuses first. This
+        # is the second, independent barrier at the queue command itself.
+        raise mutations_disabled(exc.command) from exc
     except InvalidTransition as exc:
         raise ApiError(
             status_code=409,

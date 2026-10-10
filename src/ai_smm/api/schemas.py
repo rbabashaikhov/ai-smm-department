@@ -48,9 +48,18 @@ class ProjectAccessOut(BaseModel):
     role: MembershipRole
 
 
+class ControlPlaneOut(BaseModel):
+    """Deployment-wide switches a client needs before it offers a control."""
+
+    #: false: every business-state change is refused with 403
+    #: MUTATIONS_DISABLED, whatever the caller's role.
+    mutations_enabled: bool
+
+
 class MeResponse(BaseModel):
     user: UserOut
     projects: list[ProjectAccessOut]
+    control_plane: ControlPlaneOut
 
 
 class LoginResponse(BaseModel):
@@ -266,9 +275,17 @@ class OperationsSummaryOut(BaseModel):
     next_scheduled_at: datetime | None
     series_total: int
     series_active: int
-    #: The deployment-wide publishing switch, reported so a panel can say
-    #: why nothing is going out. The API cannot change it.
-    dry_run: bool
+    #: AI_SMM_DRY_RUN of the API process. It does not gate any API
+    #: command and is NOT the worker's mode: the worker is a separate
+    #: process with its own configuration.
+    api_dry_run: bool
+    #: AI_SMM_API_MUTATIONS_ENABLED: false means this API is read-only.
+    api_mutations_enabled: bool
+    #: The worker's execution mode from a verifiable source, or "unknown".
+    #: Never inferred from api_dry_run.
+    worker_mode: Literal["live", "dry_run", "unknown"]
+    #: Where worker_mode came from; null while it is "unknown".
+    worker_mode_source: str | None
 
 
 class AuditEntryOut(BaseModel):

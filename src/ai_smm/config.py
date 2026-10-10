@@ -108,6 +108,13 @@ class Settings:
     #: packaged private runtime turns them off so the schema is not served
     #: to anyone who can reach the origin.
     api_docs_enabled: bool = True
+    #: Whether the API may change business state at all. Off by default:
+    #: a Control Center deployed next to a live worker is read-only until
+    #: an operator turns this on explicitly. Login and logout keep working
+    #: either way (see ai_smm.api.mutation_gate). This switch belongs to
+    #: the API process only -- the worker never reads it, so it can
+    #: neither stop nor start publishing.
+    api_mutations_enabled: bool = False
 
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
@@ -180,6 +187,11 @@ def load_settings() -> Settings:
         # rather than lose the flag by forgetting to set it.
         api_cookie_secure=_env_bool("AI_SMM_API_COOKIE_SECURE", True),
         api_docs_enabled=_env_bool("AI_SMM_API_DOCS_ENABLED", True),
+        # Read-only by default, like the cookie flag above: a deployment
+        # that wants to edit has to say so.
+        api_mutations_enabled=_env_bool(
+            "AI_SMM_API_MUTATIONS_ENABLED", False
+        ),
     )
 
 

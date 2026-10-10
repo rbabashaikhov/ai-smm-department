@@ -91,9 +91,16 @@ export interface ProjectAccess {
   role: Role;
 }
 
+/** Deployment-wide switches, from GET /auth/me. */
+export interface ControlPlane {
+  /** false: the API refuses every change (403 MUTATIONS_DISABLED). */
+  mutations_enabled: boolean;
+}
+
 export interface MeResponse {
   user: User;
   projects: ProjectAccess[];
+  control_plane: ControlPlane;
 }
 
 export interface LoginResponse {
@@ -230,8 +237,15 @@ export interface OperationsSummary {
   next_scheduled_at: string | null;
   series_total: number;
   series_active: number;
-  dry_run: boolean;
+  /** AI_SMM_DRY_RUN of the API process only. NOT the worker's mode. */
+  api_dry_run: boolean;
+  api_mutations_enabled: boolean;
+  /** From a verifiable worker source, or "unknown". Never inferred. */
+  worker_mode: WorkerMode;
+  worker_mode_source: string | null;
 }
+
+export type WorkerMode = "live" | "dry_run" | "unknown";
 
 export interface AuditEntry {
   id: number;

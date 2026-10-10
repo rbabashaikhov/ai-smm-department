@@ -9,10 +9,27 @@ as root and no other privileges.
 > Substitute the real values from `docker ps` and `/root/ai-smm/.env`
 > before running any command below.
 
-Deployed state as of 2026-10-09: worker running in **dry run**, queue parked,
-media storage configured and verified, no Threads credentials on the server.
+**Current worker mode: LIVE** (reported by the SMM-024B.1 read-only
+discovery, 2026-10-10). The worker runs with `AI_SMM_DRY_RUN=false` and
+Threads credentials, and publishes due, human-reviewed records itself —
+the third post went out through it at 2026-10-10 06:00 UTC. This is the
+state that discovery reported, not one re-checked since; re-check it
+read-only on the host before relying on it. Anything below that assumes a dry-run worker is
+historical.
+
+*Historical, 2026-10-09:* the worker was first deployed in dry run, with
+the queue parked, media storage verified and no Threads credentials on the
+server.
+
 See [production-deployment-plan.md](production-deployment-plan.md) for the
-architecture and the reasoning behind it.
+architecture and the reasoning behind it, and
+[adr/automation-and-publication-safety.md](adr/automation-and-publication-safety.md)
+for the publication-safety rules.
+
+> The Control Center (API + web) is **not deployed**. When it is, it is
+> read-only by default (`AI_SMM_API_MUTATIONS_ENABLED=false`). That switch
+> belongs to the API: it does not stop, start or slow the worker. To stop
+> publishing, use the worker's own levers in §7.
 
 ---
 
@@ -97,6 +114,12 @@ Two independent gates stand between a draft and a live post:
 1. `human_reviewed` — someone read this exact text and these exact images.
 2. `AI_SMM_DRY_RUN=false` — the deployment is allowed to publish at all.
 
+On the production worker gate 2 is **open** (reported 2026-10-10), so
+gate 1 is the only one left: a reviewed record that is scheduled **will
+be published** at its time. Approve only text you have read, and only
+for that exact record. No model, agent or background job may set
+`human_reviewed`.
+
 ```bash
 # Gate 1: record the review (do this only after reading the text)
 docker compose --profile cli run --rm -T cli approve 2 --note "checked text and image"
@@ -107,17 +130,24 @@ docker compose --profile cli run --rm -T cli schedule 2 --at "+30m"
 ```
 
 While `AI_SMM_DRY_RUN=true` a due record is validated, recorded as a `dry_run`
-attempt and pushed one hour forward; nothing is sent.
+attempt and pushed one hour forward; nothing is sent. With the worker
+live, a due record is sent.
 
 ---
 
 ## 5. The first real publish
 
+*Historical procedure (2026-10-09).* It was written for a dry-run worker,
+and was used for the first real post. The worker has since been switched
+to live (see the top of this document), so it publishes scheduled records
+on its own; this procedure remains valid only for a deliberate manual
+publish with the worker stopped.
+
 Do not do this until the specific post has been approved by the owner.
 
-`publish-now --live` sets `dry_run=False` for its own run only, so
-`AI_SMM_DRY_RUN` stays `true` throughout and the background worker never
-gains the ability to publish. Stop the worker for the duration so exactly
+`publish-now --live` sets `dry_run=False` for its own run only. On a
+dry-run deployment `AI_SMM_DRY_RUN` stays `true` throughout and the
+background worker never gains the ability to publish. Stop the worker for the duration so exactly
 one process can hold the claim.
 
 ```bash
