@@ -5,6 +5,22 @@ containers and how to run that package locally against a disposable
 database. It covers SMM-024A and the SMM-024B.2 read-only control plane;
 nothing here deploys to a server.
 
+The **production** packaging of the same images is a separate file,
+`compose.control-center.yml` (SMM-024B.3), described in
+[control-center-deployment.md](control-center-deployment.md). It differs
+from this runtime where production requires it:
+
+| | `compose.runtime.yml` (local) | `compose.control-center.yml` (production) |
+|---|---|---|
+| Project | `ai-smm-runtime-local` | `ai-smm-control-center`, run only through `deploy/control-center/cc-compose.sh` |
+| Database | disposable `postgres` service | none: the existing instance, over the external shared network |
+| Images | built by Compose, tag `local` | prebuilt, `<commit>` tag + OCI revision label, `pull_policy: never`, no `build:` |
+| Database URL | literal, local | `control-center.env` (that key only, mode 600) |
+| Mutations / docs / cookie | `SMM_RUNTIME_*` switches, default off / off / not Secure | literals `false` / `false` / `false`, not switchable |
+| API networks | `backend` (internal) | `cc-internal` (internal) + the shared network |
+| Tool profiles | `tools` | `cc-migrate`, `cc-admin`; `cli` pinned to `ai-smm user` |
+| Web port | `127.0.0.1:${SMM_RUNTIME_WEB_PORT:-8088}` | `127.0.0.1:8088`, literal |
+
 ## 1. Topology
 
 ```
@@ -203,6 +219,10 @@ service, no `env_file`, only a loopback port, a literal local database URL,
 database, an acyclic startup order, the worker still the default build
 target, the API target running uvicorn only, a Node-free web image, API
 prefixes without SPA fallback, and 404 for missing assets.
+
+`tests/test_control_center_packaging.py` does the same for the production
+file and its wrapper, including `docker compose config` renders against
+fixture env files.
 
 `tests/test_api_docs_config.py` covers `AI_SMM_API_DOCS_ENABLED`.
 `tests/test_runtime_packaging.py` also pins the read-only default of

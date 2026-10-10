@@ -1,0 +1,228 @@
+# AI SMM Control Center -- PRODUCTION packaging (SMM-024B.3).
+#
+#   operator laptop --ssh -L 8088:127.0.0.1:8088--> host loopback
+#     -> 127.0.0.1:8088 (the only published port)
+#     -> smm-web   nginx: React build + reverse proxy        [cc-edge, cc-internal]
+#          └── /api/*, /health/* -> smm-api (FastAPI)          [cc-internal, shared]
+#                                     -> <postgres-container>  [shared, external]
+#
+# A compose project of its own, "ai-smm-control-center", next to -- never
+# inside -- the worker's project "ai-smm" (compose.yaml). Nothing here
+# can create, recreate, stop or remove the worker, the database or any
+# other service on the host.
+#
+# ALWAYS run it through deploy/control-center/cc-compose.sh, never with a
+# bare `docker compose`. Compose lets a .env file in the working
+# directory, or COMPOSE_* variables in the shell, override this file's
+# project name: run from the worker's directory, `down` here would act on
+# project "ai-smm". The wrapper pins the project name, the env files and
+# a clean environment, and refuses a directory that holds a .env.
+#
+# Deliberately absent:
+#   * the worker, a scheduler, PostgreSQL -- the existing database is
+#     reused; nothing here claims or publishes a publication;
+#   * build: -- images are built from a reviewed commit elsewhere and
+#     loaded on the host; this file can only run what is already there,
+#     and pull_policy: never stops Compose from fetching a same-named
+#     image from a public registry;
+#   * the worker's ai-smm.env and .env -- the only env_file is
+#     control-center.env, which holds the database URL and nothing else;
+#   * migrations on start -- `migrate` is a one-shot operator command
+#     behind its own profile, with no default command;
+#   * Docker socket, bind mounts, volumes, public routes.
+#
+# Read-only Control Center: the API refuses every business-state change
+# (403 MUTATIONS_DISABLED), for every role, owner included. Changing that
+# is a change to this file under review, not an environment flip.
+
+name: ai-smm-control-center
+
+x-logging: &logging
+  driver: json-file
+  options:
+    # Per-service rotation: the host's daemon.json is shared with other
+    # projects and is not changed for this one.
+    max-size: "10m"
+    max-file: "3"
+
+# Shared by the API and the one-shot tools that run its image.
+#
+# Every safety-relevant value is a LITERAL. `environment:` takes
+# precedence over `env_file:`, so even a control-center.env that wrongly
+# carried a Threads token or turned mutations on could not change any of
+# these. Only AI_SMM_DATABASE_URL comes from control-center.env.
+x-app-env: &app-env
+  TZ: UTC
+  # Business mutations off for every role. Login/logout still write the
+  # session and audit rows (docs/api.md, Read-only mode).
+  AI_SMM_API_MUTATIONS_ENABLED: "false"
+  # No /docs, /redoc, /openapi.json.
+  AI_SMM_API_DOCS_ENABLED: "false"
+  # The only transport is an SSH tunnel to plain-HTTP loopback; a Secure
+  # cookie would not be sent back by every browser there. The tunnel is
+  # what encrypts the session on the wire.
+  AI_SMM_API_COOKIE_SECURE: "false"
+  # The API process's own flag (reported as api_dry_run). It is NOT the
+  # worker's mode, which the API reports as "unknown".
+  AI_SMM_DRY_RUN: "true"
+  LOG_LEVEL: INFO
+  LOG_FORMAT: json
+  # Defence in depth: no publishing or model credentials can reach this
+  # process, and the Threads base URL is unroutable.
+  OPENAI_API_KEY: ""
+  THREADS_ACCESS_TOKEN: ""
+  THREADS_API_BASE_URL: http://127.0.0.1:9
+  LANGFUSE_PUBLIC_KEY: ""
+  LANGFUSE_SECRET_KEY: ""
+  STORAGE_SSH_PASSWORD: ""
+  STORAGE_SSH_KEY_PATH: ""
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  pull_policy: never
+  labels:
+    # Defence in depth: Traefik already runs with exposedByDefault=false.
+    traefik.enable: "false"
+    ai-smm.component: control-center
+  logging: *logging
+
+services:
+  smm-api:
+    <<: *hardening
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    user: "10001:10001"
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    env_file:
+      - control-center.env
+    environment:
+      <<: *app-env
+      # Visible in pg_stat_activity on the shared instance.
+      PGAPPNAME: ai-smm-control-center-api
+    # cc-internal: reached by smm-web only. shared: the one path to the
+    # existing PostgreSQL. No host port on either.
+    networks:
+      - cc-internal
+      - shared
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    cpus: 0.5
+    mem_limit: 320m
+    memswap_limit: 320m
+    pids_limit: 128
+
+  smm-web:
+    <<: *hardening
+    image: ai-smm-web:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    # nginx-unprivileged's own uid, spelled out so a base-image change
+    # cannot silently make it root.
+    user: "101:101"
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # The ONLY published port on the host: loopback, fixed. Reached from
+    # an operator machine through an SSH tunnel; never from the internet.
+    ports:
+      - "127.0.0.1:8088:8080"
+    # cc-edge carries the published port; cc-internal reaches the API.
+    # Not on the shared network: the web tier cannot see the database or
+    # any other project's service.
+    networks:
+      - cc-edge
+      - cc-internal
+    depends_on:
+      smm-api:
+        condition: service_healthy
+    # The static site AND the proxied liveness probe.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ && wget -q -O /dev/null http://127.0.0.1:8080/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    cpus: 0.25
+    mem_limit: 64m
+    memswap_limit: 64m
+    pids_limit: 64
+
+  # One-shot, never started by `up`, and no default command: nothing
+  # migrates unless an operator types the revision.
+  #   cc-compose.sh --profile cc-migrate run --rm migrate current
+  #   cc-compose.sh --profile cc-migrate run --rm migrate upgrade 3d4ac1986f07
+  migrate:
+    <<: *hardening
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    user: "10001:10001"
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    profiles:
+      - cc-migrate
+    entrypoint: ["/app/.venv/bin/alembic"]
+    working_dir: /app
+    env_file:
+      - control-center.env
+    environment:
+      <<: *app-env
+      PGAPPNAME: ai-smm-control-center-migrate
+      # Fail fast instead of queueing behind the live worker: a DDL lock
+      # request that waits also blocks every later reader of that table.
+      # All revisions run in ONE transaction (alembic/env.py), so a
+      # timeout rolls the whole upgrade back.
+      PGOPTIONS: "-c lock_timeout=5s -c statement_timeout=120s"
+    networks:
+      - shared
+    restart: "no"
+    cpus: 0.5
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+
+  # Administrative bootstrap only. The entrypoint is pinned to the `user`
+  # command group, so this service cannot schedule, approve, publish or
+  # touch the queue; it creates the first owner and nothing else:
+  #   cc-compose.sh --profile cc-admin run --rm cli create-owner --email ... --display-name ... --project ...
+  cli:
+    <<: *hardening
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    user: "10001:10001"
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    profiles:
+      - cc-admin
+    entrypoint: ["/app/.venv/bin/ai-smm", "user"]
+    env_file:
+      - control-center.env
+    environment:
+      <<: *app-env
+      PGAPPNAME: ai-smm-control-center-cli
+    networks:
+      - shared
+    restart: "no"
+    cpus: 0.5
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+
+networks:
+  # No route out: web <-> API only.
+  cc-internal:
+    name: ai-smm-cc-internal
+    internal: true
+  # Carries the loopback port. Only smm-web is attached.
+  cc-edge:
+    name: ai-smm-cc-edge
+  # The existing bridge the database lives on. External: this project
+  # never creates, changes or removes it.
+  shared:
+    name: ${SMM_CC_SHARED_NETWORK:?set SMM_CC_SHARED_NETWORK to the existing network the database is reached on}
+    external: true

@@ -759,3 +759,65 @@ def test_the_migrated_link_table_enforces_lineage(migration_db: str) -> None:
                 c.execute(text(statement), ids)
     finally:
         engine.dispose()
+
+
+def test_a_lock_timeout_rolls_back_every_pending_revision(
+    migration_db: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production upgrade, 79731eadacd7 -> head, as the Control Center
+    `migrate` service runs it: one transaction, with a lock_timeout passed
+    through PGOPTIONS (compose.control-center.yml).
+
+    A transaction that has read `projects` -- as the live worker's cycle
+    does -- holds the ACCESS SHARE lock that ADD COLUMN must wait for. The
+    upgrade must give up instead of queueing every later reader behind it,
+    and must leave nothing of either revision behind: the database stays
+    exactly at the revision the running worker was built for.
+    """
+
+    from sqlalchemy.exc import OperationalError
+
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+
+    command.upgrade(config, "79731eadacd7")
+
+    engine = create_engine(migration_db)
+
+    try:
+        before = _schema_snapshot(engine)
+        enums_before = _enums(engine)
+
+        holder = engine.connect()
+
+        try:
+            holder.execute(text("SELECT count(*) FROM projects")).scalar()
+
+            monkeypatch.setenv("PGOPTIONS", "-c lock_timeout=1s")
+
+            with pytest.raises(OperationalError, match="lock timeout"):
+                command.upgrade(config, "head")
+        finally:
+            holder.rollback()
+            holder.close()
+            monkeypatch.delenv("PGOPTIONS")
+
+        assert _schema_snapshot(engine) == before
+        assert _enums(engine) == enums_before
+
+        with engine.connect() as connection:
+            assert (
+                MigrationContext.configure(connection).get_current_revision()
+                == "79731eadacd7"
+            )
+
+        # With the reader gone, the same command completes.
+        command.upgrade(config, "head")
+
+        with engine.connect() as connection:
+            assert (
+                MigrationContext.configure(connection).get_current_revision()
+                == EDITORIAL_REVISION
+            )
+    finally:
+        engine.dispose()
