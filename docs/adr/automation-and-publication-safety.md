@@ -128,3 +128,9 @@ No database migration was needed. The worker, its Compose file and its
 configuration are unchanged; the worker never reads
 `AI_SMM_API_MUTATIONS_ENABLED`, so the switch can neither stop nor start
 publishing.
+
+Code review (2026-10-11): **accepted with follow-ups**. They are recorded
+in [follow-ups.md](../follow-ups.md): flaky Vitest tests (FU-024B2-1),
+validating `worker_mode_source` once a worker heartbeat exists
+(FU-024B2-2), and wording that makes clear read-only covers business
+operations while authentication still writes session state (FU-024B2-3).
