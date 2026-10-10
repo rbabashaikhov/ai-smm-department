@@ -441,6 +441,31 @@ curl -s http://127.0.0.1:8000/health/ready   # только SELECT 1
 production-миграция не выполнялась. Подробности — в
 [docs/api.md](docs/api.md).
 
+### Control Center (web)
+
+Браузерный операторский интерфейс в [`web/`](web/README.md): React 19,
+TypeScript, Vite, React Router, TanStack Query. Это клиент того же
+`/api/v1`, а не второй путь публикации: кнопок и вызовов
+Publish / Publish Now / Retry Publish нет нигде, тест проверяет и
+отрисованные страницы, и исходники.
+
+- Сессия — только HttpOnly cookie; CSRF-токен хранится в памяти
+  API-клиента и отправляется только с небезопасными методами.
+- Любая правка — новая ревизия с `expected_item_version`; решения
+  (submit / approve / reject) отправляют ровно ту `revision_id`, которая
+  на экране. Материализация называется «Подготовить публикацию».
+- Schedule / reschedule / cancel — admin+, всегда с подтверждением,
+  показывающим точный snapshot; время вводится в timezone проекта и
+  уходит с явным смещением.
+- Никаких optimistic updates для команд; RBAC в UI только скрывает
+  кнопки, решает backend.
+
+```bash
+cd web && npm ci && npm run dev    # http://127.0.0.1:5173, /api проксируется на :8000
+```
+
+Не развёрнут, публичного домена нет.
+
 ### Локальный запуск
 
 ```bash
@@ -481,7 +506,7 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-574 теста, все внешние API замоканы. Набор покрывает миграции,
+576 тестов, все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
