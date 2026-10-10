@@ -560,20 +560,59 @@ revision** into a Publication and stops there:
   `scheduled_at`: a safe pre-delivery state. **It is not scheduled and
   not published.** An admin schedules it with the existing command.
 
-**Idempotent** per (item, revision, platform). The Publication's
-`idempotency_key` is `content:{item}:{revision}:{platform}` and that
-column is `UNIQUE`, so the database itself refuses a second one; a repeat
-answers 200 `"result": "unchanged"` and writes nothing, whatever state
+#### Lineage: `content_publication_links`
+
+The link table is the authoritative editorial → delivery mapping. One
+row per Publication, saying which revision its **current** snapshot came
+from:
+
+```
+content_publication_links
+  content_item_id  uuid      -> content_items.id
+  revision_id      uuid      -- (content_item_id, revision_id)
+                             --   -> content_revisions(content_item_id, id)
+  platform         varchar(40)
+  publication_id   bigint    -> publications.id   UNIQUE
+  created_at       timestamptz
+  PRIMARY KEY (content_item_id, revision_id, platform)
+```
+
+| Guarantee | Enforced by |
+|---|---|
+| a revision is delivered at most once per platform | primary key |
+| a Publication is never attributed to two revisions | `UNIQUE(publication_id)` |
+| the revision belongs to the item on the same row | composite foreign key |
+| the Publication is in the item's project and on the row's platform | `BEFORE INSERT OR UPDATE` trigger — a foreign key cannot express it without a composite key on `publications`, which is not altered |
+| a linked Publication cannot be deleted | `ON DELETE RESTRICT` |
+
+`publications` gains no column. Its `source_ref` (`content_item:{id}`)
+and deterministic `idempotency_key` (`content:{item}:{revision}:{platform}`,
+`UNIQUE`) stay as a human-readable trace and a second, independent
+barrier against duplicates. Nothing reads them to decide anything; a
+Publication whose `source_ref` names an item but has no link is not that
+item's, and a Publication carrying a revision's key without a link is
+refused as tampered lineage (409).
+
+**Idempotent** per (item, revision, platform): a repeat finds the link
+and answers 200 `"result": "unchanged"`, writing nothing, whatever state
 delivery has since reached.
 
-**One live Publication per item and platform.** If an earlier revision
-was already materialised (`source_ref = content_item:{id}`):
+**One live Publication per item and platform,** found through the links.
+If an earlier revision was already materialised:
 
 | Linked Publication | Result |
 |---|---|
-| `draft` / `approved`, never attempted, not claimed, no post id | rewritten with the new snapshot, same row — `"updated"` |
+| `draft` / `approved`, never attempted, not claimed, no post id | rewritten with the new snapshot, same row — `"updated"`; its link row is **replaced** in the same transaction |
 | `scheduled`, `claimed`, `publishing`, `needs_review`, `published`, `failed` | **409**, nothing touched, nothing created beside it |
-| `cancelled` | ignored — history; a new Publication is created |
+| `cancelled` | ignored — history; a new Publication and a new link are created, and the cancelled one keeps its link |
+
+On a rewrite the old link row is deleted and the new one inserted, so the
+database answers "which revision is this Publication's snapshot?" with
+exactly one row. The revision it replaced is recorded in the
+`content.materialized` audit entry (`previous_revision_id`), and every
+approval stays in `content_approvals`. A cancelled Publication is never
+rewritten, so its link remains the correct lineage of the revision it
+carried — and that same revision is never materialised a second time.
 
 A row that has started delivery is refused on an unlocked read and is
 never locked, so the worker is not made to skip it. The one row that
@@ -677,7 +716,8 @@ The API and security suites are `tests/test_api_auth.py`,
 `test_api_publications_read.py`, `test_api_publication_commands.py`,
 `test_api_series_operations.py`, `test_api_command_concurrency.py`,
 `test_api_content.py`, `test_content_materialize.py`,
-`test_content_concurrency.py`, `test_api_health.py`,
+`test_content_concurrency.py`, `test_content_links.py`,
+`test_api_health.py`,
 `test_api_contract.py`, `test_security_passwords.py`,
 `test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
 real application through its factory against a disposable database;

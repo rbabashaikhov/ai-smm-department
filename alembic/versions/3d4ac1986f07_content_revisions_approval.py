@@ -1,10 +1,14 @@
 """content items, revisions and approvals
 
-The editorial layer in front of the delivery queue. Additive only: three
-new tables, three enum types, one trigger function and two triggers. No
-existing table is altered, no existing row is read or rewritten, and the
-worker reads none of the new tables, so it behaves identically on the
+The editorial layer in front of the delivery queue. Additive only: four
+new tables, three enum types, two trigger functions and three triggers.
+No existing table is altered, no existing row is read or rewritten, and
+the worker reads none of the new tables, so it behaves identically on the
 upgraded schema.
+
+content_publication_links is the authoritative editorial -> delivery
+mapping. It references publications.id from the new side; publications
+itself gains no column.
 
 content_items and content_revisions refer to each other (an item points
 at its current and approved revision; a revision belongs to an item), so
@@ -30,6 +34,7 @@ depends_on = None
 
 
 APPEND_ONLY_FUNCTION = "content_reject_mutation"
+LINK_CHECK_FUNCTION = "content_publication_link_check"
 
 
 def upgrade() -> None:
@@ -270,6 +275,88 @@ def upgrade() -> None:
         "ix_content_approvals_revision", "content_approvals", ["revision_id"]
     )
 
+    # Which revision each delivery Publication's current snapshot came
+    # from. One row per Publication (UNIQUE publication_id); one
+    # Publication per revision and platform (the primary key).
+    op.create_table(
+        "content_publication_links",
+        sa.Column("content_item_id", sa.Uuid(), nullable=False),
+        sa.Column("revision_id", sa.Uuid(), nullable=False),
+        sa.Column("platform", sa.String(length=40), nullable=False),
+        sa.Column("publication_id", sa.BigInteger(), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "length(platform) > 0",
+            name="ck_content_publication_links_platform",
+        ),
+        sa.ForeignKeyConstraint(
+            ["content_item_id"],
+            ["content_items.id"],
+            name="fk_content_publication_links_item",
+            ondelete="RESTRICT",
+        ),
+        # The revision must belong to the item named on the same row.
+        sa.ForeignKeyConstraint(
+            ["content_item_id", "revision_id"],
+            ["content_revisions.content_item_id", "content_revisions.id"],
+            name="fk_content_publication_links_revision",
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
+            ["publication_id"],
+            ["publications.id"],
+            name="fk_content_publication_links_publication",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("content_item_id", "revision_id", "platform"),
+        sa.UniqueConstraint(
+            "publication_id", name="uq_content_publication_links_publication"
+        ),
+    )
+
+    # The Publication must be in the item's project and on the link's
+    # platform. No foreign key can say that without a composite unique
+    # key on publications, which this migration does not alter.
+    op.execute(
+        f"""
+        CREATE OR REPLACE FUNCTION {LINK_CHECK_FUNCTION}() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        DECLARE
+            publication_project text;
+            publication_platform text;
+            item_project text;
+        BEGIN
+            SELECT project_id, platform
+              INTO publication_project, publication_platform
+              FROM publications WHERE id = NEW.publication_id;
+
+            SELECT project_id INTO item_project
+              FROM content_items WHERE id = NEW.content_item_id;
+
+            IF publication_project IS DISTINCT FROM item_project
+               OR publication_platform IS DISTINCT FROM NEW.platform THEN
+                RAISE EXCEPTION
+                    'publication % is not in the project and on the platform of '
+                    'content item %', NEW.publication_id, NEW.content_item_id
+                    USING ERRCODE = 'foreign_key_violation';
+            END IF;
+
+            RETURN NEW;
+        END
+        $$
+        """
+    )
+    op.execute(
+        "CREATE TRIGGER trg_content_publication_links_consistent "
+        "BEFORE INSERT OR UPDATE ON content_publication_links "
+        f"FOR EACH ROW EXECUTE FUNCTION {LINK_CHECK_FUNCTION}()"
+    )
+
     # Revisions are immutable and approvals are append-only, for every
     # client of the database and not only for this application.
     op.execute(
@@ -294,8 +381,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Triggers go with their tables; the function is dropped explicitly
-    # once nothing uses it.
+    # Triggers go with their tables; the functions are dropped explicitly
+    # once nothing uses them.
+    op.drop_table("content_publication_links")
+    op.execute(f"DROP FUNCTION IF EXISTS {LINK_CHECK_FUNCTION}()")
+
     op.drop_index(
         "ix_content_approvals_revision", table_name="content_approvals"
     )

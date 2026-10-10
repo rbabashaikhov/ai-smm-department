@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ai_smm.application.content import publication_key, publication_link
 from ai_smm.db.models import (
     AuditLog,
+    ContentPublicationLink,
     MembershipRole,
     Publication,
     PublicationStatus,
@@ -61,12 +62,21 @@ def _revise(client, item_id, csrf: str, body: str, **extra) -> str:
 
 
 def _content_publications(session: Session, item_id) -> list[Publication]:
+    """Publications of an item, through the authoritative link table."""
+
     session.expire_all()
 
     return list(
         session.scalars(
             select(Publication)
-            .where(Publication.source_ref == publication_link(uuid.UUID(str(item_id))))
+            .join(
+                ContentPublicationLink,
+                ContentPublicationLink.publication_id == Publication.id,
+            )
+            .where(
+                ContentPublicationLink.content_item_id
+                == uuid.UUID(str(item_id))
+            )
             .order_by(Publication.id)
         )
     )

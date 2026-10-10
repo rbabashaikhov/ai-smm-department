@@ -129,7 +129,8 @@ def clean_tables(request: pytest.FixtureRequest) -> Iterator[None]:
     with engine.begin() as connection:
         connection.execute(
             text(
-                "TRUNCATE content_approvals, content_revisions, "
+                "TRUNCATE content_publication_links, "
+                "content_approvals, content_revisions, "
                 "content_items, "
                 "publication_attempts, publications, "
                 "content_series, project_settings, "

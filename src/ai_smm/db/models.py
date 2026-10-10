@@ -1095,6 +1095,80 @@ class ContentApproval(Base):
     )
 
 
+class ContentPublicationLink(Base):
+    """Which revision a delivery Publication's current snapshot came from.
+
+    This table, not publications.source_ref or idempotency_key, is the
+    authoritative mapping from the editorial layer to the delivery layer.
+    Those two columns are kept as a human-readable trace and as a second
+    barrier against duplicates; nothing reads them to decide anything.
+
+    Semantics: one row per Publication, describing its *current*
+    snapshot.
+
+    * (content_item_id, revision_id, platform) is the primary key, so one
+      revision is delivered at most once per platform;
+    * publication_id is UNIQUE, so a Publication is never attributed to
+      two revisions at once;
+    * the composite foreign key onto content_revisions means the revision
+      always belongs to the item named on the same row;
+    * a trigger checks that the Publication belongs to the item's project
+      and is on the row's platform -- a constraint no foreign key can
+      express without altering publications, which is left untouched.
+
+    When a newer approved revision is written into a Publication that has
+    not started delivery, that Publication's row here is replaced in the
+    same transaction: it now came from the new revision, and the database
+    must say so unambiguously. The replacement is recorded in the audit
+    entry, and every approval stays in content_approvals. A cancelled
+    Publication is never rewritten, so its row remains the correct
+    lineage of the revision it carried.
+    """
+
+    __tablename__ = "content_publication_links"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["content_item_id", "revision_id"],
+            ["content_revisions.content_item_id", "content_revisions.id"],
+            name="fk_content_publication_links_revision",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "publication_id", name="uq_content_publication_links_publication"
+        ),
+        CheckConstraint(
+            "length(platform) > 0",
+            name="ck_content_publication_links_platform",
+        ),
+    )
+
+    content_item_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "content_items.id",
+            ondelete="RESTRICT",
+            name="fk_content_publication_links_item",
+        ),
+        primary_key=True,
+    )
+    revision_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True
+    )
+    platform: Mapped[str] = mapped_column(String(40), primary_key=True)
+    publication_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey(
+            "publications.id",
+            ondelete="RESTRICT",
+            name="fk_content_publication_links_publication",
+        ),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 # Append-only enforcement. The same function and triggers are created by
 # migration 3d4ac1986f07; these listeners give a schema built with
 # Base.metadata.create_all (the test suite) the identical guarantee, so
@@ -1150,4 +1224,64 @@ event.listen(
     DDL(
         f"DROP FUNCTION IF EXISTS {APPEND_ONLY_FUNCTION}()"
     ).execute_if(dialect="postgresql"),
+)
+
+
+# Link consistency: the Publication must be in the content item's project
+# and on the link's platform. A foreign key cannot say this without a
+# composite unique key on publications, and publications is not altered.
+LINK_CHECK_FUNCTION = "content_publication_link_check"
+
+LINK_CHECK_FUNCTION_DDL = f"""
+CREATE OR REPLACE FUNCTION {LINK_CHECK_FUNCTION}() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    publication_project text;
+    publication_platform text;
+    item_project text;
+BEGIN
+    SELECT project_id, platform
+      INTO publication_project, publication_platform
+      FROM publications WHERE id = NEW.publication_id;
+
+    SELECT project_id INTO item_project
+      FROM content_items WHERE id = NEW.content_item_id;
+
+    IF publication_project IS DISTINCT FROM item_project
+       OR publication_platform IS DISTINCT FROM NEW.platform THEN
+        RAISE EXCEPTION
+            'publication % is not in the project and on the platform of '
+            'content item %', NEW.publication_id, NEW.content_item_id
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+
+    RETURN NEW;
+END
+$$
+"""
+
+LINK_CHECK_TRIGGER_DDL = (
+    "CREATE TRIGGER trg_content_publication_links_consistent "
+    "BEFORE INSERT OR UPDATE ON content_publication_links "
+    f"FOR EACH ROW EXECUTE FUNCTION {LINK_CHECK_FUNCTION}()"
+)
+
+event.listen(
+    Base.metadata,
+    "before_create",
+    DDL(LINK_CHECK_FUNCTION_DDL.replace("%", "%%")).execute_if(
+        dialect="postgresql"
+    ),
+)
+event.listen(
+    ContentPublicationLink.__table__,
+    "after_create",
+    DDL(LINK_CHECK_TRIGGER_DDL).execute_if(dialect="postgresql"),
+)
+event.listen(
+    Base.metadata,
+    "after_drop",
+    DDL(f"DROP FUNCTION IF EXISTS {LINK_CHECK_FUNCTION}()").execute_if(
+        dialect="postgresql"
+    ),
 )

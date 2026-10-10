@@ -3,7 +3,8 @@
 The pipeline this module implements:
 
     ContentItem -> ContentRevision -> human approval of that exact
-    revision -> explicit materialisation into a Publication
+    revision -> explicit materialisation into a Publication, recorded in
+    content_publication_links
 
 and it stops there. Scheduling is ai_smm.application.publications (admin
 and above); delivery is the worker. Nothing here schedules, and nothing
@@ -43,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -53,6 +54,7 @@ from ai_smm.db.models import (
     ApprovalDecision,
     ContentApproval,
     ContentItem,
+    ContentPublicationLink,
     ContentRevision,
     ContentStatus,
     Project,
@@ -730,17 +732,23 @@ def publication_key(
 ) -> str:
     """The idempotency key of a materialised Publication.
 
-    publications.idempotency_key is UNIQUE, so the database itself refuses
-    a second Publication for the same item, revision and platform. The
-    importer's keys are `project:platform:ordinal:digest`; a key whose
-    second segment is a UUID cannot collide with one of those.
+    A secondary barrier, not the mapping: content_publication_links is
+    authoritative. publications.idempotency_key is UNIQUE, so even if the
+    link table were bypassed the database would refuse a second
+    Publication for the same item, revision and platform. The importer's
+    keys are `project:platform:ordinal:digest`; a key whose second
+    segment is a UUID cannot collide with one of those.
     """
 
     return f"content:{content_item_id}:{revision_id}:{platform}"
 
 
 def publication_link(content_item_id: uuid.UUID) -> str:
-    """publications.source_ref of every Publication made from this item."""
+    """publications.source_ref of every Publication made from this item.
+
+    A human-readable trace only. Nothing reads it to decide anything; the
+    lineage is content_publication_links.
+    """
 
     return f"content_item:{content_item_id}"
 
@@ -846,23 +854,32 @@ def materialize_approved_revision(
     scheduled_at: a safe pre-delivery state. Scheduling it is a separate,
     admin-only command, and only the worker ever sends it.
 
-    Idempotent per (content item, revision, platform): the key encodes
-    all three and publications.idempotency_key is UNIQUE, so a repeat
-    returns the same row unchanged, and a race cannot produce a second
-    one.
+    content_publication_links is the authoritative mapping. Its primary
+    key is (content item, revision, platform) and publication_id is
+    UNIQUE, so the database refuses both a second Publication for one
+    revision and one Publication attributed to two revisions. A repeat
+    finds the link and returns the same row unchanged. The deterministic
+    publications.idempotency_key is kept as a second, independent
+    barrier, and source_ref as a human-readable trace; neither is read to
+    decide anything.
 
-    One live Publication per (item, platform). If the item already has
-    one from an earlier revision:
+    One live Publication per (item, platform), found through the links.
+    If the item already has one from an earlier revision:
 
     * still in draft/approved, never attempted, not claimed, no post id
-      -> it is rewritten with the new snapshot ("updated");
+      -> it is rewritten with the new snapshot ("updated"), and in the
+      same transaction its link is replaced: the row for the old revision
+      is deleted and one for the new revision inserted, so the database
+      says unambiguously which revision the Publication now carries. The
+      replaced revision is named in the audit entry;
     * anything else -> 409. A row that is scheduled, claimed, publishing,
       needs_review, published or failed has started delivery or may have
       reached the platform, and rewriting it is how one item would be
       posted twice. The operator cancels it first if they mean to.
 
-    A cancelled Publication is history: it is never touched and never
-    blocks a new one.
+    A cancelled Publication is history: it is never touched, its link
+    stays as the lineage of the revision it carried, and it never blocks
+    a new one.
     """
 
     human = _require_human(actor_user, command="materialize")
@@ -949,33 +966,60 @@ def materialize_approved_revision(
         {"key": f"ai-smm:publication-ordinal:{item.project_id}:{platform}"},
     )
 
-    # Read without a row lock: a replay changes nothing, and two
-    # materialisations of this item are already serialised by the item
-    # lock. Not locking matters -- the row may be scheduled, and a lock
-    # here would make the worker skip it for the length of this request.
-    existing = db.scalars(
-        select(Publication)
-        .where(Publication.idempotency_key == key)
-        .execution_options(populate_existing=True)
-    ).one_or_none()
+    # 1. The exact revision was already materialised: the link says so.
+    #    Read without a row lock -- a replay changes nothing, two
+    #    materialisations of this item are serialised by the item lock,
+    #    and the Publication may be scheduled, which a lock here would
+    #    make the worker skip for the length of this request.
+    link = db.get(
+        ContentPublicationLink,
+        (item.id, revision.id, platform),
+        populate_existing=True,
+    )
 
-    if existing is not None:
-        # The same revision was already materialised: report it, change
-        # nothing, whatever state delivery has since reached.
+    if link is not None:
+        linked = db.get(
+            Publication, link.publication_id, populate_existing=True
+        )
+        assert linked is not None  # foreign key
+
         return MaterializeResult(
             result="unchanged",
-            publication=existing,
+            publication=linked,
             revision=revision,
             platform=platform,
         )
 
+    # The secondary barrier: a Publication carrying this revision's key
+    # but no link means the lineage was tampered with. Refuse rather than
+    # guess which one is right.
+    orphan = db.scalar(
+        select(Publication.id).where(Publication.idempotency_key == key)
+    )
+
+    if orphan is not None:
+        raise PublicationNotEditable(
+            publication_id=orphan,
+            status=db.get(Publication, orphan).status,
+            reason=(
+                f"Publication {orphan} carries this revision's key but has "
+                "no lineage link; refusing to guess. Repair the link first."
+            ),
+        )
+
+    # 2. The item's live Publication on this platform, found through the
+    #    links -- never through source_ref. Legacy Publications have no
+    #    link and are invisible here.
     live = list(
-        db.scalars(
-            select(Publication)
+        db.execute(
+            select(ContentPublicationLink, Publication)
+            .join(
+                Publication,
+                Publication.id == ContentPublicationLink.publication_id,
+            )
             .where(
-                Publication.project_id == item.project_id,
-                Publication.platform == platform,
-                Publication.source_ref == publication_link(item.id),
+                ContentPublicationLink.content_item_id == item.id,
+                ContentPublicationLink.platform == platform,
                 Publication.status != PublicationStatus.CANCELLED,
             )
             .order_by(Publication.id)
@@ -985,22 +1029,38 @@ def materialize_approved_revision(
 
     if len(live) > 1:
         raise PublicationNotEditable(
-            publication_id=live[0].id,
-            status=live[0].status,
+            publication_id=live[0][1].id,
+            status=live[0][1].status,
             reason=(
                 "More than one live Publication is linked to this content "
                 "item; refusing to choose one. Cancel the extra ones first."
             ),
         )
 
+    previous_revision_id: uuid.UUID | None = None
+
     if live:
+        old_link, candidate_publication = live[0]
+
         # Decide on an unlocked read first, so a row that has started
         # delivery is refused without ever being locked; then lock the
         # one row that will be written and decide again, because an
         # admin may have scheduled it in between.
-        _require_editable(live[0])
-        publication = _lock_linked_publication(db, publication_id=live[0].id)
+        _require_editable(candidate_publication)
+        publication = _lock_linked_publication(
+            db, publication_id=candidate_publication.id
+        )
         _require_editable(publication)
+
+        # Replace the lineage in the same transaction as the snapshot.
+        # The old row goes first: publication_id is UNIQUE, so the new
+        # row cannot coexist with it even for an instant.
+        previous_revision_id = old_link.revision_id
+        db.execute(
+            delete(ContentPublicationLink).where(
+                ContentPublicationLink.publication_id == publication.id
+            )
+        )
 
         _copy_snapshot(publication, item=item, revision=revision, key=key)
         publication.updated_at = now
@@ -1029,6 +1089,20 @@ def materialize_approved_revision(
         db.add(publication)
         result = "created"
 
+    # The Publication row must exist (and carry its new key) before the
+    # link that references it.
+    db.flush()
+
+    db.add(
+        ContentPublicationLink(
+            content_item_id=item.id,
+            revision_id=revision.id,
+            platform=platform,
+            publication_id=publication.id,
+            created_at=now,
+        )
+    )
+
     db.flush()
 
     record_audit(
@@ -1043,6 +1117,11 @@ def materialize_approved_revision(
             "revision_number": revision.revision_number,
             "content_hash": revision.content_hash,
             "platform": platform,
+            # On "updated", the revision this Publication carried until
+            # now -- the lineage row for it was replaced.
+            "previous_revision_id": (
+                str(previous_revision_id) if previous_revision_id else None
+            ),
         },
     )
 

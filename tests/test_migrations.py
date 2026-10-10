@@ -375,7 +375,16 @@ def test_a_session_token_hash_column_is_not_the_token(
 
 CONTROL_PLANE_HEAD = "2964ac9ceea7"
 EDITORIAL_REVISION = "3d4ac1986f07"
-EDITORIAL_TABLES = {"content_items", "content_revisions", "content_approvals"}
+EDITORIAL_TABLES = {
+    "content_items",
+    "content_revisions",
+    "content_approvals",
+    "content_publication_links",
+}
+EDITORIAL_FUNCTIONS = {
+    "content_reject_mutation",
+    "content_publication_link_check",
+}
 EDITORIAL_ENUMS = {
     "content_status",
     "content_revision_source",
@@ -462,6 +471,7 @@ def test_the_editorial_migration_upgrades_from_the_current_head(
         assert triggers == {
             "trg_content_revisions_append_only",
             "trg_content_approvals_append_only",
+            "trg_content_publication_links_consistent",
         }
     finally:
         engine.dispose()
@@ -537,19 +547,22 @@ def test_downgrading_the_editorial_migration_removes_only_its_additions(
         enums_after = _enums(engine)
 
         with engine.connect() as connection:
-            function_left = connection.execute(
-                text(
-                    "SELECT count(*) FROM pg_proc "
-                    "WHERE proname = 'content_reject_mutation'"
-                )
-            ).scalar_one()
+            functions_left = set(
+                connection.execute(
+                    text(
+                        "SELECT proname FROM pg_proc "
+                        "WHERE proname = ANY(:names)"
+                    ),
+                    {"names": sorted(EDITORIAL_FUNCTIONS)},
+                ).scalars()
+            )
     finally:
         engine.dispose()
 
     assert schema_after == schema_before
     assert enums_after == enums_before
     assert EDITORIAL_ENUMS.isdisjoint(enums_after)
-    assert function_left == 0
+    assert functions_left == set()
 
 
 def test_the_editorial_migration_is_repeatable(migration_db: str) -> None:
@@ -638,5 +651,111 @@ def test_the_migrated_schema_enforces_the_editorial_invariants(
                     " (gen_random_uuid(), 'p', 't', gen_random_uuid())"
                 )
             )
+    finally:
+        engine.dispose()
+
+
+
+def test_the_migrated_link_table_enforces_lineage(migration_db: str) -> None:
+    """Each link guarantee, on the schema Alembic builds -- not create_all."""
+
+    from sqlalchemy.exc import IntegrityError
+
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    command.upgrade(_alembic_config(migration_db), "head")
+
+    engine = create_engine(migration_db)
+    ids = {
+        "item_a": "aaaaaaaa-0000-0000-0000-000000000001",
+        "rev_a": "aaaaaaaa-0000-0000-0000-0000000000a1",
+        "item_b": "bbbbbbbb-0000-0000-0000-000000000001",
+        "rev_b": "bbbbbbbb-0000-0000-0000-0000000000b1",
+    }
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO projects (id, display_name, knowledge_path)"
+                    " VALUES ('p', 'P', 'k'), ('q', 'Q', 'k')"
+                )
+            )
+
+            for item, rev in (("item_a", "rev_a"), ("item_b", "rev_b")):
+                connection.execute(
+                    text(
+                        "INSERT INTO content_items"
+                        " (id, project_id, title, current_revision_id)"
+                        " VALUES (:item, 'p', 't', :rev)"
+                    ),
+                    {"item": ids[item], "rev": ids[rev]},
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO content_revisions (id, content_item_id,"
+                        " revision_number, body, format, source, content_hash)"
+                        " VALUES (:rev, :item, 1, 'b', 'text', 'human',"
+                        " repeat('a', 64))"
+                    ),
+                    {"item": ids[item], "rev": ids[rev]},
+                )
+
+            connection.execute(
+                text(
+                    "INSERT INTO publications (id, project_id, ordinal, title,"
+                    " format, body, idempotency_key) VALUES"
+                    " (1, 'p', 1, 't', 'text', 'b', 'k1'),"
+                    " (2, 'p', 2, 't', 'text', 'b', 'k2'),"
+                    " (3, 'q', 1, 't', 'text', 'b', 'k3')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_publication_links"
+                    " (content_item_id, revision_id, platform, publication_id)"
+                    " VALUES (:item, :rev, 'threads', 1)"
+                ),
+                {"item": ids["item_a"], "rev": ids["rev_a"]},
+            )
+
+        # statement -> the constraint or trigger that must be the reason.
+        refused = {
+            "a revision of another item": (
+                "INSERT INTO content_publication_links VALUES"
+                " (:item_a, :rev_b, 'threads', 2, now())",
+                "fk_content_publication_links_revision",
+            ),
+            "the same revision and platform twice": (
+                "INSERT INTO content_publication_links VALUES"
+                " (:item_a, :rev_a, 'threads', 2, now())",
+                "content_publication_links_pkey",
+            ),
+            "one publication for two revisions": (
+                "INSERT INTO content_publication_links VALUES"
+                " (:item_b, :rev_b, 'threads', 1, now())",
+                "uq_content_publication_links_publication",
+            ),
+            "a publication in another project": (
+                "INSERT INTO content_publication_links VALUES"
+                " (:item_b, :rev_b, 'threads', 3, now())",
+                "not in the project",
+            ),
+            # The consistency trigger runs before the foreign key, so a
+            # missing publication is refused by it first; the key remains
+            # as the second line.
+            "a publication that does not exist": (
+                "INSERT INTO content_publication_links VALUES"
+                " (:item_b, :rev_b, 'threads', 999, now())",
+                "not in the project",
+            ),
+            "deleting a linked publication": (
+                "DELETE FROM publications WHERE id = 1",
+                "fk_content_publication_links_publication",
+            ),
+        }
+
+        for statement, reason in refused.values():
+            with pytest.raises(IntegrityError, match=reason), engine.begin() as c:
+                c.execute(text(statement), ids)
     finally:
         engine.dispose()
