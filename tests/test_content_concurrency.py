@@ -28,6 +28,7 @@ from ai_smm.application.content import (
 from ai_smm.db.models import (
     ContentApproval,
     ContentItem,
+    ContentPublicationLink,
     ContentRevision,
     ContentStatus,
     Publication,
@@ -444,3 +445,234 @@ def test_concurrent_materialisations_in_one_project_get_distinct_ordinals(
         ordinals = sorted(pool.map(materialize, items))
 
     assert ordinals == [2, 3, 4, 5]
+
+
+# -- the earlier snapshot, contended -------------------------------------
+
+
+def _materialised_then_revised(session_factory, make_content, make_user):
+    """Item with Publication A from revision 1, and revision 2 approved."""
+
+    item, _ = make_content(body="revision one")
+    user = make_user()
+    _approve_in(session_factory, item, user)
+
+    db = session_factory()
+
+    try:
+        first = materialize_approved_revision(
+            db,
+            content_item_id=item.id,
+            expected_project_id=item.project_id,
+            actor_user=user,
+        )
+        db.commit()
+        publication_a = first.publication.id
+
+        create_revision(
+            db,
+            content_item_id=item.id,
+            expected_project_id=item.project_id,
+            expected_item_version=db.get(ContentItem, item.id).version,
+            revision=_revision("revision two"),
+            created_by_user=user,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    db = session_factory()
+
+    try:
+        _approve_in(session_factory, db.get(ContentItem, item.id), user)
+    finally:
+        db.close()
+
+    return item, user, publication_a
+
+
+def _timed_materialise(session_factory, item, user):
+    """Run materialise on its own connection; report outcome and duration."""
+
+    import time
+
+    from ai_smm.application.content import PublicationNotEditable
+
+    started = time.monotonic()
+    db = session_factory()
+
+    try:
+        result = materialize_approved_revision(
+            db,
+            content_item_id=item.id,
+            expected_project_id=item.project_id,
+            actor_user=user,
+        )
+        db.commit()
+        outcome = result.result
+    except PublicationNotEditable as exc:
+        db.rollback()
+        outcome = exc
+    finally:
+        db.close()
+
+    return outcome, time.monotonic() - started
+
+
+def test_an_in_flight_cancel_neither_blocks_nor_unblocks_materialisation(
+    session_factory: sessionmaker[Session],
+    session: Session,
+    make_content,
+    make_user,
+) -> None:
+    """Materialisation decides on committed state and never locks A.
+
+    An operator is cancelling A in a transaction that has not committed
+    yet, and holds A's row lock. Materialising revision 2 must neither
+    wait for that lock (it never takes it) nor act on the uncommitted
+    cancel: A is still approved as far as anyone can see, so the answer
+    is 409. Once the cancel commits, revision 2 materialises.
+    """
+
+    from ai_smm.application.content import PublicationNotEditable
+    from ai_smm.queue import cancel
+
+    item, user, publication_a = _materialised_then_revised(
+        session_factory, make_content, make_user
+    )
+    canceller = session_factory()
+
+    try:
+        cancel(
+            canceller,
+            canceller.get(Publication, publication_a),
+            actor="test:operator",
+        )
+        canceller.flush()  # A is now row-locked by the uncommitted cancel
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outcome, seconds = pool.submit(
+                _timed_materialise, session_factory, item, user
+            ).result(timeout=10)
+
+        assert isinstance(outcome, PublicationNotEditable)
+        assert outcome.publication_id == publication_a
+        # Well under the 3 s lock_timeout: it never queued on A's lock.
+        assert seconds < 1.5
+
+        canceller.commit()
+    finally:
+        canceller.close()
+
+    outcome, _ = _timed_materialise(session_factory, item, user)
+
+    assert outcome == "created"
+
+    session.expire_all()
+    a = session.get(Publication, publication_a)
+
+    assert a.status.value == "cancelled"
+    assert a.body == "revision one"
+
+
+def test_scheduling_the_earlier_snapshot_races_safely_with_materialisation(
+    session_factory: sessionmaker[Session],
+    session: Session,
+    make_content,
+    make_user,
+) -> None:
+    """The review's race, with both sides genuinely concurrent.
+
+    An admin is scheduling A (the 022B command holds A's row lock, not yet
+    committed) while an editor materialises the newer revision. The
+    editor is refused without waiting, nothing is written to A by the
+    editorial side, and when the admin commits, A is scheduled with
+    exactly the text it had when the admin started.
+    """
+
+    from datetime import datetime, timedelta, timezone
+
+    from ai_smm.application.content import PublicationNotEditable
+    from ai_smm.application.publications import schedule_publication
+
+    item, user, publication_a = _materialised_then_revised(
+        session_factory, make_content, make_user
+    )
+    admin = session_factory()
+
+    try:
+        schedule_publication(
+            admin,
+            publication_id=publication_a,
+            expected_project_id=item.project_id,
+            scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
+            actor="user:admin",
+        )
+        admin.flush()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            outcome, seconds = pool.submit(
+                _timed_materialise, session_factory, item, user
+            ).result(timeout=10)
+
+        assert isinstance(outcome, PublicationNotEditable)
+        assert seconds < 1.5
+
+        admin.commit()
+    finally:
+        admin.close()
+
+    session.expire_all()
+    a = session.get(Publication, publication_a)
+
+    assert a.status.value == "scheduled"
+    assert a.body == "revision one"
+
+    linked = session.scalars(
+        select(Publication)
+        .join(
+            ContentPublicationLink,
+            ContentPublicationLink.publication_id == Publication.id,
+        )
+        .where(ContentPublicationLink.content_item_id == item.id)
+    ).all()
+
+    assert [p.id for p in linked] == [publication_a]
+
+
+def test_concurrent_materialisations_after_a_cancel_make_one_new_snapshot(
+    session_factory: sessionmaker[Session],
+    session: Session,
+    make_content,
+    make_user,
+) -> None:
+    from ai_smm.queue import cancel
+
+    item, user, publication_a = _materialised_then_revised(
+        session_factory, make_content, make_user
+    )
+    cancel(session, session.get(Publication, publication_a), actor="test")
+    session.commit()
+
+    barrier = threading.Barrier(4)
+
+    def materialise():
+        barrier.wait()
+
+        return _timed_materialise(session_factory, item, user)[0]
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = sorted(pool.map(lambda _: materialise(), range(4)))
+
+    assert outcomes == ["created", "unchanged", "unchanged", "unchanged"]
+
+    session.expire_all()
+    links = session.scalars(
+        select(ContentPublicationLink).where(
+            ContentPublicationLink.content_item_id == item.id
+        )
+    ).all()
+
+    # A's historical link and exactly one new link for revision 2.
+    assert len(links) == 2
+    assert len({link.publication_id for link in links}) == 2

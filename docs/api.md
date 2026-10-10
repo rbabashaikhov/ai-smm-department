@@ -560,11 +560,20 @@ revision** into a Publication and stops there:
   `scheduled_at`: a safe pre-delivery state. **It is not scheduled and
   not published.** An admin schedules it with the existing command.
 
+**A Publication is an immutable delivery snapshot of one revision.**
+Materialisation only ever creates one; it never rewrites an existing
+Publication with a newer revision. Approval and scheduling are separate
+gates held by different people, and an admin who has opened a
+Publication must schedule exactly what they read. A row lock protects the
+row's state but not that intent: if the content could change underneath,
+the schedule command would still see `approved` and queue text the admin
+never saw.
+
 #### Lineage: `content_publication_links`
 
 The link table is the authoritative editorial → delivery mapping. One
-row per Publication, saying which revision its **current** snapshot came
-from:
+row per Publication, saying which revision it is the snapshot of. The
+row is written once, together with the Publication, and never repointed:
 
 ```
 content_publication_links
@@ -597,28 +606,30 @@ refused as tampered lineage (409).
 and answers 200 `"result": "unchanged"`, writing nothing, whatever state
 delivery has since reached.
 
-**One live Publication per item and platform,** found through the links.
-If an earlier revision was already materialised:
+**A newer revision needs the earlier snapshot cancelled first.** For a
+newer approved revision, the item's existing Publications on the platform
+(found through the links) decide:
 
-| Linked Publication | Result |
+| Earlier linked Publication | Result |
 |---|---|
-| `draft` / `approved`, never attempted, not claimed, no post id | rewritten with the new snapshot, same row — `"updated"`; its link row is **replaced** in the same transaction |
-| `scheduled`, `claimed`, `publishing`, `needs_review`, `published`, `failed` | **409**, nothing touched, nothing created beside it |
-| `cancelled` | ignored — history; a new Publication and a new link are created, and the cancelled one keeps its link |
+| `draft`, `approved`, `scheduled`, `claimed`, `publishing`, `needs_review`, `published`, `failed` | **409 `PUBLICATION_NOT_EDITABLE`** — "Previous delivery snapshot must be cancelled before a newer revision can be materialized." Nothing is changed, linked or created |
+| `cancelled` (or none) | a new Publication and a new link — `"created"`; the cancelled Publication keeps its link as the historical lineage of the revision it carried |
 
-On a rewrite the old link row is deleted and the new one inserted, so the
-database answers "which revision is this Publication's snapshot?" with
-exactly one row. The revision it replaced is recorded in the
-`content.materialized` audit entry (`previous_revision_id`), and every
-approval stays in `content_approvals`. A cancelled Publication is never
-rewritten, so its link remains the correct lineage of the revision it
-carried — and that same revision is never materialised a second time.
+`draft` and `approved` block too, on purpose: that is exactly the window
+in which an admin may have opened the Publication and be about to
+schedule it. To deliver the newer revision, the earlier snapshot is
+cancelled explicitly (`POST /publications/{id}/cancel`, admin+), then the
+item is materialised again. The 409's `details` name the blocking
+`publication_id`, its status and the `previous_revision_id`.
 
-A row that has started delivery is refused on an unlocked read and is
-never locked, so the worker is not made to skip it. The one row that
-will be rewritten is then locked and checked again, because an admin may
-have scheduled it in between. To replace a scheduled Publication with a
-newer revision, cancel it first.
+The earlier Publication is decided on an unlocked read and never locked —
+nothing here writes it, and a lock would make the worker skip it. A
+cancel or a schedule of it that is still in flight neither blocks
+materialisation nor is acted on before it commits. Two materialisations
+of one item are serialised by the item lock, so no second live
+Publication can appear between the check and the insert. A cancelled
+revision is never materialised a second time: its link answers the
+repeat.
 
 The platform is the project's `default_platform`. The ordinal continues
 the project's sequence; concurrent materialisations in one project are
@@ -646,6 +657,7 @@ Every failure has the same shape:
 | `VERSION_CONFLICT` | 409 |
 | `INVALID_STATE_TRANSITION` | 409 |
 | `STALE_REVISION` | 409 |
+| `PUBLICATION_NOT_EDITABLE` | 409 |
 | `DEPENDENCY_UNAVAILABLE` | 503 |
 | `INTERNAL_ERROR` | 500 |
 
@@ -689,7 +701,7 @@ Written to the existing `audit_log` table, actor `user:<uuid>` or
 | `content.revision_created` | any new revision, with its number, source and hash |
 | `content.submitted_for_review` | draft -> in_review |
 | `content.approved` / `content.rejected` | the human decision, with the revision and its hash |
-| `content.materialized` | publication created or updated (a replay writes nothing) |
+| `content.materialized` | publication created: `result`, `publication_id`, `revision_id`, `revision_number`, `content_hash`, `platform`. A replay or a refusal writes nothing |
 
 Content entries use the subject `content_item:<uuid>` and appear in the
 project audit view.

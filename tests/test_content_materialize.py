@@ -1,8 +1,10 @@
 """The bridge from an approved revision into a delivery Publication.
 
-It creates or refreshes a Publication and stops: it never schedules and
-never publishes. These tests pin what it copies, what it refuses to
-touch, and that repeating it never makes a second Publication.
+It creates a Publication and stops: it never rewrites one, never
+schedules and never publishes. A Publication is the immutable delivery
+snapshot of one revision. These tests pin what it copies, that an earlier
+live snapshot blocks a newer revision until it is cancelled, and that
+repeating it never makes a second Publication.
 """
 from __future__ import annotations
 
@@ -377,33 +379,61 @@ def test_the_database_itself_refuses_a_duplicate_key(
 # -- a newer revision ----------------------------------------------------
 
 
-def test_a_newer_approved_revision_refreshes_the_safe_publication(
+def _snapshot(publication: Publication) -> tuple:
+    """Every column of the row, for a byte-for-byte comparison."""
+
+    return tuple(
+        getattr(publication, column.key)
+        for column in Publication.__table__.columns
+    )
+
+
+def test_a_newer_revision_is_refused_while_the_earlier_snapshot_is_approved(
     client, session: Session, approved_item, editor_csrf
 ) -> None:
+    """approved is not editable either: it may already have been read."""
+
     item, first_revision = approved_item
     created = _post(client, item.id, "materialize", editor_csrf).json()
+    publication = session.get(Publication, created["publication"]["id"])
+    before = _snapshot(publication)
 
     second = _revise(client, item.id, editor_csrf, "Вторая редакция.")
     _approve(client, item.id, editor_csrf)
 
     response = _post(client, item.id, "materialize", editor_csrf)
 
-    assert response.status_code == 200
+    assert response.status_code == 409
 
-    body = response.json()
+    error = response.json()["error"]
 
-    assert body["result"] == "updated"
-    # The same row, rewritten -- not a second one.
-    assert body["publication"]["id"] == created["publication"]["id"]
-    assert body["publication"]["body"] == "Вторая редакция."
-    assert second in body["publication"]["idempotency_key"]
-    assert str(first_revision.id) not in body["publication"]["idempotency_key"]
+    assert error["code"] == "PUBLICATION_NOT_EDITABLE"
+    assert error["message"].startswith(
+        "Previous delivery snapshot must be cancelled before a newer "
+        "revision can be materialized."
+    )
+    assert error["details"] == {
+        "command": "materialize",
+        "publication_id": publication.id,
+        "publication_status": "approved",
+        "previous_revision_id": str(first_revision.id),
+    }
+
+    session.expire_all()
+    session.refresh(publication)
+
+    # Byte for byte: every column, including updated_at and the key.
+    assert _snapshot(publication) == before
+    assert second not in publication.idempotency_key
+    # Nothing new was created beside it.
     assert len(_content_publications(session, item.id)) == 1
 
 
 @pytest.mark.parametrize(
     "status",
     [
+        PublicationStatus.DRAFT,
+        PublicationStatus.APPROVED,
         PublicationStatus.SCHEDULED,
         PublicationStatus.CLAIMED,
         PublicationStatus.PUBLISHING,
@@ -412,7 +442,7 @@ def test_a_newer_approved_revision_refreshes_the_safe_publication(
         PublicationStatus.FAILED,
     ],
 )
-def test_a_publication_in_delivery_is_never_rewritten(
+def test_every_non_cancelled_snapshot_blocks_a_newer_revision(
     client, session: Session, approved_item, editor_csrf, status
 ) -> None:
     item, _ = approved_item
@@ -429,7 +459,7 @@ def test_a_publication_in_delivery_is_never_rewritten(
         publication.claimed_by = "worker-1"
 
     session.commit()
-    before = (publication.body, publication.idempotency_key, publication.status)
+    before = _snapshot(publication)
 
     _revise(client, item.id, editor_csrf, "Поздняя правка.")
     _approve(client, item.id, editor_csrf)
@@ -440,33 +470,16 @@ def test_a_publication_in_delivery_is_never_rewritten(
 
     error = response.json()["error"]
 
-    assert error["code"] == "INVALID_STATE_TRANSITION"
+    assert error["code"] == "PUBLICATION_NOT_EDITABLE"
     assert error["details"]["publication_status"] == status.value
     assert error["details"]["publication_id"] == publication.id
 
     session.expire_all()
     session.refresh(publication)
 
-    assert (publication.body, publication.idempotency_key, publication.status) == before
+    assert _snapshot(publication) == before
     # And no parallel Publication was created beside it.
     assert len(_content_publications(session, item.id)) == 1
-
-
-def test_an_attempted_draft_publication_is_not_rewritten_either(
-    client, session: Session, approved_item, editor_csrf
-) -> None:
-    """Status alone is not trusted: an attempt means delivery started."""
-
-    item, _ = approved_item
-    created = _post(client, item.id, "materialize", editor_csrf).json()
-    publication = session.get(Publication, created["publication"]["id"])
-    publication.attempt_count = 1
-    session.commit()
-
-    _revise(client, item.id, editor_csrf, "Ещё правка.")
-    _approve(client, item.id, editor_csrf)
-
-    assert _post(client, item.id, "materialize", editor_csrf).status_code == 409
 
 
 def test_a_cancelled_publication_never_blocks_a_new_one(

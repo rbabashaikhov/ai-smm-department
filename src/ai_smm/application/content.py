@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
@@ -71,15 +71,6 @@ from ai_smm.queue import record_audit
 #: transactions are short, so this is normally microseconds; the bound
 #: keeps an HTTP request from hanging on a stalled transaction.
 LOCK_TIMEOUT_MS = 3000
-
-#: Delivery states in which an existing, linked Publication may be
-#: rewritten with a newer approved revision. Anything else has started
-#: delivery, may have reached the platform, or is terminal, and is never
-#: touched -- the refusal is a 409, which is the safe direction to fail.
-SAFELY_EDITABLE_PUBLICATION_STATUSES = frozenset(
-    {PublicationStatus.DRAFT, PublicationStatus.APPROVED}
-)
-
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -151,15 +142,27 @@ class NotDeliverable(Exception):
 
 
 class PublicationNotEditable(Exception):
-    """A linked Publication has started delivery and must not be changed."""
+    """An existing delivery snapshot stands in the way; it is never changed.
+
+    Raised when the item already has a non-cancelled Publication from an
+    earlier revision, or when the lineage is inconsistent. The existing
+    Publication is left exactly as it is: the caller must cancel it
+    explicitly before a newer revision can be materialised.
+    """
 
     def __init__(
-        self, *, publication_id: int, status: PublicationStatus, reason: str
+        self,
+        *,
+        publication_id: int,
+        status: PublicationStatus,
+        reason: str,
+        previous_revision_id: uuid.UUID | None = None,
     ) -> None:
         super().__init__(reason)
 
         self.publication_id = publication_id
         self.status = status
+        self.previous_revision_id = previous_revision_id
 
 
 # -- input ---------------------------------------------------------------
@@ -720,7 +723,8 @@ def reject_revision(
 
 @dataclass(frozen=True)
 class MaterializeResult:
-    #: created | updated | unchanged
+    #: created | unchanged. There is no "updated": a Publication's content
+    #: never changes after it is created. See materialize_approved_revision.
     result: str
     publication: Publication
     revision: ContentRevision
@@ -767,76 +771,52 @@ def _latest_decision(
     ).one_or_none()
 
 
-def _is_safely_editable(publication: Publication) -> bool:
-    """Not started, not attempted, not live, not held by a worker."""
-
-    return (
-        publication.status in SAFELY_EDITABLE_PUBLICATION_STATUSES
-        and publication.threads_post_id is None
-        and publication.published_at is None
-        and publication.attempt_count == 0
-        and publication.claimed_by is None
-    )
+#: Shown when an earlier delivery snapshot is still live. Worded for the
+#: person who has to act on it: the fix is an explicit cancel.
+PREVIOUS_SNAPSHOT_ACTIVE = (
+    "Previous delivery snapshot must be cancelled before a newer revision "
+    "can be materialized."
+)
 
 
-def _require_editable(publication: Publication) -> None:
-    if _is_safely_editable(publication):
-        return
-
-    raise PublicationNotEditable(
-        publication_id=publication.id,
-        status=publication.status,
-        reason=(
-            f"Publication {publication.id} built from an earlier revision "
-            f"is {publication.status.value} and may not be rewritten. "
-            "Cancel it first if the new revision should replace it."
-        ),
-    )
-
-
-def _lock_linked_publication(
-    db: Session, *, publication_id: int
-) -> Publication:
-    """Lock the one Publication about to be rewritten, and re-read it."""
-
-    try:
-        publication = db.scalars(
-            select(Publication)
-            .where(Publication.id == publication_id)
-            .with_for_update()
-            .execution_options(populate_existing=True)
-        ).one_or_none()
-    except OperationalError as exc:
-        raise ContentLocked(
-            f"Publication {publication_id} is locked by another "
-            "transaction; try again."
-        ) from exc
-
-    if publication is None:
-        raise ContentUnavailable("Linked publication disappeared.")
-
-    return publication
-
-
-def _copy_snapshot(
-    publication: Publication,
+def _build_publication(
     *,
     item: ContentItem,
     revision: ContentRevision,
+    platform: str,
+    ordinal: int,
     key: str,
-) -> None:
-    publication.title = revision.title or item.title
-    publication.body = revision.body
-    publication.format = revision.format
-    publication.images = list(revision.images or [])
-    publication.items = list(revision.items or [])
-    publication.editor_score = revision.editor_score
-    publication.idempotency_key = key
-    publication.source_ref = publication_link(item.id)
-    # The reason this Publication may be delivered at all: a person
-    # approved exactly this text. The worker still requires it.
-    publication.human_reviewed = True
-    publication.status = PublicationStatus.APPROVED
+    now: datetime,
+) -> Publication:
+    """A new Publication carrying one revision's snapshot.
+
+    This only ever constructs a new row. Nothing in the editorial layer
+    writes a snapshot onto an existing Publication: once created, a
+    Publication is the delivery snapshot of exactly one approved revision
+    and its content does not change under anyone who has looked at it.
+    """
+
+    return Publication(
+        project_id=item.project_id,
+        platform=platform,
+        ordinal=ordinal,
+        title=revision.title or item.title,
+        body=revision.body,
+        format=revision.format,
+        images=list(revision.images or []),
+        items=list(revision.items or []),
+        editor_score=revision.editor_score,
+        idempotency_key=key,
+        source_ref=publication_link(item.id),
+        # The reason this Publication may be delivered at all: a person
+        # approved exactly this text. The worker still requires it.
+        human_reviewed=True,
+        status=PublicationStatus.APPROVED,
+        scheduled_at=None,
+        attempt_count=0,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def materialize_approved_revision(
@@ -863,23 +843,33 @@ def materialize_approved_revision(
     barrier, and source_ref as a human-readable trace; neither is read to
     decide anything.
 
-    One live Publication per (item, platform), found through the links.
-    If the item already has one from an earlier revision:
+    **A Publication is an immutable delivery snapshot of one revision.**
+    Materialisation only ever creates one; it never rewrites an existing
+    Publication with a newer revision. That is deliberate. Approval and
+    scheduling are separate gates held by different people: an admin who
+    has opened a Publication and decided to schedule it must schedule
+    exactly what they read. A row lock protects the row, not that intent
+    -- if the content could change underneath, the schedule command would
+    see `approved` and queue text the admin never saw.
 
-    * still in draft/approved, never attempted, not claimed, no post id
-      -> it is rewritten with the new snapshot ("updated"), and in the
-      same transaction its link is replaced: the row for the old revision
-      is deleted and one for the new revision inserted, so the database
-      says unambiguously which revision the Publication now carries. The
-      replaced revision is named in the audit entry;
-    * anything else -> 409. A row that is scheduled, claimed, publishing,
-      needs_review, published or failed has started delivery or may have
-      reached the platform, and rewriting it is how one item would be
-      posted twice. The operator cancels it first if they mean to.
+    So, for the item's Publications on this platform (found through the
+    links, never through source_ref):
 
-    A cancelled Publication is history: it is never touched, its link
-    stays as the lineage of the revision it carried, and it never blocks
-    a new one.
+    * the exact revision is already linked -> that Publication, returned
+      "unchanged", nothing written, whatever state delivery has reached;
+    * any non-cancelled Publication from an earlier revision -- draft,
+      approved, scheduled, claimed, publishing, needs_review, published,
+      failed -> 409, and nothing is changed, linked or created. The
+      previous snapshot must be cancelled explicitly first;
+    * only cancelled ones, or none -> a new Publication and a new link
+      ("created"). A cancelled Publication and its link stay as the
+      historical lineage of the revision it carried.
+
+    The earlier Publication is decided on an unlocked read and never
+    locked: nothing here writes it, and a lock would make the worker skip
+    it. Two materialisations of one item are serialised by the item lock,
+    so no second live Publication can appear between the check and the
+    insert.
     """
 
     human = _require_human(actor_user, command="materialize")
@@ -936,19 +926,13 @@ def materialize_approved_revision(
 
     # Run the delivery preflight on the would-be Publication before any
     # row is written. A transient object, never added to the session.
-    candidate = Publication(
-        project_id=item.project_id,
+    candidate = _build_publication(
+        item=item,
+        revision=revision,
         platform=platform,
         ordinal=0,
-        title=revision.title or item.title,
-        format=revision.format,
-        body=revision.body,
-        images=list(revision.images or []),
-        items=list(revision.items or []),
-        status=PublicationStatus.APPROVED,
-        human_reviewed=True,
-        idempotency_key=key,
-        attempt_count=0,
+        key=key,
+        now=now,
     )
 
     try:
@@ -1007,90 +991,62 @@ def materialize_approved_revision(
             ),
         )
 
-    # 2. The item's live Publication on this platform, found through the
-    #    links -- never through source_ref. Legacy Publications have no
-    #    link and are invisible here.
-    live = list(
-        db.execute(
-            select(ContentPublicationLink, Publication)
-            .join(
-                Publication,
-                Publication.id == ContentPublicationLink.publication_id,
-            )
-            .where(
-                ContentPublicationLink.content_item_id == item.id,
-                ContentPublicationLink.platform == platform,
-                Publication.status != PublicationStatus.CANCELLED,
-            )
-            .order_by(Publication.id)
-            .execution_options(populate_existing=True)
+    # 2. Any earlier, non-cancelled delivery snapshot of this item on
+    #    this platform blocks a new one. Found through the links -- never
+    #    through source_ref -- so legacy Publications are invisible here.
+    #    Read without a lock: it is never written.
+    live = db.execute(
+        select(ContentPublicationLink, Publication)
+        .join(
+            Publication,
+            Publication.id == ContentPublicationLink.publication_id,
         )
-    )
+        .where(
+            ContentPublicationLink.content_item_id == item.id,
+            ContentPublicationLink.platform == platform,
+            Publication.status != PublicationStatus.CANCELLED,
+        )
+        .order_by(Publication.id)
+        .limit(1)
+        .execution_options(populate_existing=True)
+    ).first()
 
-    if len(live) > 1:
+    if live is not None:
+        previous_link, previous = live
+
         raise PublicationNotEditable(
-            publication_id=live[0][1].id,
-            status=live[0][1].status,
+            publication_id=previous.id,
+            status=previous.status,
+            previous_revision_id=previous_link.revision_id,
             reason=(
-                "More than one live Publication is linked to this content "
-                "item; refusing to choose one. Cancel the extra ones first."
+                f"{PREVIOUS_SNAPSHOT_ACTIVE} Publication {previous.id} "
+                f"(revision {previous_link.revision_id}) is "
+                f"{previous.status.value}."
             ),
         )
 
-    previous_revision_id: uuid.UUID | None = None
-
-    if live:
-        old_link, candidate_publication = live[0]
-
-        # Decide on an unlocked read first, so a row that has started
-        # delivery is refused without ever being locked; then lock the
-        # one row that will be written and decide again, because an
-        # admin may have scheduled it in between.
-        _require_editable(candidate_publication)
-        publication = _lock_linked_publication(
-            db, publication_id=candidate_publication.id
-        )
-        _require_editable(publication)
-
-        # Replace the lineage in the same transaction as the snapshot.
-        # The old row goes first: publication_id is UNIQUE, so the new
-        # row cannot coexist with it even for an instant.
-        previous_revision_id = old_link.revision_id
+    # 3. Create the snapshot and its lineage, in this transaction.
+    ordinal = (
         db.execute(
-            delete(ContentPublicationLink).where(
-                ContentPublicationLink.publication_id == publication.id
+            select(func.coalesce(func.max(Publication.ordinal), 0)).where(
+                Publication.project_id == item.project_id,
+                Publication.platform == platform,
             )
-        )
+        ).scalar_one()
+        + 1
+    )
 
-        _copy_snapshot(publication, item=item, revision=revision, key=key)
-        publication.updated_at = now
-        result = "updated"
-    else:
-        ordinal = (
-            db.execute(
-                select(func.coalesce(func.max(Publication.ordinal), 0)).where(
-                    Publication.project_id == item.project_id,
-                    Publication.platform == platform,
-                )
-            ).scalar_one()
-            + 1
-        )
+    publication = _build_publication(
+        item=item,
+        revision=revision,
+        platform=platform,
+        ordinal=ordinal,
+        key=key,
+        now=now,
+    )
+    db.add(publication)
 
-        publication = Publication(
-            project_id=item.project_id,
-            platform=platform,
-            ordinal=ordinal,
-            scheduled_at=None,
-            attempt_count=0,
-            created_at=now,
-            updated_at=now,
-        )
-        _copy_snapshot(publication, item=item, revision=revision, key=key)
-        db.add(publication)
-        result = "created"
-
-    # The Publication row must exist (and carry its new key) before the
-    # link that references it.
+    # The Publication row must exist before the link that references it.
     db.flush()
 
     db.add(
@@ -1111,22 +1067,17 @@ def materialize_approved_revision(
         action="content.materialized",
         subject=f"content_item:{item.id}",
         details={
-            "result": result,
+            "result": "created",
             "publication_id": publication.id,
             "revision_id": str(revision.id),
             "revision_number": revision.revision_number,
             "content_hash": revision.content_hash,
             "platform": platform,
-            # On "updated", the revision this Publication carried until
-            # now -- the lineage row for it was replaced.
-            "previous_revision_id": (
-                str(previous_revision_id) if previous_revision_id else None
-            ),
         },
     )
 
     return MaterializeResult(
-        result=result,
+        result="created",
         publication=publication,
         revision=revision,
         platform=platform,

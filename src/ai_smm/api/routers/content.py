@@ -1,8 +1,8 @@
 """The editorial layer over HTTP: content, revisions, human approval.
 
 Viewer and above read; editor and above write. The bridge into delivery,
-/materialize, creates or refreshes a Publication from the approved
-revision and stops there: scheduling stays an admin command
+/materialize, creates a Publication from the approved revision -- never
+rewrites an existing one -- and stops there: scheduling stays an admin command
 (/publications/{id}/schedule), and only the worker publishes. There is
 no publish endpoint here either.
 
@@ -291,8 +291,8 @@ def reject(
     "/content-items/{content_item_id}/materialize",
     response_model=MaterializeOut,
     summary=(
-        "Create or refresh the delivery Publication from the approved "
-        "revision; never schedules, never publishes (editor+)"
+        "Create the delivery Publication for the approved revision; "
+        "never rewrites one, never schedules, never publishes (editor+)"
     ),
 )
 def materialize(
@@ -369,12 +369,17 @@ def _run(command):
     except PublicationNotEditable as exc:
         raise ApiError(
             status_code=409,
-            code=ErrorCode.INVALID_STATE_TRANSITION,
+            code=ErrorCode.PUBLICATION_NOT_EDITABLE,
             message=str(exc),
             details={
                 "command": "materialize",
                 "publication_id": exc.publication_id,
                 "publication_status": exc.status.value,
+                "previous_revision_id": (
+                    str(exc.previous_revision_id)
+                    if exc.previous_revision_id
+                    else None
+                ),
             },
         ) from exc
     except NotDeliverable as exc:

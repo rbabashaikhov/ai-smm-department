@@ -1116,13 +1116,12 @@ class ContentPublicationLink(Base):
       and is on the row's platform -- a constraint no foreign key can
       express without altering publications, which is left untouched.
 
-    When a newer approved revision is written into a Publication that has
-    not started delivery, that Publication's row here is replaced in the
-    same transaction: it now came from the new revision, and the database
-    must say so unambiguously. The replacement is recorded in the audit
-    entry, and every approval stays in content_approvals. A cancelled
-    Publication is never rewritten, so its row remains the correct
-    lineage of the revision it carried.
+    Rows are written once, together with the Publication they describe,
+    and never repointed: a Publication is the immutable delivery snapshot
+    of one revision, so its link can never come to mean a different one.
+    A newer revision gets a new Publication and a new row, and only after
+    the earlier Publication has been cancelled; that cancelled Publication
+    keeps its row as the historical lineage of the revision it carried.
     """
 
     __tablename__ = "content_publication_links"

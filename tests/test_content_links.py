@@ -9,8 +9,9 @@ its *current* snapshot came from.
   revisions.
 * composite FK onto content_revisions: the revision belongs to the item.
 * trigger: the Publication is in the item's project and on the platform.
-* a safe rewrite replaces the Publication's row in the same transaction;
-  a cancelled Publication keeps its row as historical lineage.
+* a Publication is an immutable delivery snapshot: its link is written
+  once and never repointed. A newer revision needs the earlier snapshot
+  cancelled first; the cancelled one keeps its link as history.
 
 The link is authoritative; publications.source_ref and idempotency_key
 are a trace and a second barrier, and the tests below tamper with them to
@@ -18,6 +19,7 @@ prove nothing decides from them.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -82,6 +84,16 @@ def _links(session: Session, **where) -> list[ContentPublicationLink]:
         stmt = stmt.where(getattr(ContentPublicationLink, column) == value)
 
     return list(session.scalars(stmt))
+
+
+def _cancel(session: Session, publication_id: int) -> None:
+    """Cancel through the queue's own command, as the operator would."""
+
+    from ai_smm.queue import cancel
+
+    publication = session.get(Publication, publication_id)
+    cancel(session, publication, actor="test:operator", note="replace")
+    session.commit()
 
 
 @pytest.fixture
@@ -367,72 +379,116 @@ def test_a_publication_claiming_the_item_only_by_source_ref_is_ignored(
     assert (impostor.body, impostor.idempotency_key, impostor.status) == before
 
 
-# -- 7: a safe rewrite replaces the lineage -----------------------------
+# -- 7: a snapshot is never rewritten or repointed -----------------------
 
 
-def test_a_safe_rewrite_leaves_exactly_one_link_naming_the_new_revision(
+def test_a_newer_revision_never_repoints_the_existing_link(
     client, session: Session, approved, csrf
 ) -> None:
     item, first_revision = approved
     publication_id = _post(client, item.id, "materialize", csrf).json()[
         "publication"
     ]["id"]
+    (link_before,) = _links(session, publication_id=publication_id)
+    created_at = link_before.created_at
 
     second = _revise_and_approve(client, item.id, csrf, "Вторая редакция.")
-    response = _post(client, item.id, "materialize", csrf).json()
+    response = _post(client, item.id, "materialize", csrf)
 
-    assert response["result"] == "updated"
-    assert response["publication"]["id"] == publication_id
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PUBLICATION_NOT_EDITABLE"
 
-    links = _links(session, publication_id=publication_id)
+    (link_after,) = _links(session, publication_id=publication_id)
 
-    assert len(links) == 1
-    assert str(links[0].revision_id) == second
-
-    # The old revision is no longer attributed to any Publication: the
-    # database answers "where did this snapshot come from" with one row.
-    assert _links(session, revision_id=first_revision.id) == []
-    assert session.get(Publication, publication_id).body == "Вторая редакция."
+    assert link_after.revision_id == first_revision.id
+    assert link_after.created_at == created_at
+    assert _links(session, revision_id=uuid.UUID(second)) == []
+    assert session.get(Publication, publication_id).body == "Утверждённый текст."
 
 
-def test_the_replaced_revision_is_recorded_in_the_audit(
+def test_materialisation_never_updates_an_existing_publication(
+    client, session: Session, engine, approved, csrf
+) -> None:
+    """Structural: across create, replay and refusal, no UPDATE is issued.
+
+    Watched at the engine, so it covers every statement the API sends,
+    whatever code path it comes from.
+    """
+
+    from sqlalchemy import event
+
+    updates: list[str] = []
+
+    def watch(conn, cursor, statement, parameters, context, executemany):
+        normalized = " ".join(statement.split()).upper()
+
+        if normalized.startswith("UPDATE PUBLICATIONS"):
+            updates.append(statement)
+
+    item, _ = approved
+    event.listen(engine, "before_cursor_execute", watch)
+
+    try:
+        _post(client, item.id, "materialize", csrf)  # created
+        _post(client, item.id, "materialize", csrf)  # unchanged
+        _revise_and_approve(client, item.id, csrf, "Вторая.")
+        refused = _post(client, item.id, "materialize", csrf)  # 409
+    finally:
+        event.remove(engine, "before_cursor_execute", watch)
+
+    assert refused.status_code == 409
+    assert updates == []
+
+
+def test_a_successful_materialisation_audits_exactly_the_agreed_fields(
     client, session: Session, approved, csrf
 ) -> None:
-    item, first_revision = approved
-    _post(client, item.id, "materialize", csrf)
-    second = _revise_and_approve(client, item.id, csrf, "Вторая редакция.")
-    _post(client, item.id, "materialize", csrf)
+    item, revision = approved
+    publication_id = _post(client, item.id, "materialize", csrf).json()[
+        "publication"
+    ]["id"]
+
+    _post(client, item.id, "materialize", csrf)  # replay: nothing written
+    _revise_and_approve(client, item.id, csrf, "Вторая.")
+    _post(client, item.id, "materialize", csrf)  # refused: nothing written
 
     session.expire_all()
     entries = list(
         session.scalars(
-            select(AuditLog)
-            .where(
+            select(AuditLog).where(
                 AuditLog.subject == f"content_item:{item.id}",
                 AuditLog.action == "content.materialized",
             )
-            .order_by(AuditLog.id)
         )
     )
 
-    assert [entry.details["result"] for entry in entries] == ["created", "updated"]
-    assert entries[0].details["previous_revision_id"] is None
-    assert entries[1].details["previous_revision_id"] == str(first_revision.id)
-    assert entries[1].details["revision_id"] == second
+    assert len(entries) == 1
+    assert entries[0].details == {
+        "result": "created",
+        "publication_id": publication_id,
+        "revision_id": str(revision.id),
+        "revision_number": 1,
+        "content_hash": revision.content_hash,
+        "platform": "threads",
+    }
 
 
-def test_the_approval_history_survives_a_rewrite(
+def test_the_approval_history_survives_a_cancel_and_a_new_snapshot(
     client, session: Session, approved, csrf
 ) -> None:
     item, first_revision = approved
-    _post(client, item.id, "materialize", csrf)
-    _revise_and_approve(client, item.id, csrf, "Вторая редакция.")
-    _post(client, item.id, "materialize", csrf)
+    first = _post(client, item.id, "materialize", csrf).json()["publication"]["id"]
+    _cancel(session, first)
+    second = _revise_and_approve(client, item.id, csrf, "Вторая редакция.")
+
+    assert _post(client, item.id, "materialize", csrf).status_code == 201
 
     approvals = client.get(f"/api/v1/content-items/{item.id}/approvals").json()
 
-    assert approvals["items"][0]["revision_id"] == str(first_revision.id)
-    assert approvals["total"] == 2
+    assert [a["revision_id"] for a in approvals["items"]] == [
+        str(first_revision.id),
+        second,
+    ]
 
 
 # -- 8, 9: cancelled Publications keep their lineage --------------------
@@ -443,9 +499,7 @@ def test_a_cancelled_publication_keeps_its_historical_link(
 ) -> None:
     item, first_revision = approved
     old_id = _post(client, item.id, "materialize", csrf).json()["publication"]["id"]
-    old = session.get(Publication, old_id)
-    old.status = PublicationStatus.CANCELLED
-    session.commit()
+    _cancel(session, old_id)
 
     second = _revise_and_approve(client, item.id, csrf, "После отмены.")
     response = _post(client, item.id, "materialize", csrf)
@@ -472,9 +526,7 @@ def test_the_cancelled_revision_is_never_materialised_twice(
 
     item, _ = approved
     old_id = _post(client, item.id, "materialize", csrf).json()["publication"]["id"]
-    old = session.get(Publication, old_id)
-    old.status = PublicationStatus.CANCELLED
-    session.commit()
+    _cancel(session, old_id)
 
     repeat = _post(client, item.id, "materialize", csrf)
 
@@ -562,9 +614,11 @@ def test_materialisation_never_touches_a_legacy_row(
     before = (legacy.body, legacy.idempotency_key, legacy.source_ref, legacy.status)
     item, _ = approved
 
-    _post(client, item.id, "materialize", csrf)
+    assert _post(client, item.id, "materialize", csrf).status_code == 201
     _revise_and_approve(client, item.id, csrf, "вторая")
-    _post(client, item.id, "materialize", csrf)
+    # Blocked by the item's own live snapshot -- the legacy row plays no
+    # part in that decision either way.
+    assert _post(client, item.id, "materialize", csrf).status_code == 409
 
     session.expire_all()
     session.refresh(legacy)
@@ -575,3 +629,164 @@ def test_materialisation_never_touches_a_legacy_row(
         legacy.source_ref,
         legacy.status,
     ) == before
+
+
+
+# -- the whole lifecycle, as specified ----------------------------------
+
+
+def test_the_full_snapshot_lifecycle(
+    client, session: Session, login, member, make_content, csrf
+) -> None:
+    """Steps 1-11 of the agreed semantics, in one continuous story."""
+
+    item, revision_a = make_content(body="Ревизия A.")
+    _approve(client, item.id, csrf)
+
+    # 1. revision A -> Publication A + link A.
+    first = _post(client, item.id, "materialize", csrf)
+
+    assert first.status_code == 201
+    assert first.json()["result"] == "created"
+
+    publication_a = first.json()["publication"]["id"]
+    (link_a,) = _links(session, publication_id=publication_a)
+
+    assert link_a.revision_id == revision_a.id
+
+    # 2. exact replay -> the same Publication, unchanged.
+    replay = _post(client, item.id, "materialize", csrf)
+
+    assert replay.status_code == 200
+    assert replay.json()["result"] == "unchanged"
+    assert replay.json()["publication"]["id"] == publication_a
+
+    # 3. revision B is created and approved.
+    revision_b = _revise_and_approve(client, item.id, csrf, "Ревизия B.")
+
+    # 4. B cannot be materialised while A is approved...
+    a_row = session.get(Publication, publication_a)
+    a_before = tuple(
+        getattr(a_row, c.key) for c in Publication.__table__.columns
+    )
+    blocked = _post(client, item.id, "materialize", csrf)
+
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "PUBLICATION_NOT_EDITABLE"
+
+    # 5. ...A is byte-for-byte the same snapshot...
+    session.expire_all()
+    a_row = session.get(Publication, publication_a)
+
+    assert (
+        tuple(getattr(a_row, c.key) for c in Publication.__table__.columns)
+        == a_before
+    )
+
+    # 6. ...and link A is still there.
+    assert _links(session, publication_id=publication_a)[0].revision_id == (
+        revision_a.id
+    )
+
+    # 7. an admin cancels A through the queue command.
+    client.cookies.clear()
+    admin_csrf = login(member(MembershipRole.ADMIN))
+
+    assert (
+        client.post(
+            f"/api/v1/publications/{publication_a}/cancel",
+            json={"note": "replaced by revision B"},
+            headers={"X-CSRF-Token": admin_csrf},
+        ).status_code
+        == 200
+    )
+
+    # 8. now B materialises into a new Publication B...
+    second = _post(client, item.id, "materialize", admin_csrf)
+
+    assert second.status_code == 201
+    assert second.json()["result"] == "created"
+
+    publication_b = second.json()["publication"]["id"]
+
+    assert publication_b != publication_a
+
+    # 9. ...link B names revision B...
+    (link_b,) = _links(session, publication_id=publication_b)
+
+    assert str(link_b.revision_id) == revision_b
+
+    # 10. ...link A still names revision A...
+    (link_a_after,) = _links(session, publication_id=publication_a)
+
+    assert link_a_after.revision_id == revision_a.id
+
+    # 11. ...and A is a cancelled historical snapshot of revision A.
+    session.expire_all()
+    a_row = session.get(Publication, publication_a)
+
+    assert a_row.status is PublicationStatus.CANCELLED
+    assert a_row.body == "Ревизия A."
+    assert session.get(Publication, publication_b).body == "Ревизия B."
+
+
+# -- 12: the stale-intent race that the immutability rule closes --------
+
+
+def test_an_admin_always_schedules_exactly_what_they_read(
+    client, session: Session, login, member, make_content, csrf
+) -> None:
+    """The race from review, replayed end to end.
+
+    1. the admin opens Publication A while it is approved;
+    2. an editor gets a newer revision B approved;
+    3. materialising B must fail while A is not cancelled;
+    4. so when the admin schedules A, the row still holds exactly what
+       they read -- it cannot have been rewritten underneath them.
+    """
+
+    item, _ = make_content(body="Текст, который видел админ.")
+    _approve(client, item.id, csrf)
+    publication_id = _post(client, item.id, "materialize", csrf).json()[
+        "publication"
+    ]["id"]
+
+    # 1. the admin reads it.
+    client.cookies.clear()
+    admin_csrf = login(member(MembershipRole.ADMIN))
+    seen = client.get(f"/api/v1/publications/{publication_id}").json()
+
+    assert seen["status"] == "approved"
+
+    # 2. meanwhile an editor revises and approves B.
+    client.cookies.clear()
+    editor_csrf = login(member(MembershipRole.EDITOR))
+    _revise_and_approve(client, item.id, editor_csrf, "Тихая правка редактора.")
+
+    # 3. materialising B is refused while A is live.
+    refused = _post(client, item.id, "materialize", editor_csrf)
+
+    assert refused.status_code == 409
+    assert refused.json()["error"]["details"]["publication_id"] == publication_id
+
+    # 4. the admin's schedule goes through -- on the text they read.
+    client.cookies.clear()
+    admin_csrf = login(member(MembershipRole.ADMIN))
+    scheduled = client.post(
+        f"/api/v1/publications/{publication_id}/schedule",
+        json={
+            "scheduled_at": (
+                datetime.now(timezone.utc) + timedelta(hours=1)
+            ).isoformat()
+        },
+        headers={"X-CSRF-Token": admin_csrf},
+    )
+
+    assert scheduled.status_code == 200
+
+    queued = scheduled.json()
+
+    for field in ("body", "title", "format", "images", "items", "idempotency_key"):
+        assert queued[field] == seen[field], field
+
+    assert queued["body"] == "Текст, который видел админ."

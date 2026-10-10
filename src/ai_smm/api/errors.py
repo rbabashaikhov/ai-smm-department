@@ -39,6 +39,9 @@ class ErrorCode:
     #: An approval, rejection or submission named a revision that is no
     #: longer the item's current one. The reviewer read old text.
     STALE_REVISION = "STALE_REVISION"
+    #: An earlier delivery snapshot of the content item is still live.
+    #: It is never rewritten; it has to be cancelled first.
+    PUBLICATION_NOT_EDITABLE = "PUBLICATION_NOT_EDITABLE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
     #: CSRF is split in two so an operator can tell a client that never

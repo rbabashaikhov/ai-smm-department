@@ -458,10 +458,11 @@ class DecisionOut(BaseModel):
 
 
 class MaterializeOut(BaseModel):
-    """What the bridge did. It never schedules and never publishes."""
+    """What the bridge did. It never rewrites, schedules or publishes."""
 
-    #: created | updated | unchanged
-    result: Literal["created", "updated", "unchanged"]
+    #: created | unchanged. A Publication's content never changes after it
+    #: is created, so there is no "updated".
+    result: Literal["created", "unchanged"]
     platform: str
     revision_id: uuid.UUID
     publication: PublicationDetail
