@@ -637,7 +637,9 @@ class UserSession(Base):
 
     The raw session token exists only in the client cookie: this table
     stores its SHA-256 hash, so a dump of the database cannot be replayed
-    as a login. The CSRF token is stored the same way.
+    as a login. The CSRF token is not stored at all -- it is an HMAC of
+    the session token, recomputed from the cookie on each request, which
+    is what keeps it identical across a session's browser tabs.
 
     Two independent deadlines apply. expires_at is the absolute lifetime,
     fixed at login. Idleness is derived from last_seen_at by the session
@@ -661,9 +663,6 @@ class UserSession(Base):
     )
     #: SHA-256 hex digest of the session token.
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    #: SHA-256 hex digest of the current CSRF token, or NULL before one
-    #: has been issued for this session.
-    csrf_token_hash: Mapped[str | None] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

@@ -11,6 +11,12 @@ The check is installed as a dependency of the whole /api/v1 router rather
 than per route, so a route added later is protected by default and has to
 be listed in CSRF_EXEMPT_PATHS to opt out.
 
+The token itself is derived from the session token rather than stored and
+rotated, so every tab of one session holds the same working token and
+fetching it again never invalidates a tab that already has it. It stops
+working when the session is revoked or expires, because the check starts
+from the cookie.
+
 The one exemption is login: there is no session yet, so there is no token
 to present, and a forged login grants an attacker a session in their own
 browser rather than access to the victim's account.
@@ -69,7 +75,7 @@ def csrf_guard(
             ),
         )
 
-    if not csrf_token_is_valid(authenticated.session, presented):
+    if not csrf_token_is_valid(authenticated, presented):
         raise ApiError(
             status_code=403,
             code=ErrorCode.CSRF_INVALID,

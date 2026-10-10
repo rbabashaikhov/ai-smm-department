@@ -32,7 +32,7 @@ from ai_smm.application.auth import (
     CSRF_HEADER_NAME,
     authenticate,
     create_session,
-    issue_csrf_token,
+    csrf_token_for,
     revoke_session,
     utcnow,
 )
@@ -86,7 +86,7 @@ def login(
     user_session, token = create_session(
         db, user=user, settings=settings, now=now
     )
-    csrf_token = issue_csrf_token(user_session, now=now)
+    csrf_token = csrf_token_for(token)
 
     user.last_login_at = now
     user.updated_at = now
@@ -159,11 +159,12 @@ def me(db: DbSession, authenticated: CurrentSession) -> MeResponse:
     summary="Mint the CSRF token this session must send on unsafe requests",
 )
 def csrf(authenticated: CurrentSession) -> CsrfResponse:
-    # Issuing replaces the previous token for this session, so a client
-    # fetches one after login and keeps it, rather than per request.
-    token = issue_csrf_token(authenticated.session)
-
-    return CsrfResponse(csrf_token=token, header_name=CSRF_HEADER_NAME)
+    # Idempotent: the token is derived from the session, so two tabs of
+    # one session fetch the same value and neither invalidates the
+    # other's. It stops working when the session does.
+    return CsrfResponse(
+        csrf_token=authenticated.csrf_token, header_name=CSRF_HEADER_NAME
+    )
 
 
 def _user_out(user) -> UserOut:

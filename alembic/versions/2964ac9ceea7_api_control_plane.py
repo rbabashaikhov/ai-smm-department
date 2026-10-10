@@ -62,13 +62,14 @@ def upgrade() -> None:
     )
 
     # Only the SHA-256 digest of a session token is stored, so a dump of
-    # this table cannot be replayed as a login. Same for the CSRF token.
+    # this table cannot be replayed as a login. There is no CSRF column:
+    # that token is an HMAC of the session token, recomputed from the
+    # cookie on each request rather than stored.
     op.create_table(
         "user_sessions",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("user_id", sa.Uuid(), nullable=False),
         sa.Column("token_hash", sa.String(length=64), nullable=False),
-        sa.Column("csrf_token_hash", sa.String(length=64), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column(
             "last_seen_at",

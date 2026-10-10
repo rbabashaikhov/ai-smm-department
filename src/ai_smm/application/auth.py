@@ -10,6 +10,10 @@ Two deadlines bound a session, and both are checked on every request:
 * idle timeout -- derived from last_seen_at (24 hours by default), so a
   session that is simply abandoned stops working long before it expires.
 
+The CSRF token of a session is derived from the same token rather than
+stored: see ai_smm.security.tokens.derive_csrf_token. That is what makes
+it stable across browser tabs while still dying with the session.
+
 Nothing here contacts an external system, and no function in this module
 returns a reason for a failed login: the API answers with one generic
 message so that an attacker cannot tell a wrong password from an unknown
@@ -30,7 +34,12 @@ from ai_smm.security.passwords import (
     password_needs_rehash,
     verify_password,
 )
-from ai_smm.security.tokens import generate_token, hash_token, tokens_match
+from ai_smm.security.tokens import (
+    derive_csrf_token,
+    generate_token,
+    hash_token,
+    tokens_equal,
+)
 
 
 #: The only cookie the API sets. HttpOnly, SameSite=Lax, Path=/, and
@@ -47,10 +56,16 @@ def utcnow() -> datetime:
 
 @dataclass(frozen=True)
 class AuthenticatedSession:
-    """A session that passed every check, with its user already loaded."""
+    """A session that passed every check, with its user already loaded.
+
+    csrf_token is the token this session must present on an unsafe
+    request. It is recomputed from the cookie on every request, so it is
+    the same value for as long as the session lives.
+    """
 
     user: User
     session: UserSession
+    csrf_token: str
 
 
 def authenticate(
@@ -177,7 +192,11 @@ def resolve_session(
 
     user_session.last_seen_at = now
 
-    return AuthenticatedSession(user=user, session=user_session)
+    return AuthenticatedSession(
+        user=user,
+        session=user_session,
+        csrf_token=derive_csrf_token(token),
+    )
 
 
 def revoke_session(
@@ -189,26 +208,24 @@ def revoke_session(
         user_session.revoked_at = now or utcnow()
 
 
-def issue_csrf_token(
-    user_session: UserSession, *, now: datetime | None = None
-) -> str:
-    """Mint a CSRF token for this session and store only its digest.
+def csrf_token_for(session_token: str) -> str:
+    """The CSRF token to hand to the client holding this session token.
 
-    Issuing replaces any previous token, so a client fetches one and
-    reuses it for the lifetime of the session rather than per request.
+    Idempotent by construction: asking twice, from two tabs or from two
+    processes, returns the same token, and neither answer invalidates the
+    other. Revoking the session is what invalidates it, because the
+    check below starts from the cookie.
     """
 
-    token = generate_token()
-    user_session.csrf_token_hash = hash_token(token)
-    user_session.last_seen_at = now or utcnow()
-
-    return token
+    return derive_csrf_token(session_token)
 
 
 def csrf_token_is_valid(
-    user_session: UserSession, presented: str | None
+    authenticated: AuthenticatedSession, presented: str | None
 ) -> bool:
-    return tokens_match(user_session.csrf_token_hash, presented)
+    """Constant-time comparison against the token this session must send."""
+
+    return tokens_equal(authenticated.csrf_token, presented)
 
 
 def _as_utc(value: datetime) -> datetime:

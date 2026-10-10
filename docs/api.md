@@ -107,7 +107,7 @@ curl -s -c jar.txt -X POST $BASE/api/v1/auth/login \
 # 2. Safe requests need the cookie only.
 curl -s -b jar.txt $BASE/api/v1/auth/me
 
-# 3. A new CSRF token, when the old one is lost. Issuing retires the previous.
+# 3. The CSRF token again, when a tab does not have it. Always the same value.
 curl -s -b jar.txt $BASE/api/v1/auth/csrf
 
 # 4. Unsafe requests need the cookie and the header.
@@ -127,7 +127,7 @@ curl -s -b jar.txt -X POST $BASE/api/v1/auth/logout -H "X-CSRF-Token: $TOKEN"
 | Stored | SHA-256 digest only, so a dump of `user_sessions` cannot be replayed as a login |
 | Absolute lifetime | 7 days, fixed at login (`expires_at`) |
 | Idle timeout | 24 hours, derived from `last_seen_at` |
-| Revocation | logout sets `revoked_at`; the token stops working immediately |
+| Revocation | logout sets `revoked_at`; the session token and its CSRF token stop working immediately |
 | Deactivation | a session of a deactivated user stops working on the next request |
 
 JWT is deliberately not used: a stateless token cannot be revoked, and
@@ -137,8 +137,26 @@ matters here.
 ### CSRF
 
 `GET`, `HEAD`, `OPTIONS` and `TRACE` need no token. `POST`, `PUT`,
-`PATCH` and `DELETE` must carry `X-CSRF-Token`, matched against the
-digest stored on the session.
+`PATCH` and `DELETE` must carry `X-CSRF-Token`.
+
+The token is **derived from the session token, not stored**: it is
+`HMAC-SHA256(session_token, "ai-smm-csrf-v1")`, recomputed from the
+cookie on every request. That gives three properties:
+
+- **stable**, so every browser tab of one session holds the same working
+  token and `GET /api/v1/auth/csrf` never invalidates a tab that already
+  has one. It is also returned by `login`, so the first unsafe request
+  needs no extra round trip;
+- **one-way**, so handing the token to page scripts or putting it in a
+  header does not expose the session cookie it came from. It is not
+  accepted as a session cookie either;
+- **bound to the session**, so revoking, expiring or idling out the
+  session invalidates the CSRF token with it — validation starts from
+  the cookie, and a token minted for an earlier session of the same user
+  is refused.
+
+No CSRF secret is stored in the database and no signing key has to be
+configured.
 
 The check is a dependency of the whole `/api/v1` router rather than of
 each route, so a route added later is protected by default. The single

@@ -1,9 +1,12 @@
-"""Opaque tokens and their storage form.
+"""Opaque tokens, their storage form, and the CSRF token derived from one.
 
-A session token and a CSRF token are generated with secrets.token_urlsafe
-and handed to the client once. Only the SHA-256 digest is stored, so the
-database never holds a credential that could be replayed. Comparison is
-constant time.
+A session token is generated with secrets.token_urlsafe and handed to the
+client once. Only its SHA-256 digest is stored, so the database never
+holds a credential that could be replayed. Comparison is constant time.
+
+The CSRF token is not a second stored secret: it is an HMAC of the
+session token, so it is the same value for the life of the session and is
+recomputed from the cookie on every request. See derive_csrf_token.
 """
 from __future__ import annotations
 
@@ -33,8 +36,39 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def tokens_match(stored_hash: str | None, presented_token: str | None) -> bool:
-    if not stored_hash or not presented_token:
+#: Domain separator. It keeps the CSRF token distinct from any other value
+#: that might one day be derived from the same session token, and the
+#: version suffix leaves room to change the derivation without silently
+#: accepting both forms.
+CSRF_CONTEXT = b"ai-smm-csrf-v1"
+
+
+def derive_csrf_token(session_token: str) -> str:
+    """The CSRF token belonging to this session token.
+
+    Derived rather than generated and stored, which buys three things:
+
+    * it is stable, so two browser tabs of one session get the same
+      working token and neither can invalidate the other's;
+    * it is one-way, so handing the token to page scripts or putting it
+      in a header does not expose the session cookie it came from;
+    * it needs no storage and dies with the session: validating it
+      requires the cookie, so a revoked or expired session has no valid
+      CSRF token any more.
+
+    The session token has full machine entropy, so it is a usable HMAC
+    key as it stands.
+    """
+
+    return hmac.new(
+        session_token.encode("utf-8"), CSRF_CONTEXT, hashlib.sha256
+    ).hexdigest()
+
+
+def tokens_equal(expected: str | None, presented: str | None) -> bool:
+    """Constant-time comparison of two tokens of the same kind."""
+
+    if not expected or not presented:
         return False
 
-    return hmac.compare_digest(stored_hash, hash_token(presented_token))
+    return hmac.compare_digest(expected, presented)

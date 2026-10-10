@@ -365,4 +365,7 @@ def test_a_session_token_hash_column_is_not_the_token(
     assert "token" not in columns
     assert "session_token" not in columns
     assert "token_hash" in columns
-    assert "csrf_token_hash" in columns
+
+    # The CSRF token is derived from the session token on each request,
+    # so there is no column for it either.
+    assert [name for name in columns if "csrf" in name] == []
