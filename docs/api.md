@@ -60,9 +60,16 @@ Interactive schema: `http://127.0.0.1:8000/docs`.
 | `AI_SMM_API_COOKIE_SECURE` | `true` | `Secure` on the session cookie; set `false` only for local http |
 | `LOG_LEVEL`, `LOG_FORMAT` | `INFO`, `json` | as for the worker |
 
-No new secret is introduced: there is no signing key to manage, because
-sessions are server-side and the CSRF token is stored as a digest
-alongside the session.
+No new secret is introduced, and there is no signing key or CSRF secret
+to manage, because nothing is signed and nothing extra is stored:
+
+- the raw session token exists only in the `smm_session` HttpOnly cookie;
+- `user_sessions` stores only its SHA-256 digest, so the table cannot be
+  replayed as a login;
+- the CSRF token is not stored in the database at all. It is derived
+  deterministically from the raw session token as
+  `HMAC-SHA256(session_token, "ai-smm-csrf-v1")` — the domain separator
+  is the message — and recomputed from the cookie on every request.
 
 ---
 
@@ -311,12 +318,13 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_test \
   pytest -q
 ```
 
-The API suites are `tests/test_api_auth.py`, `test_api_csrf.py`,
-`test_api_projects_rbac.py`, `test_api_health.py`,
-`test_api_contract.py`, `test_security_passwords.py` and
-`tests/test_cli_user.py`. They drive the real application through its
-factory against a disposable database; nothing is mocked except, where a
-test needs an expired session, the stored timestamps.
+The API and security suites are `tests/test_api_auth.py`,
+`test_api_csrf.py`, `test_api_projects_rbac.py`, `test_api_health.py`,
+`test_api_contract.py`, `test_security_passwords.py`,
+`test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
+real application through its factory against a disposable database;
+nothing is mocked except, where a test needs an expired session, the
+stored timestamps.
 
 `tests/test_migrations.py` additionally asserts that the control-plane
 migration is additive: that `publications` is byte-for-byte identical
