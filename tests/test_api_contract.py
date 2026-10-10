@@ -51,6 +51,15 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/publications/{publication_id}/reschedule",
             "/api/v1/publications/{publication_id}/cancel",
             "/api/v1/series/{series_id}",
+            # SMM-022C: the editorial layer and its bridge into delivery.
+            "/api/v1/projects/{project_id}/content-items",
+            "/api/v1/content-items/{content_item_id}",
+            "/api/v1/content-items/{content_item_id}/revisions",
+            "/api/v1/content-items/{content_item_id}/approvals",
+            "/api/v1/content-items/{content_item_id}/submit-review",
+            "/api/v1/content-items/{content_item_id}/approve",
+            "/api/v1/content-items/{content_item_id}/reject",
+            "/api/v1/content-items/{content_item_id}/materialize",
         ]
     )
 
@@ -71,6 +80,8 @@ def test_there_is_no_publish_endpoint(api_app) -> None:
         "/api/v1/publications/1/publish",
         "/api/v1/projects/p/publish",
         "/api/v1/publications/1/retry",
+        "/api/v1/content-items/00000000-0000-0000-0000-000000000000/publish",
+        "/api/v1/content-items/00000000-0000-0000-0000-000000000000/schedule",
     ],
 )
 def test_no_route_answers_a_publish_request(client, path: str) -> None:

@@ -12,11 +12,13 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    DDL,
     BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -24,6 +26,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    event,
     func,
 )
 from sqlalchemy import (
@@ -133,6 +136,47 @@ class MembershipRole(str, enum.Enum):
     OWNER = "owner"
 
 
+class ContentStatus(str, enum.Enum):
+    """Editorial lifecycle of a content item.
+
+        draft     -> in_review              (submit for review)
+        in_review -> approved | rejected    (a human decides)
+        any live  -> draft                  (a new revision is created)
+
+    approved always refers to one exact revision: the item's
+    approved_revision_id, which a check constraint pins to its current
+    revision. Creating a revision therefore returns the item to draft and
+    clears the approval -- an approval of revision N says nothing about
+    revision N+1. archived is terminal and has no transition in this stage.
+    """
+
+    DRAFT = "draft"
+    IN_REVIEW = "in_review"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    ARCHIVED = "archived"
+
+
+class RevisionSource(str, enum.Enum):
+    """Who produced a revision. Provenance only: it grants nothing.
+
+    An agent may write a draft revision. Only an authenticated human can
+    approve one, and that is enforced by content_approvals.actor_user_id
+    being a NOT NULL reference to users, not by this value.
+    """
+
+    HUMAN = "human"
+    STRATEGIST = "strategist"
+    COPYWRITER = "copywriter"
+    EDITOR = "editor"
+    IMPORT = "import"
+
+
+class ApprovalDecision(str, enum.Enum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class AttemptOutcome(str, enum.Enum):
     SUCCESS = "success"
     ERROR = "error"
@@ -170,6 +214,24 @@ attempt_phase_enum = SAEnum(
 membership_role_enum = SAEnum(
     MembershipRole,
     name="membership_role",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
+content_status_enum = SAEnum(
+    ContentStatus,
+    name="content_status",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
+revision_source_enum = SAEnum(
+    RevisionSource,
+    name="content_revision_source",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
+approval_decision_enum = SAEnum(
+    ApprovalDecision,
+    name="content_approval_decision",
     values_callable=lambda enum_cls: [m.value for m in enum_cls],
 )
 
@@ -756,3 +818,336 @@ class ProjectSettings(Base):
     )
 
     project: Mapped[Project] = relationship(back_populates="settings")
+
+
+
+# --- editorial layer ----------------------------------------------------
+# Content, its immutable revisions and the human decisions about them sit
+# in front of the delivery layer. Nothing here is read by the worker: a
+# revision reaches the queue only when an editor explicitly materialises
+# an approved one into a Publication, which is then scheduled and
+# delivered exactly as before.
+
+#: Formats a revision may take: the same set publications.format allows,
+#: so a materialised revision can never fail the delivery table's check.
+CONTENT_FORMATS = ("text", "image", "carousel", "thread")
+
+
+class ContentItem(Base):
+    """One piece of content and where it stands editorially.
+
+    It holds no editable text. The words live in content_revisions, one
+    immutable row per version; the item only points at the current one
+    and, while an approval is in effect, at the approved one.
+
+    Integrity that the database enforces rather than the code:
+
+    * current_revision_id and approved_revision_id are composite foreign
+      keys onto (content_item_id, id) of content_revisions, so either can
+      only ever name a revision of *this* item;
+    * an item is approved exactly when approved_revision_id is set, and
+      that revision must be the current one -- so an approval of an older
+      revision cannot be in effect, whatever the application does;
+    * every item has a current revision. The foreign key is deferred to
+      commit, because an item and its first revision are written in the
+      same transaction and each refers to the other.
+    """
+
+    __tablename__ = "content_items"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id", "current_revision_id"],
+            ["content_revisions.content_item_id", "content_revisions.id"],
+            name="fk_content_items_current_revision",
+            ondelete="RESTRICT",
+            use_alter=True,
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["id", "approved_revision_id"],
+            ["content_revisions.content_item_id", "content_revisions.id"],
+            name="fk_content_items_approved_revision",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        CheckConstraint(
+            "(status = 'approved') = (approved_revision_id IS NOT NULL)",
+            name="ck_content_items_approved_has_revision",
+        ),
+        CheckConstraint(
+            "approved_revision_id IS NULL"
+            " OR approved_revision_id = current_revision_id",
+            name="ck_content_items_approval_is_current",
+        ),
+        CheckConstraint(
+            "status <> 'archived' OR archived_at IS NOT NULL",
+            name="ck_content_items_archived_at",
+        ),
+        CheckConstraint(
+            "length(content_type) > 0", name="ck_content_items_content_type"
+        ),
+        CheckConstraint("version >= 1", name="ck_content_items_version"),
+        Index("ix_content_items_project", "project_id"),
+        Index("ix_content_items_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey(
+            "projects.id",
+            ondelete="RESTRICT",
+            name="fk_content_items_project_id",
+        ),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(
+        String(40), nullable=False, server_default="post"
+    )
+    status: Mapped[ContentStatus] = mapped_column(
+        content_status_enum,
+        nullable=False,
+        server_default=ContentStatus.DRAFT.value,
+    )
+    current_revision_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False
+    )
+    #: Set only while an approval is in effect, and then always equal to
+    #: current_revision_id. History lives in content_approvals.
+    approved_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True)
+    )
+    #: Optimistic concurrency token, bumped by every editorial change.
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_content_items_created_by",
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    revisions: Mapped[list[ContentRevision]] = relationship(
+        back_populates="content_item",
+        foreign_keys="ContentRevision.content_item_id",
+        order_by="ContentRevision.revision_number",
+        viewonly=True,
+    )
+
+
+class ContentRevision(Base):
+    """An immutable snapshot of one version of a content item.
+
+    Rows are never updated and never deleted: a trigger rejects both, so
+    the guarantee holds for every client of the database and not only
+    for this application. Any change to the content is a new row.
+
+    content_hash is the SHA-256 of the deliverable snapshot -- title,
+    body, format, images, items -- so two revisions with the same hash
+    would publish the same post.
+    """
+
+    __tablename__ = "content_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_item_id",
+            "revision_number",
+            name="uq_content_revisions_item_number",
+        ),
+        # The target of the composite foreign keys that tie a current,
+        # approved or decided revision to the item it belongs to.
+        UniqueConstraint(
+            "content_item_id", "id", name="uq_content_revisions_item_id"
+        ),
+        CheckConstraint(
+            "revision_number >= 1", name="ck_content_revisions_number"
+        ),
+        CheckConstraint(
+            "format in ('text', 'image', 'carousel', 'thread')",
+            name="ck_content_revisions_format",
+        ),
+        CheckConstraint(
+            "length(content_hash) = 64", name="ck_content_revisions_hash"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    content_item_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "content_items.id",
+            ondelete="RESTRICT",
+            name="fk_content_revisions_item",
+        ),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str | None] = mapped_column(Text)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    format: Mapped[str] = mapped_column(String(40), nullable=False)
+    images: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    items: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    #: Stored in a column named "metadata"; the attribute is renamed
+    #: because Declarative reserves that name for the table metadata.
+    meta: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, server_default="{}"
+    )
+    source: Mapped[RevisionSource] = mapped_column(
+        revision_source_enum, nullable=False
+    )
+    source_ref: Mapped[str | None] = mapped_column(Text)
+    editor_score: Mapped[float | None] = mapped_column(Numeric(3, 1))
+    editor_notes: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=""
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: NULL for a revision an agent produced; a human author otherwise.
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_content_revisions_created_by",
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    content_item: Mapped[ContentItem] = relationship(
+        back_populates="revisions",
+        foreign_keys=[content_item_id],
+    )
+
+
+class ContentApproval(Base):
+    """One human decision about one exact revision. Append-only.
+
+    actor_user_id is a NOT NULL reference to users: an approval without an
+    authenticated human behind it cannot be stored. The composite foreign
+    key makes it impossible to record a decision about a revision that
+    belongs to a different item. A trigger rejects UPDATE and DELETE, so
+    the history cannot be rewritten after the fact.
+    """
+
+    __tablename__ = "content_approvals"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["content_item_id", "revision_id"],
+            ["content_revisions.content_item_id", "content_revisions.id"],
+            name="fk_content_approvals_revision",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_content_approvals_item_created",
+            "content_item_id",
+            "created_at",
+        ),
+        Index("ix_content_approvals_revision", "revision_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    content_item_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False
+    )
+    revision_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False
+    )
+    decision: Mapped[ApprovalDecision] = mapped_column(
+        approval_decision_enum, nullable=False
+    )
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_content_approvals_actor",
+        ),
+        nullable=False,
+    )
+    note: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+# Append-only enforcement. The same function and triggers are created by
+# migration 3d4ac1986f07; these listeners give a schema built with
+# Base.metadata.create_all (the test suite) the identical guarantee, so
+# no test can pass against a weaker database than production runs.
+APPEND_ONLY_FUNCTION = "content_reject_mutation"
+
+_APPEND_ONLY_FUNCTION_DDL = f"""
+CREATE OR REPLACE FUNCTION {APPEND_ONLY_FUNCTION}() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only: % is not allowed',
+        TG_TABLE_NAME, TG_OP
+        USING ERRCODE = 'restrict_violation';
+END
+$$
+"""
+
+
+def _append_only_trigger_ddl(table: str) -> str:
+    return (
+        f"CREATE TRIGGER trg_{table}_append_only "
+        f"BEFORE UPDATE OR DELETE ON {table} "
+        f"FOR EACH ROW EXECUTE FUNCTION {APPEND_ONLY_FUNCTION}()"
+    )
+
+
+event.listen(
+    Base.metadata,
+    "before_create",
+    # DDL() interpolates its statement with %, so the placeholders that
+    # belong to plpgsql's RAISE have to be escaped for it.
+    DDL(_APPEND_ONLY_FUNCTION_DDL.replace("%", "%%")).execute_if(
+        dialect="postgresql"
+    ),
+)
+event.listen(
+    ContentRevision.__table__,
+    "after_create",
+    DDL(_append_only_trigger_ddl("content_revisions")).execute_if(
+        dialect="postgresql"
+    ),
+)
+event.listen(
+    ContentApproval.__table__,
+    "after_create",
+    DDL(_append_only_trigger_ddl("content_approvals")).execute_if(
+        dialect="postgresql"
+    ),
+)
+event.listen(
+    Base.metadata,
+    "after_drop",
+    DDL(
+        f"DROP FUNCTION IF EXISTS {APPEND_ONLY_FUNCTION}()"
+    ).execute_if(dialect="postgresql"),
+)

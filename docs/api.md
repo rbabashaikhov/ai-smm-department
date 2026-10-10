@@ -2,8 +2,10 @@
 
 Audience: whoever runs the API locally or reviews how it is wired.
 
-Status: SMM-022A (identity, membership, project settings) plus SMM-022B
-(reading the existing publishing core and three safe queue commands).
+Status: SMM-022A (identity, membership, project settings), SMM-022B
+(reading the existing publishing core and three safe queue commands) and
+SMM-022C (content items, immutable revisions, human approval, and the
+bridge that materialises an approved revision into a Publication).
 The API exists, is covered by tests and is **not deployed**. There is no
 compose service for it yet and no migration has been applied to the
 production database. SMM-022B needed no migration at all: it reads and
@@ -216,6 +218,16 @@ subdomain.
 | `POST` | `/api/v1/publications/{id}/reschedule` | admin+, CSRF |
 | `POST` | `/api/v1/publications/{id}/cancel` | admin+, CSRF |
 | `GET` | `/api/v1/series/{id}` | viewer+ |
+| `GET` | `/api/v1/projects/{id}/content-items` | viewer+, paginated |
+| `POST` | `/api/v1/projects/{id}/content-items` | editor+, CSRF |
+| `GET` | `/api/v1/content-items/{id}` | viewer+ |
+| `GET` | `/api/v1/content-items/{id}/revisions` | viewer+, paginated |
+| `POST` | `/api/v1/content-items/{id}/revisions` | editor+, CSRF, `expected_item_version` |
+| `GET` | `/api/v1/content-items/{id}/approvals` | viewer+, paginated |
+| `POST` | `/api/v1/content-items/{id}/submit-review` | editor+, CSRF |
+| `POST` | `/api/v1/content-items/{id}/approve` | editor+, CSRF |
+| `POST` | `/api/v1/content-items/{id}/reject` | editor+, CSRF |
+| `POST` | `/api/v1/content-items/{id}/materialize` | editor+, CSRF |
 
 ### Health
 
@@ -242,6 +254,13 @@ ones below it.
 | read publications, preview, attempts, series, operations | ✅ | ✅ | ✅ | ✅ |
 | `GET /projects/{id}/audit` | ❌ 403 | ❌ 403 | ✅ | ✅ |
 | schedule / reschedule / cancel | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| read content items, revisions, approvals | ✅ | ✅ | ✅ | ✅ |
+| create item / revision, submit, approve, reject, materialize | ❌ 403 | ✅ | ✅ | ✅ |
+
+Approval is editor+ and scheduling is admin+, on purpose: deciding that a
+text is right and deciding when it goes out are different
+responsibilities. `materialize` is editor+ because it only produces a
+Publication in `approved` — it neither schedules nor delivers.
 
 The flow is fixed: **project from the database → membership → role check
 → action**. A project id in a request body is never consulted; the id in
@@ -446,7 +465,130 @@ listed — a user is not owned by one.
 
 ---
 
-## 7. Errors and request ids
+## 7. Content, revisions and human approval
+
+The editorial layer sits in front of the delivery queue:
+
+```
+ContentItem -> ContentRevision -> human approval of that exact revision
+            -> materialize (editor+) -> Publication in `approved`
+            -> schedule (admin+) -> worker -> Threads
+```
+
+`Publication` stays the delivery entity, exactly as before; legacy rows
+are untouched and keep flowing. The worker reads none of the new tables.
+
+### Revisions are immutable
+
+A content item holds no text. Every version is a row in
+`content_revisions` — body, format, images, items, metadata, provenance
+(`source`, `source_ref`), the editor's score and notes, and
+`content_hash`, the SHA-256 of the deliverable snapshot (title, body,
+format, images, items). There is no endpoint that changes a revision,
+and a database trigger rejects `UPDATE` and `DELETE` on the table, so the
+guarantee holds for every client, not only this API. Changing content
+means `POST /revisions`, which needs the item version the author read
+(`expected_item_version`, 409 `VERSION_CONFLICT` if stale).
+
+### States
+
+| From | Action | To |
+|---|---|---|
+| — | create (with revision 1) | `draft` |
+| `draft` | submit-review | `in_review` |
+| `in_review` | approve | `approved` |
+| `in_review` | reject | `rejected` |
+| any but `archived` | new revision | `draft` |
+
+A rejected or approved revision is not resubmitted: the next step is a
+new revision. `archived` exists in the schema but has no transition in
+this stage; archived items are read-only.
+
+### Approval belongs to one exact revision
+
+submit-review, approve and reject all name the `revision_id` the person
+looked at. If it is not the item's current revision the request is 409
+`STALE_REVISION` — the reviewer read old text. A revision of another item
+is 404.
+
+Creating a revision returns the item to `draft` and clears
+`approved_revision_id`, so an approval of revision N never covers
+revision N+1. The database enforces this independently of the code:
+
+- `(status = 'approved') = (approved_revision_id IS NOT NULL)`;
+- `approved_revision_id IS NULL OR approved_revision_id = current_revision_id`;
+- `current_revision_id` and `approved_revision_id` are composite foreign
+  keys onto `content_revisions(content_item_id, id)`, so either can only
+  name a revision of the same item. The current-revision key is
+  deferred to commit, because an item and its first revision are
+  written together and refer to each other.
+
+Decisions are appended to `content_approvals` and never changed: a
+trigger rejects `UPDATE` and `DELETE`, and the composite key ties each
+decision to a revision of the same item.
+
+### Only a human approves
+
+`content_approvals.actor_user_id` is a NOT NULL reference to `users`, and
+the application functions for approve and reject take a `User`. An agent
+can create a draft revision — `source` = `copywriter`, `strategist` and so
+on, `created_by_user_id` NULL, audited as `agent:<source>` — but cannot
+store an approval, cannot schedule and cannot publish. `source` is
+provenance only; it grants nothing.
+
+### Concurrency
+
+Every command locks the item row (`SELECT ... FOR UPDATE` with
+`populate_existing`, the same pattern as the queue commands) before it
+reads anything: revision numbering cannot collide, a stale version is
+caught, and an approval that queued behind a new revision wakes up to
+find it stale instead of approving text nobody read. The wait is bounded
+(3 s `lock_timeout`, then 503 with `Retry-After`).
+
+### Materialisation: the bridge into delivery
+
+`POST /content-items/{id}/materialize` turns the **approved current
+revision** into a Publication and stops there:
+
+- the item must be `approved`, and the latest recorded human decision
+  for that exact revision must be `approved`;
+- the snapshot (title — the revision's, else the item's — body, format,
+  images, items, editor score) is checked by the delivery preflight
+  first; content the worker would refuse is a 422 and nothing is
+  written;
+- the Publication is left in `approved`, `human_reviewed = true`, no
+  `scheduled_at`: a safe pre-delivery state. **It is not scheduled and
+  not published.** An admin schedules it with the existing command.
+
+**Idempotent** per (item, revision, platform). The Publication's
+`idempotency_key` is `content:{item}:{revision}:{platform}` and that
+column is `UNIQUE`, so the database itself refuses a second one; a repeat
+answers 200 `"result": "unchanged"` and writes nothing, whatever state
+delivery has since reached.
+
+**One live Publication per item and platform.** If an earlier revision
+was already materialised (`source_ref = content_item:{id}`):
+
+| Linked Publication | Result |
+|---|---|
+| `draft` / `approved`, never attempted, not claimed, no post id | rewritten with the new snapshot, same row — `"updated"` |
+| `scheduled`, `claimed`, `publishing`, `needs_review`, `published`, `failed` | **409**, nothing touched, nothing created beside it |
+| `cancelled` | ignored — history; a new Publication is created |
+
+A row that has started delivery is refused on an unlocked read and is
+never locked, so the worker is not made to skip it. The one row that
+will be rewritten is then locked and checked again, because an admin may
+have scheduled it in between. To replace a scheduled Publication with a
+newer revision, cancel it first.
+
+The platform is the project's `default_platform`. The ordinal continues
+the project's sequence; concurrent materialisations in one project are
+serialised on a transaction-scoped advisory lock so they cannot take the
+same one.
+
+---
+
+## 8. Errors and request ids
 
 Every failure has the same shape:
 
@@ -464,6 +606,7 @@ Every failure has the same shape:
 | `VALIDATION_ERROR` | 422 |
 | `VERSION_CONFLICT` | 409 |
 | `INVALID_STATE_TRANSITION` | 409 |
+| `STALE_REVISION` | 409 |
 | `DEPENDENCY_UNAVAILABLE` | 503 |
 | `INTERNAL_ERROR` | 500 |
 
@@ -489,7 +632,7 @@ exist.
 
 ---
 
-## 8. Audit
+## 9. Audit
 
 Written to the existing `audit_log` table, actor `user:<uuid>` or
 `system:bootstrap`:
@@ -503,6 +646,14 @@ Written to the existing `audit_log` table, actor `user:<uuid>` or
 | `project.settings.update` | settings written, with the new version and the sections touched |
 | `rescheduled` | schedule or reschedule command (the existing action name, written by `ai_smm.queue`) |
 | `cancelled` | cancel command (likewise) |
+| `content.created` | item created with its first revision |
+| `content.revision_created` | any new revision, with its number, source and hash |
+| `content.submitted_for_review` | draft -> in_review |
+| `content.approved` / `content.rejected` | the human decision, with the revision and its hash |
+| `content.materialized` | publication created or updated (a replay writes nothing) |
+
+Content entries use the subject `content_item:<uuid>` and appear in the
+project audit view.
 
 The two command actions are the queue's own vocabulary, not new ones: an
 entry written by the API is told apart from the CLI's and the worker's by
@@ -514,7 +665,7 @@ audit entry.
 
 ---
 
-## 9. Tests
+## 10. Tests
 
 ```bash
 AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_test \
@@ -525,7 +676,8 @@ The API and security suites are `tests/test_api_auth.py`,
 `test_api_csrf.py`, `test_api_projects_rbac.py`,
 `test_api_publications_read.py`, `test_api_publication_commands.py`,
 `test_api_series_operations.py`, `test_api_command_concurrency.py`,
-`test_api_health.py`,
+`test_api_content.py`, `test_content_materialize.py`,
+`test_content_concurrency.py`, `test_api_health.py`,
 `test_api_contract.py`, `test_security_passwords.py`,
 `test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
 real application through its factory against a disposable database;

@@ -16,6 +16,7 @@ against that. Nothing the client sends takes part in the decision.
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Iterator
 from typing import Annotated
 
@@ -31,6 +32,7 @@ from ai_smm.application.auth import (
 from ai_smm.application.projects import get_membership
 from ai_smm.config import Settings, get_settings
 from ai_smm.db.models import (
+    ContentItem,
     ContentSeries,
     MembershipRole,
     Project,
@@ -386,3 +388,82 @@ class Pagination:
 
 
 PageParams = Annotated[Pagination, Depends(Pagination)]
+
+
+# -- content items --------------------------------------------------------
+
+
+class ContentItemContext:
+    """A content item, the project it belongs to, and the caller's role."""
+
+    def __init__(
+        self,
+        *,
+        item: ContentItem,
+        project: Project,
+        role: MembershipRole,
+        authenticated: AuthenticatedSession,
+    ) -> None:
+        self.item = item
+        self.project = project
+        self.role = role
+        self.authenticated = authenticated
+
+    @property
+    def user(self) -> User:
+        return self.authenticated.user
+
+
+def require_content_item_role(
+    minimum: MembershipRole,
+) -> Callable[..., ContentItemContext]:
+    """Row first: load the item, then authorise against its own project.
+
+    An item in a project the caller is not a member of answers 404 with
+    the same body as an id that does not exist.
+    """
+
+    def dependency(
+        content_item_id: uuid.UUID,
+        db: DbSession,
+        authenticated: CurrentSession,
+    ) -> ContentItemContext:
+        item = db.get(ContentItem, content_item_id)
+
+        if item is None:
+            raise not_found("Content item not found.")
+
+        try:
+            project, role = _authorise_project(
+                db,
+                project_id=item.project_id,
+                authenticated=authenticated,
+                minimum=minimum,
+            )
+        except ApiError as exc:
+            if exc.code == ErrorCode.NOT_FOUND:
+                raise not_found("Content item not found.") from exc
+
+            raise
+
+        return ContentItemContext(
+            item=item,
+            project=project,
+            role=role,
+            authenticated=authenticated,
+        )
+
+    return dependency
+
+
+ViewerContentItem = Annotated[
+    ContentItemContext,
+    Depends(require_content_item_role(MembershipRole.VIEWER)),
+]
+EditorContentItem = Annotated[
+    ContentItemContext,
+    Depends(require_content_item_role(MembershipRole.EDITOR)),
+]
+EditorProject = Annotated[
+    ProjectContext, Depends(require_project_role(MembershipRole.EDITOR))
+]

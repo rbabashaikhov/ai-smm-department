@@ -339,5 +339,7 @@ def _attempt_fields(row) -> dict[str, object]:
     }
 
 
-#: Re-exported so the series router renders parts the same way.
+#: Re-exported so the series and content routers render publications
+#: the same way.
 summary_of = _summary
+detail_of = _detail

@@ -369,3 +369,274 @@ def test_a_session_token_hash_column_is_not_the_token(
     # The CSRF token is derived from the session token on each request,
     # so there is no column for it either.
     assert [name for name in columns if "csrf" in name] == []
+
+
+# -- SMM-022C: the editorial layer is additive ----------------------------
+
+CONTROL_PLANE_HEAD = "2964ac9ceea7"
+EDITORIAL_REVISION = "3d4ac1986f07"
+EDITORIAL_TABLES = {"content_items", "content_revisions", "content_approvals"}
+EDITORIAL_ENUMS = {
+    "content_status",
+    "content_revision_source",
+    "content_approval_decision",
+}
+
+
+def _schema_snapshot(engine) -> dict[str, object]:
+    """Columns, indexes and constraints of every table, for comparison."""
+
+    inspector = inspect(engine)
+    snapshot: dict[str, object] = {}
+
+    for table in sorted(inspector.get_table_names()):
+        snapshot[table] = {
+            "columns": [
+                (c["name"], str(c["type"]), c["nullable"], str(c.get("default")))
+                for c in inspector.get_columns(table)
+            ],
+            "indexes": sorted(
+                (i["name"], tuple(i["column_names"]), bool(i["unique"]))
+                for i in inspector.get_indexes(table)
+            ),
+            "checks": sorted(
+                (c["name"], c["sqltext"])
+                for c in inspector.get_check_constraints(table)
+            ),
+            "unique": sorted(
+                (u["name"], tuple(u["column_names"]))
+                for u in inspector.get_unique_constraints(table)
+            ),
+            "foreign_keys": sorted(
+                (
+                    k["name"],
+                    tuple(k["constrained_columns"]),
+                    k["referred_table"],
+                )
+                for k in inspector.get_foreign_keys(table)
+            ),
+        }
+
+    return snapshot
+
+
+def _enums(engine) -> set[str]:
+    with engine.connect() as connection:
+        return set(
+            connection.execute(
+                text("SELECT typname FROM pg_type WHERE typtype = 'e'")
+            ).scalars()
+        )
+
+
+def test_the_editorial_migration_upgrades_from_the_current_head(
+    migration_db: str,
+) -> None:
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+
+    command.upgrade(config, CONTROL_PLANE_HEAD)
+
+    engine = create_engine(migration_db)
+
+    try:
+        assert EDITORIAL_TABLES.isdisjoint(inspect(engine).get_table_names())
+
+        command.upgrade(config, EDITORIAL_REVISION)
+
+        inspector = inspect(engine)
+
+        assert set(inspector.get_table_names()) >= EDITORIAL_TABLES
+        assert _enums(engine) >= EDITORIAL_ENUMS
+
+        with engine.connect() as connection:
+            triggers = set(
+                connection.execute(
+                    text(
+                        "SELECT tgname FROM pg_trigger "
+                        "WHERE tgname LIKE 'trg_content%'"
+                    )
+                ).scalars()
+            )
+
+        assert triggers == {
+            "trg_content_revisions_append_only",
+            "trg_content_approvals_append_only",
+        }
+    finally:
+        engine.dispose()
+
+
+def test_existing_rows_survive_the_editorial_migration(
+    migration_db: str,
+) -> None:
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+
+    command.upgrade(config, CONTROL_PLANE_HEAD)
+
+    engine = create_engine(migration_db)
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO projects (id, display_name, knowledge_path)"
+                    " VALUES ('legacy', 'Legacy', 'knowledge/legacy')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO publications (project_id, ordinal, title,"
+                    " format, body, status, idempotency_key, human_reviewed)"
+                    " VALUES ('legacy', 1, 'Old', 'text', 'old body',"
+                    " 'scheduled', 'legacy:threads:1:abc', true)"
+                )
+            )
+
+        before = engine.connect().execute(
+            text("SELECT * FROM publications ORDER BY id")
+        ).all()
+
+        command.upgrade(config, EDITORIAL_REVISION)
+
+        with engine.connect() as connection:
+            after = connection.execute(
+                text("SELECT * FROM publications ORDER BY id")
+            ).all()
+            project = connection.execute(
+                text("SELECT id, display_name FROM projects")
+            ).all()
+    finally:
+        engine.dispose()
+
+    assert after == before
+    assert project == [("legacy", "Legacy")]
+
+
+def test_downgrading_the_editorial_migration_removes_only_its_additions(
+    migration_db: str,
+) -> None:
+    """Every pre-existing table is identical before and after the round trip."""
+
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+
+    command.upgrade(config, CONTROL_PLANE_HEAD)
+
+    engine = create_engine(migration_db)
+
+    try:
+        schema_before = _schema_snapshot(engine)
+        enums_before = _enums(engine)
+
+        command.upgrade(config, EDITORIAL_REVISION)
+        command.downgrade(config, CONTROL_PLANE_HEAD)
+
+        schema_after = _schema_snapshot(engine)
+        enums_after = _enums(engine)
+
+        with engine.connect() as connection:
+            function_left = connection.execute(
+                text(
+                    "SELECT count(*) FROM pg_proc "
+                    "WHERE proname = 'content_reject_mutation'"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
+
+    assert schema_after == schema_before
+    assert enums_after == enums_before
+    assert EDITORIAL_ENUMS.isdisjoint(enums_after)
+    assert function_left == 0
+
+
+def test_the_editorial_migration_is_repeatable(migration_db: str) -> None:
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+
+    command.upgrade(config, "head")
+    command.downgrade(config, CONTROL_PLANE_HEAD)
+    command.upgrade(config, "head")
+    command.downgrade(config, CONTROL_PLANE_HEAD)
+    command.upgrade(config, "head")
+
+    engine = create_engine(migration_db)
+
+    try:
+        with engine.connect() as connection:
+            context = MigrationContext.configure(
+                connection, opts={"compare_type": True}
+            )
+            diff = compare_metadata(context, Base.metadata)
+    finally:
+        engine.dispose()
+
+    assert diff == [], f"schema drift detected: {diff}"
+
+
+def test_the_migrated_schema_enforces_the_editorial_invariants(
+    migration_db: str,
+) -> None:
+    """The guarantees hold on the migrated schema, not only on create_all."""
+
+    from sqlalchemy.exc import IntegrityError
+
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    command.upgrade(_alembic_config(migration_db), "head")
+
+    engine = create_engine(migration_db)
+    item = "11111111-1111-1111-1111-111111111111"
+    first = "22222222-2222-2222-2222-222222222222"
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO projects (id, display_name, knowledge_path)"
+                    " VALUES ('p', 'P', 'k')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_items"
+                    " (id, project_id, title, current_revision_id)"
+                    " VALUES (:item, 'p', 't', :rev)"
+                ),
+                {"item": item, "rev": first},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_revisions (id, content_item_id,"
+                    " revision_number, body, format, source, content_hash)"
+                    " VALUES (:rev, :item, 1, 'b', 'text', 'human',"
+                    " repeat('a', 64))"
+                ),
+                {"item": item, "rev": first},
+            )
+
+        for statement in (
+            "UPDATE content_revisions SET body = 'x'",
+            "DELETE FROM content_revisions",
+            "UPDATE content_items SET status = 'approved'",
+            "INSERT INTO content_revisions (id, content_item_id,"
+            " revision_number, body, format, source, content_hash) VALUES"
+            " (gen_random_uuid(), '11111111-1111-1111-1111-111111111111',"
+            " 1, 'dup', 'text', 'human', repeat('b', 64))",
+        ):
+            with pytest.raises(IntegrityError), engine.begin() as connection:
+                connection.execute(text(statement))
+
+        # An item pointing at a revision that does not exist is refused at
+        # commit, when the deferred key is checked.
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO content_items"
+                    " (id, project_id, title, current_revision_id) VALUES"
+                    " (gen_random_uuid(), 'p', 't', gen_random_uuid())"
+                )
+            )
+    finally:
+        engine.dispose()
