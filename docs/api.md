@@ -2,14 +2,29 @@
 
 Audience: whoever runs the API locally or reviews how it is wired.
 
-Status: SMM-022A (identity, membership, project settings), SMM-022B
-(reading the existing publishing core and three safe queue commands) and
-SMM-022C (content items, immutable revisions, human approval, and the
-bridge that materialises an approved revision into a Publication).
-The API exists, is covered by tests and is **not deployed**. There is no
-compose service for it yet and no migration has been applied to the
-production database. SMM-022B needed no migration at all: it reads and
-moves rows in the schema the worker already had.
+Status:
+
+- SMM-022A (identity, membership, project settings), SMM-022B (reading
+  the existing publishing core and three safe queue commands) and
+  SMM-022C (content items, immutable revisions, human approval, and the
+  bridge that materialises an approved revision into a Publication)
+  implemented the API and domain capabilities.
+- SMM-023 added the private Control Center (`web/`), a client of this API.
+- SMM-024A adds local production-like runtime packaging:
+  `compose.runtime.yml` defines `smm-api`, `smm-web`, `postgres`,
+  `migrate` and `cli`. It exists and is tested locally against a
+  disposable database.
+
+The API and the Control Center are **not deployed** to production or a
+VPS, and no migration has been applied to the production database.
+SMM-022B needed no migration at all: it reads and moves rows in the
+schema the worker already had. `compose.runtime.yml` deliberately has no
+worker: the API never publishes, and nothing in that runtime can claim or
+send a publication.
+
+[runtime-packaging.md](runtime-packaging.md) is the authoritative guide
+to the runtime packaging: images, proxy, configuration and the explicit
+migrate / bootstrap steps.
 
 ---
 
@@ -243,6 +258,13 @@ merely waiting.
 503 `DEPENDENCY_UNAVAILABLE` when it fails. It does not call OpenAI or
 Threads: a probe that spends an external quota, or that fails because a
 third party is slow, takes the service out of rotation for no reason.
+
+Readiness does **not** verify the Alembic revision or schema
+compatibility: a reachable database that has not been migrated (or is at
+the wrong revision) still answers 200. A deployment procedure must
+therefore check `alembic current == expected head` before it treats the
+service as operationally ready. Whether that check belongs in deployment
+tooling or in readiness itself is left to SMM-024B.
 
 ### RBAC
 
