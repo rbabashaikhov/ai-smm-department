@@ -37,6 +37,20 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/projects",
             "/api/v1/projects/{project_id}",
             "/api/v1/projects/{project_id}/settings",
+            # SMM-022B: reading the existing publishing core, plus the
+            # three commands that move a row inside the queue.
+            "/api/v1/projects/{project_id}/publications",
+            "/api/v1/projects/{project_id}/series",
+            "/api/v1/projects/{project_id}/operations/summary",
+            "/api/v1/projects/{project_id}/operations/attention",
+            "/api/v1/projects/{project_id}/audit",
+            "/api/v1/publications/{publication_id}",
+            "/api/v1/publications/{publication_id}/preview",
+            "/api/v1/publications/{publication_id}/attempts",
+            "/api/v1/publications/{publication_id}/schedule",
+            "/api/v1/publications/{publication_id}/reschedule",
+            "/api/v1/publications/{publication_id}/cancel",
+            "/api/v1/series/{series_id}",
         ]
     )
 
@@ -54,6 +68,9 @@ def test_there_is_no_publish_endpoint(api_app) -> None:
         "/threads/publish",
         "/api/v1/threads/publish",
         "/api/v1/publications/1/publish-now",
+        "/api/v1/publications/1/publish",
+        "/api/v1/projects/p/publish",
+        "/api/v1/publications/1/retry",
     ],
 )
 def test_no_route_answers_a_publish_request(client, path: str) -> None:
@@ -87,6 +104,100 @@ def test_the_api_package_never_imports_the_publishing_layer() -> None:
             for name in names:
                 if name.startswith(("ai_smm.publishing", "ai_smm.worker")):
                     offenders.append(f"{source.name}: {name}")
+
+    assert offenders == []
+
+
+#: The only publishing-layer names the control plane may import. Both are
+#: pure: the validator is a function of one row and the exception it
+#: raises. Everything that can create a post is absent.
+PUBLISHING_IMPORT_ALLOWLIST = frozenset(
+    {"validate_ready_to_publish", "PublishBlocked"}
+)
+
+APPLICATION_SOURCE_DIR = (
+    Path(__file__).resolve().parents[1] / "src" / "ai_smm" / "application"
+)
+
+
+def _import_edges(directory: Path):
+    """(file, module, imported names) for every import in a package."""
+
+    import ast
+
+    for source in sorted(directory.rglob("*.py")):
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    yield source.name, alias.name, ()
+            elif isinstance(node, ast.ImportFrom):
+                yield (
+                    source.name,
+                    node.module or "",
+                    tuple(alias.name for alias in node.names),
+                )
+
+
+def test_the_control_plane_cannot_reach_anything_that_publishes() -> None:
+    """The invariant, checked transitively through the application layer.
+
+    SMM-022B gave the API a preview, which reuses the publishing layer's
+    content validator. That is the one permitted edge, and it is pure.
+    Nothing that can create a post -- the publisher, the publish
+    pipeline, the worker -- may be imported by either package.
+    """
+
+    offenders: list[str] = []
+
+    for directory in (API_SOURCE_DIR, APPLICATION_SOURCE_DIR):
+        for filename, module, names in _import_edges(directory):
+            if module.startswith("ai_smm.worker"):
+                offenders.append(f"{filename}: imports {module}")
+
+                continue
+
+            if not module.startswith("ai_smm.publishing"):
+                continue
+
+            forbidden = set(names) - PUBLISHING_IMPORT_ALLOWLIST
+
+            if forbidden or not names:
+                offenders.append(
+                    f"{filename}: imports {sorted(forbidden) or module} "
+                    f"from {module}"
+                )
+
+    assert offenders == []
+
+
+def test_no_module_of_the_control_plane_names_the_publisher() -> None:
+    """A belt-and-braces text check for the call, not the comment.
+
+    Mentioning ThreadsPublisher in prose is how these rules get
+    explained, so only an actual use -- an attribute access or a call --
+    is treated as a violation.
+    """
+
+    import ast
+
+    offenders: list[str] = []
+    banned = {
+        "ThreadsPublisher",
+        "publish_claimed_publication",
+        "claim_due_publication",
+    }
+
+    for directory in (API_SOURCE_DIR, APPLICATION_SOURCE_DIR):
+        for source in sorted(directory.rglob("*.py")):
+            tree = ast.parse(source.read_text(encoding="utf-8"))
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Name) and node.id in banned:
+                    offenders.append(f"{source.name}: {node.id}")
+                elif isinstance(node, ast.Attribute) and node.attr in banned:
+                    offenders.append(f"{source.name}: .{node.attr}")
 
     assert offenders == []
 

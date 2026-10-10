@@ -22,7 +22,10 @@ from ai_smm.api.errors import install_error_handlers
 from ai_smm.api.request_id import RequestIdMiddleware
 from ai_smm.api.routers import auth as auth_router
 from ai_smm.api.routers import health as health_router
+from ai_smm.api.routers import operations as operations_router
 from ai_smm.api.routers import projects as projects_router
+from ai_smm.api.routers import publications as publications_router
+from ai_smm.api.routers import series as series_router
 from ai_smm.config import Settings, get_settings
 from ai_smm.logging_setup import setup_logging
 
@@ -72,6 +75,9 @@ def create_app(
     v1 = APIRouter(prefix=API_V1_PREFIX, dependencies=[Depends(csrf_guard)])
     v1.include_router(auth_router.router)
     v1.include_router(projects_router.router)
+    v1.include_router(publications_router.router)
+    v1.include_router(series_router.router)
+    v1.include_router(operations_router.router)
 
     app.include_router(v1)
 

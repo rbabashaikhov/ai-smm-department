@@ -8,13 +8,18 @@ A project id is read from the URL path and loaded from the database; the
 request body is never consulted for it. A caller with no membership on a
 project is answered with 404, not 403, so that the API cannot be used to
 discover which project ids exist.
+
+For a resource addressed by its own id -- /publications/{id},
+/series/{id} -- the same rule applies one step earlier: the row is loaded
+first, its project_id is read off the row, and membership is checked
+against that. Nothing the client sends takes part in the decision.
 """
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from typing import Annotated
 
-from fastapi import Depends, Request
+from fastapi import Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from ai_smm.api.errors import ApiError, ErrorCode, auth_required, not_found
@@ -25,7 +30,13 @@ from ai_smm.application.auth import (
 )
 from ai_smm.application.projects import get_membership
 from ai_smm.config import Settings, get_settings
-from ai_smm.db.models import MembershipRole, Project, User
+from ai_smm.db.models import (
+    ContentSeries,
+    MembershipRole,
+    Project,
+    Publication,
+    User,
+)
 from ai_smm.db.session import get_session_factory
 from ai_smm.security.rbac import role_satisfies
 
@@ -177,3 +188,201 @@ ViewerProject = Annotated[
 AdminProject = Annotated[
     ProjectContext, Depends(require_project_role(MembershipRole.ADMIN))
 ]
+
+
+# -- resources addressed by their own id ---------------------------------
+
+
+class PublicationContext:
+    """A publication, the project it belongs to, and the caller's role."""
+
+    def __init__(
+        self,
+        *,
+        publication: Publication,
+        project: Project,
+        role: MembershipRole,
+        authenticated: AuthenticatedSession,
+    ) -> None:
+        self.publication = publication
+        self.project = project
+        self.role = role
+        self.authenticated = authenticated
+
+    @property
+    def actor(self) -> str:
+        return actor_for(self.authenticated)
+
+
+class SeriesContext:
+    """A series, the project it belongs to, and the caller's role."""
+
+    def __init__(
+        self,
+        *,
+        series: ContentSeries,
+        project: Project,
+        role: MembershipRole,
+        authenticated: AuthenticatedSession,
+    ) -> None:
+        self.series = series
+        self.project = project
+        self.role = role
+        self.authenticated = authenticated
+
+    @property
+    def actor(self) -> str:
+        return actor_for(self.authenticated)
+
+
+def _authorise_project(
+    db: Session,
+    *,
+    project_id: str,
+    authenticated: AuthenticatedSession,
+    minimum: MembershipRole,
+) -> tuple[Project, MembershipRole]:
+    """membership -> role, for a project id already read from the database.
+
+    Shared by every dependency below so there is one implementation of
+    "may this caller act on this project", and one place where the
+    404-for-a-stranger decision is made.
+    """
+
+    project = db.get(Project, project_id)
+
+    if project is None:
+        raise not_found("Project not found.")
+
+    membership = get_membership(
+        db, project_id=project.id, user=authenticated.user
+    )
+
+    if membership is None:
+        raise not_found("Project not found.")
+
+    if not role_satisfies(membership.role, minimum):
+        raise ApiError(
+            status_code=403,
+            code=ErrorCode.FORBIDDEN,
+            message="Insufficient role for this action.",
+            details={
+                "required_role": minimum.value,
+                "your_role": membership.role.value,
+            },
+        )
+
+    return project, membership.role
+
+
+def require_publication_role(
+    minimum: MembershipRole,
+) -> Callable[..., PublicationContext]:
+    """Load the publication, then authorise against the project it is in.
+
+    A publication in a project the caller is not a member of is answered
+    404, identically to a publication id that does not exist, so the API
+    cannot be used to probe for rows belonging to other projects.
+    """
+
+    def dependency(
+        publication_id: int,
+        db: DbSession,
+        authenticated: CurrentSession,
+    ) -> PublicationContext:
+        publication = db.get(Publication, publication_id)
+
+        if publication is None:
+            raise not_found("Publication not found.")
+
+        try:
+            project, role = _authorise_project(
+                db,
+                project_id=publication.project_id,
+                authenticated=authenticated,
+                minimum=minimum,
+            )
+        except ApiError as exc:
+            if exc.code == ErrorCode.NOT_FOUND:
+                raise not_found("Publication not found.") from exc
+
+            raise
+
+        return PublicationContext(
+            publication=publication,
+            project=project,
+            role=role,
+            authenticated=authenticated,
+        )
+
+    return dependency
+
+
+def require_series_role(
+    minimum: MembershipRole,
+) -> Callable[..., SeriesContext]:
+    def dependency(
+        series_id: int,
+        db: DbSession,
+        authenticated: CurrentSession,
+    ) -> SeriesContext:
+        series = db.get(ContentSeries, series_id)
+
+        if series is None:
+            raise not_found("Series not found.")
+
+        try:
+            project, role = _authorise_project(
+                db,
+                project_id=series.project_id,
+                authenticated=authenticated,
+                minimum=minimum,
+            )
+        except ApiError as exc:
+            if exc.code == ErrorCode.NOT_FOUND:
+                raise not_found("Series not found.") from exc
+
+            raise
+
+        return SeriesContext(
+            series=series,
+            project=project,
+            role=role,
+            authenticated=authenticated,
+        )
+
+    return dependency
+
+
+ViewerPublication = Annotated[
+    PublicationContext,
+    Depends(require_publication_role(MembershipRole.VIEWER)),
+]
+AdminPublication = Annotated[
+    PublicationContext,
+    Depends(require_publication_role(MembershipRole.ADMIN)),
+]
+ViewerSeries = Annotated[
+    SeriesContext, Depends(require_series_role(MembershipRole.VIEWER))
+]
+AdminProjectAudit = Annotated[
+    ProjectContext, Depends(require_project_role(MembershipRole.ADMIN))
+]
+
+
+# -- pagination ----------------------------------------------------------
+
+
+class Pagination:
+    """limit/offset, bounded so one request cannot ask for the whole table."""
+
+    def __init__(
+        self,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+    ) -> None:
+        self.limit = limit
+        self.offset = offset
+
+
+PageParams = Annotated[Pagination, Depends(Pagination)]

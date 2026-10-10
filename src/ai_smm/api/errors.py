@@ -33,6 +33,9 @@ class ErrorCode:
     NOT_FOUND = "NOT_FOUND"
     VALIDATION_ERROR = "VALIDATION_ERROR"
     VERSION_CONFLICT = "VERSION_CONFLICT"
+    #: A command that is not allowed from the row's current status, for
+    #: example scheduling something a worker is publishing right now.
+    INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
     INTERNAL_ERROR = "INTERNAL_ERROR"
     DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE"
     #: CSRF is split in two so an operator can tell a client that never
