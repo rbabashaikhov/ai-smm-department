@@ -397,6 +397,13 @@ membership, настройки проекта. Публикацию исполн
   `INVALID_STATE_TRANSITION`. `claimed` держит worker, `publishing` и
   `needs_review` разбираются только человеком через `ai-smm reconcile` —
   автоматического retry нет, это и есть барьер от дублей.
+- **Команда берёт row-level lock.** Между чтением записи в authorization и
+  записью worker может успеть claim'нуть строку. Поэтому команда
+  перечитывает её `SELECT ... FOR UPDATE` с `populate_existing=True`
+  (иначе ORM отдал бы устаревший snapshot из identity map и затёр бы
+  lease worker'а), заново подтверждает проект и только затем проверяет
+  переход. Если worker успел первым — 409 и lease не тронут; если первой
+  успела команда — worker с `SKIP LOCKED` просто берёт следующую запись.
 
 ```bash
 export AI_SMM_API_COOKIE_SECURE=false   # только для локального http
@@ -450,14 +457,15 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-460 тестов, все внешние API замоканы. Набор покрывает миграции,
+472 теста, все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
 хеширование паролей, жизненный цикл сессии, CSRF, RBAC, изоляцию
 проектов, optimistic locking, health endpoints, отсутствие publish
 endpoint, а также read API существующей очереди, пагинацию, preview,
-безопасные команды и отказ от запрещённых переходов.
+безопасные команды, отказ от запрещённых переходов и реальную
+конкуренцию с worker'ом за строку в PostgreSQL.
 
 Набор отказывается работать с базой, в имени которой нет `test`: он
 удаляет таблицы, и указание на рабочую базу уничтожило бы очередь.

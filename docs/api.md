@@ -372,9 +372,49 @@ The allowed-from table lives in one place,
 `ai_smm.application.publications.COMMAND_POLICY`, derived from the
 transition table documented on `PublicationStatus`. The router does not
 compare statuses; it calls the application function and translates its
-one exception. The mutation and its audit entry are
+exceptions. The mutation and its audit entry are
 `ai_smm.queue.reschedule` / `ai_smm.queue.cancel` — the same functions
 the CLI and the worker call, unchanged.
+
+#### Concurrency with the worker
+
+Authorisation loads the publication, and a worker can claim the row
+between that read and the write — the queue is built so that this happens
+without anyone coordinating. Acting on the snapshot would set the status
+back to `scheduled` and clear `claimed_by`, `claimed_at` and
+`lease_expires_at` while the worker was already publishing it, which is
+how one post goes out twice.
+
+So a command does this, in this order:
+
+1. authorisation has already decided which project the caller may act on;
+2. the row is re-selected `FOR UPDATE`, taking the row lock;
+3. `populate_existing=True` overwrites the stale instance in the
+   session's identity map, so the ORM cannot hand back the snapshot and
+   flush its fields over what the worker committed;
+4. the project on the freshly read row is compared with the authorised
+   one again;
+5. the transition is checked against the **status read under the lock**;
+6. `queue.reschedule` / `queue.cancel` performs the mutation;
+7. the request transaction commits, releasing the lock.
+
+Both directions are covered:
+
+- **the command gets there first.** The worker's candidate query is
+  `FOR UPDATE SKIP LOCKED`, so it does not block on the locked row and
+  does not claim it; it moves on to the next due publication.
+- **the worker gets there first.** The command reads `claimed` under the
+  lock and answers 409 `INVALID_STATE_TRANSITION`. The lease is left
+  exactly as the worker set it, and no audit entry is written.
+
+The wait for the lock is bounded by a transaction-local `lock_timeout`
+of 3 seconds, so an HTTP request cannot hang on a row that something
+else is holding unexpectedly. When it fires, nothing has been read and
+nothing changed, so the answer is 503 `DEPENDENCY_UNAVAILABLE` with
+`details.reason = "publication_locked"` and `Retry-After: 2` — "come
+back", not a verdict about a state the request could not see. In normal
+operation this never fires: the worker commits its claim before it makes
+any network call, so the lock it holds lives for one short transaction.
 
 `scheduled_at` must carry a timezone offset
 (`2026-10-12T09:00:00+03:00`). The CLI reads a naive time in the operator
@@ -484,12 +524,21 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_test \
 The API and security suites are `tests/test_api_auth.py`,
 `test_api_csrf.py`, `test_api_projects_rbac.py`,
 `test_api_publications_read.py`, `test_api_publication_commands.py`,
-`test_api_series_operations.py`, `test_api_health.py`,
+`test_api_series_operations.py`, `test_api_command_concurrency.py`,
+`test_api_health.py`,
 `test_api_contract.py`, `test_security_passwords.py`,
 `test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
 real application through its factory against a disposable database;
 nothing is mocked except, where a test needs an expired session, the
 stored timestamps.
+
+`tests/test_api_command_concurrency.py` runs real contention against
+PostgreSQL — the actual `queue.claim_due_publication` with its
+`FOR UPDATE SKIP LOCKED`, every participant on its own connection, and
+one test where the command genuinely blocks on a lock the worker holds
+until the worker commits. Nothing about the locking is mocked. Removing
+either half of the fix (the lock, or `populate_existing`) makes three of
+those tests fail.
 
 `tests/test_migrations.py` additionally asserts that the control-plane
 migration is additive: that `publications` is byte-for-byte identical

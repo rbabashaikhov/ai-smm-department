@@ -14,6 +14,15 @@ decides whether the transition is permitted from the row's current
 status. That decision is written once, in COMMAND_POLICY, so a router
 never compares a status by hand.
 
+Every command takes a row-level lock before it looks at the status. The
+row the authorisation dependency loaded is a snapshot, and a worker can
+claim the publication between that read and the write: acting on the
+snapshot would then overwrite the claim and wipe the worker's lease while
+it was publishing. So a command re-selects the row FOR UPDATE with
+populate_existing, re-confirms it still belongs to the project
+authorisation approved, and only then checks the transition. See
+_lock_publication.
+
 What is deliberately absent: anything that publishes. There is no code
 path from here to ThreadsPublisher. The worker remains the only process
 that creates a post, and the only publishing-layer function this module
@@ -25,7 +34,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ai_smm.db.models import (
@@ -51,6 +61,23 @@ NEEDS_RECONCILE_HINT = (
     "A human must check the Threads account first; resolve it with "
     "`ai-smm reconcile`."
 )
+
+
+#: How long a command waits for the row lock before giving up. The
+#: worker commits its claim before it makes any network call, so the
+#: lock it holds lives for one short transaction and this wait is
+#: normally microseconds. The bound exists so that an HTTP request can
+#: never hang on a row that something else is holding unexpectedly --
+#: a stalled transaction, or an operator in a psql session.
+LOCK_TIMEOUT_MS = 3000
+
+
+class PublicationUnavailable(Exception):
+    """The row vanished, or moved, between authorisation and the lock."""
+
+
+class PublicationLocked(Exception):
+    """Something else holds the row and did not let go in time."""
 
 
 class InvalidTransition(Exception):
@@ -112,6 +139,67 @@ COMMAND_POLICY: dict[str, tuple[PublicationStatus, ...]] = {
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _lock_publication(
+    db: Session, *, publication_id: int, expected_project_id: str
+) -> Publication:
+    """Re-read the row under a row-level lock, and return the real state.
+
+    Three things happen here, and the order is the point.
+
+    1. ``SELECT ... FOR UPDATE`` takes the row lock. The worker claims a
+       publication with ``FOR UPDATE SKIP LOCKED``, so while this lock is
+       held the worker does not block on the row -- it simply does not
+       see it as a candidate, and goes on to the next one.
+    2. ``populate_existing=True`` overwrites the instance already in this
+       session's identity map. The authorisation dependency loaded the
+       row a moment ago; without this the ORM would hand back that stale
+       snapshot, and a later flush would write its fields -- including a
+       status of scheduled and a cleared lease -- over whatever the
+       worker has since committed. That is the bug this function exists
+       to prevent, and nothing else in the call path can prevent it.
+    3. The project on the freshly read row is compared with the project
+       authorisation approved, so a decision made about one project
+       cannot be applied to a row that belongs to another.
+
+    The lock is held until the request transaction commits or rolls
+    back, which covers the whole of the command that follows.
+    """
+
+    # SET LOCAL is scoped to this transaction, so it cannot leak to the
+    # next request that borrows this connection from the pool. The value
+    # is an int constant in this module, never anything a client sends.
+    db.execute(text(f"SET LOCAL lock_timeout = '{int(LOCK_TIMEOUT_MS)}ms'"))
+
+    try:
+        publication = db.scalars(
+            select(Publication)
+            .where(Publication.id == publication_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        ).one_or_none()
+    except OperationalError as exc:
+        # lock_timeout fired: the row is busy. Retryable, and nothing was
+        # changed, so the caller is told to come back rather than given a
+        # verdict about a state we could not read.
+        raise PublicationLocked(
+            f"Publication {publication_id} is locked by another "
+            "transaction; try again."
+        ) from exc
+
+    if publication is None:
+        raise PublicationUnavailable(
+            f"Publication {publication_id} no longer exists."
+        )
+
+    if publication.project_id != expected_project_id:
+        raise PublicationUnavailable(
+            f"Publication {publication_id} does not belong to project "
+            f"{expected_project_id!r}."
+        )
+
+    return publication
 
 
 # -- read projections ----------------------------------------------------
@@ -316,7 +404,8 @@ def _require_transition(
 def schedule_publication(
     db: Session,
     *,
-    publication: Publication,
+    publication_id: int,
+    expected_project_id: str,
     scheduled_at: datetime,
     actor: str,
     note: str | None = None,
@@ -325,6 +414,10 @@ def schedule_publication(
 ) -> Publication:
     """Put an approved or failed row on the schedule.
 
+    The row is locked and re-read first, so the status the transition is
+    checked against is the one in the database now, not the one the
+    authorisation dependency saw.
+
     The mutation and its audit entry are ai_smm.queue.reschedule, exactly
     as the CLI does it; the only thing added here is the check that the
     transition is one this command is allowed to make. queue.reschedule
@@ -332,6 +425,12 @@ def schedule_publication(
     metadata, which is the barrier that matters, and that refusal is
     surfaced as the same conflict.
     """
+
+    publication = _lock_publication(
+        db,
+        publication_id=publication_id,
+        expected_project_id=expected_project_id,
+    )
 
     _require_transition(command=command, publication=publication)
 
@@ -363,7 +462,8 @@ def schedule_publication(
 def reschedule_publication(
     db: Session,
     *,
-    publication: Publication,
+    publication_id: int,
+    expected_project_id: str,
     scheduled_at: datetime,
     actor: str,
     note: str | None = None,
@@ -373,7 +473,8 @@ def reschedule_publication(
 
     return schedule_publication(
         db,
-        publication=publication,
+        publication_id=publication_id,
+        expected_project_id=expected_project_id,
         scheduled_at=scheduled_at,
         actor=actor,
         note=note,
@@ -385,7 +486,8 @@ def reschedule_publication(
 def cancel_publication(
     db: Session,
     *,
-    publication: Publication,
+    publication_id: int,
+    expected_project_id: str,
     actor: str,
     note: str | None = None,
 ) -> Publication:
@@ -394,9 +496,15 @@ def cancel_publication(
     queue.cancel itself cancels whatever it is given -- it is also the
     tail of the operator's reconcile flow, where cancelling an ambiguous
     row is the right answer. Over HTTP there is no such context, so the
-    policy above refuses the ambiguous and terminal statuses before the
-    mutation is reached.
+    policy below refuses the ambiguous and terminal statuses before the
+    mutation is reached, against the locked and freshly read row.
     """
+
+    publication = _lock_publication(
+        db,
+        publication_id=publication_id,
+        expected_project_id=expected_project_id,
+    )
 
     _require_transition(command="cancel", publication=publication)
 

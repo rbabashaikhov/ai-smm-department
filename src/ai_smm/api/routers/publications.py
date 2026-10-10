@@ -29,7 +29,7 @@ from ai_smm.api.dependencies import (
     ViewerProject,
     ViewerPublication,
 )
-from ai_smm.api.errors import ApiError, ErrorCode
+from ai_smm.api.errors import ApiError, ErrorCode, not_found
 from ai_smm.api.schemas import (
     AttemptList,
     AttemptOut,
@@ -42,6 +42,8 @@ from ai_smm.api.schemas import (
 )
 from ai_smm.application.publications import (
     InvalidTransition,
+    PublicationLocked,
+    PublicationUnavailable,
     cancel_publication,
     list_attempts,
     list_publications_page,
@@ -170,7 +172,8 @@ def schedule(
     return _run_command(
         lambda: schedule_publication(
             db,
-            publication=context.publication,
+            publication_id=context.publication.id,
+            expected_project_id=context.project.id,
             scheduled_at=payload.scheduled_at,
             actor=context.actor,
             note=payload.note,
@@ -190,7 +193,8 @@ def reschedule(
     return _run_command(
         lambda: reschedule_publication(
             db,
-            publication=context.publication,
+            publication_id=context.publication.id,
+            expected_project_id=context.project.id,
             scheduled_at=payload.scheduled_at,
             actor=context.actor,
             note=payload.note,
@@ -210,7 +214,8 @@ def cancel(
     return _run_command(
         lambda: cancel_publication(
             db,
-            publication=context.publication,
+            publication_id=context.publication.id,
+            expected_project_id=context.project.id,
             actor=context.actor,
             note=payload.note,
         )
@@ -218,11 +223,15 @@ def cancel(
 
 
 def _run_command(command) -> PublicationDetail:
-    """Run an application command, mapping its one refusal to 409.
+    """Run an application command, mapping its refusals to status codes.
 
-    The decision itself is made in ai_smm.application.publications, which
-    is also where the transition table is written down. This function
-    only translates.
+    The decisions themselves are made in
+    ai_smm.application.publications, which is also where the transition
+    table and the row lock live. This function only translates.
+
+    The status the conflict reports is the one read under the lock, not
+    the one the authorisation dependency saw, so a row a worker claimed
+    in between is reported as claimed.
     """
 
     try:
@@ -237,6 +246,23 @@ def _run_command(command) -> PublicationDetail:
                 "status": exc.status.value,
                 "allowed_from": [status.value for status in exc.allowed],
             },
+        ) from exc
+    except PublicationUnavailable as exc:
+        # The row was deleted, or is not in the project authorisation
+        # approved. Same answer as an id that never existed.
+        raise not_found("Publication not found.") from exc
+    except PublicationLocked as exc:
+        # Nothing was read and nothing was changed: the right answer is
+        # "come back", not a verdict about a state we could not see.
+        raise ApiError(
+            status_code=503,
+            code=ErrorCode.DEPENDENCY_UNAVAILABLE,
+            message=(
+                "This publication is being worked on right now; retry in "
+                "a moment."
+            ),
+            details={"reason": "publication_locked"},
+            headers={"Retry-After": "2"},
         ) from exc
 
     return _detail(publication)
