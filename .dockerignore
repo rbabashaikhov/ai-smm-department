@@ -34,3 +34,7 @@ docs/
 
 # Test code is run in CI, not in the runtime image
 tests/
+
+# The operator UI is built and served separately; its node_modules alone
+# would add hundreds of megabytes to the build context.
+web/
