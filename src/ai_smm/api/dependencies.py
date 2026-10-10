@@ -79,7 +79,12 @@ def get_db(request: Request) -> Iterator[Session]:
 #: Declared as Annotated aliases rather than as parameter defaults, which
 #: keeps the signatures readable and avoids a callable default.
 AppSettings = Annotated[Settings, Depends(get_app_settings)]
-DbSession = Annotated[Session, Depends(get_db)]
+#: scope="function": the commit runs when the endpoint returns, before the
+#: response is sent. The default ("request") runs it after the client has
+#: read a 2xx, so an immediate follow-up could miss the write -- GET /me
+#: right after login answered 401 -- and a failed commit would have been
+#: reported as a success.
+DbSession = Annotated[Session, Depends(get_db, scope="function")]
 
 
 def get_current_session(

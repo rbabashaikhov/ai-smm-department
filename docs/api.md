@@ -673,6 +673,18 @@ The access log line is method, path, status, duration and the id:
 cookies, headers and bodies are never logged, and the existing redacting
 filter covers everything else.
 
+### A 2xx means committed
+
+The request session is a dependency with yield, declared with
+`scope="function"`: it commits when the endpoint returns and **before**
+the response is sent. FastAPI's default scope for such a dependency
+runs its exit code after the response, which let a client read a 2xx
+before the write was durable — a browser that logged in and immediately
+asked `GET /auth/me` was refused with 401 — and would have reported a
+failed commit (for instance the deferred revision key) as a success.
+`tests/test_api_transaction_boundary.py` looks at the database from a
+second connection at the moment the response is handed to the server.
+
 ### Login failures
 
 An unknown address, a wrong password, a malformed address and a
@@ -729,7 +741,7 @@ The API and security suites are `tests/test_api_auth.py`,
 `test_api_series_operations.py`, `test_api_command_concurrency.py`,
 `test_api_content.py`, `test_content_materialize.py`,
 `test_content_concurrency.py`, `test_content_links.py`,
-`test_api_health.py`,
+`test_api_health.py`, `test_api_transaction_boundary.py`,
 `test_api_contract.py`, `test_security_passwords.py`,
 `test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
 real application through its factory against a disposable database;
