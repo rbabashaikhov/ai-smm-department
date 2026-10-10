@@ -384,6 +384,19 @@ membership, настройки проекта. Публикацию исполн
 - **Публичной регистрации нет.** Первый пользователь создаётся в консоли:
   `ai-smm user create-owner` (пароль спрашивается через `getpass`,
   дефолтного пароля нет).
+- **Чтение существующего publishing core:** список и карточка публикации,
+  preview, история попыток, серии, operations summary, очередь на
+  вмешательство (`failed`/`needs_review`), audit (admin+). Все списки
+  с фильтрами и пагинацией `limit`/`offset`.
+- **Три безопасные команды** для admin+: `schedule`, `reschedule`,
+  `cancel`. Они переставляют запись внутри очереди, а не публикуют.
+  Таблица разрешённых переходов одна — в
+  `application/publications.py:COMMAND_POLICY`, выведена из машины
+  состояний в `PublicationStatus`; сама мутация и audit — существующие
+  `queue.reschedule` / `queue.cancel`. Любой другой переход → 409
+  `INVALID_STATE_TRANSITION`. `claimed` держит worker, `publishing` и
+  `needs_review` разбираются только человеком через `ai-smm reconcile` —
+  автоматического retry нет, это и есть барьер от дублей.
 
 ```bash
 export AI_SMM_API_COOKIE_SECURE=false   # только для локального http
@@ -437,13 +450,14 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-343 теста, все внешние API замоканы. Набор покрывает миграции,
+460 тестов, все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
 хеширование паролей, жизненный цикл сессии, CSRF, RBAC, изоляцию
-проектов, optimistic locking, health endpoints и отсутствие publish
-endpoint.
+проектов, optimistic locking, health endpoints, отсутствие publish
+endpoint, а также read API существующей очереди, пагинацию, preview,
+безопасные команды и отказ от запрещённых переходов.
 
 Набор отказывается работать с базой, в имени которой нет `test`: он
 удаляет таблицы, и указание на рабочую базу уничтожило бы очередь.

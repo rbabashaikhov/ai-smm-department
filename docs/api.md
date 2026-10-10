@@ -2,9 +2,12 @@
 
 Audience: whoever runs the API locally or reviews how it is wired.
 
-Status: SMM-022A. The API exists, is covered by tests and is **not
-deployed**. There is no compose service for it yet and no migration has
-been applied to the production database.
+Status: SMM-022A (identity, membership, project settings) plus SMM-022B
+(reading the existing publishing core and three safe queue commands).
+The API exists, is covered by tests and is **not deployed**. There is no
+compose service for it yet and no migration has been applied to the
+production database. SMM-022B needed no migration at all: it reads and
+moves rows in the schema the worker already had.
 
 ---
 
@@ -20,7 +23,18 @@ settings of a project. It does not publish, and it is not allowed to:
   `publish-now` endpoint, and a test asserts that no route path contains
   the word;
 - no module under `src/ai_smm/api/` imports `ai_smm.publishing` or
-  `ai_smm.worker`, and a test asserts that on the import graph.
+  `ai_smm.worker`, and a test asserts that on the import graph;
+- the same test walks `src/ai_smm/application/` too, where the one
+  permitted edge into the publishing layer is the pure content validator
+  the preview reuses (`validate_ready_to_publish` and the exception it
+  raises). Everything that can create a post — `ThreadsPublisher`,
+  `publish_claimed_publication`, `claim_due_publication` — is banned from
+  both packages, by import and by name.
+
+The three commands the API does have — schedule, reschedule, cancel —
+move a row *inside* the queue. They set `scheduled_at`, or take the row
+out; the worker still decides when anything is sent, and it still has to
+claim the row first.
 
 A publication reaches Threads exactly one way: the worker claims a due
 row with `FOR UPDATE SKIP LOCKED`, writes an attempt row, and calls the
@@ -190,6 +204,18 @@ subdomain.
 | `GET` | `/api/v1/projects/{id}` | viewer+ |
 | `GET` | `/api/v1/projects/{id}/settings` | viewer+ |
 | `PATCH` | `/api/v1/projects/{id}/settings` | admin+, CSRF, `expected_version` |
+| `GET` | `/api/v1/projects/{id}/publications` | viewer+, filtered, paginated |
+| `GET` | `/api/v1/projects/{id}/series` | viewer+, paginated |
+| `GET` | `/api/v1/projects/{id}/operations/summary` | viewer+ |
+| `GET` | `/api/v1/projects/{id}/operations/attention` | viewer+, paginated |
+| `GET` | `/api/v1/projects/{id}/audit` | **admin+**, paginated |
+| `GET` | `/api/v1/publications/{id}` | viewer+ |
+| `GET` | `/api/v1/publications/{id}/preview` | viewer+ |
+| `GET` | `/api/v1/publications/{id}/attempts` | viewer+, paginated |
+| `POST` | `/api/v1/publications/{id}/schedule` | admin+, CSRF |
+| `POST` | `/api/v1/publications/{id}/reschedule` | admin+, CSRF |
+| `POST` | `/api/v1/publications/{id}/cancel` | admin+, CSRF |
+| `GET` | `/api/v1/series/{id}` | viewer+ |
 
 ### Health
 
@@ -213,11 +239,20 @@ ones below it.
 | `GET /projects/{id}` | ✅ | ✅ | ✅ | ✅ |
 | `GET /projects/{id}/settings` | ✅ | ✅ | ✅ | ✅ |
 | `PATCH /projects/{id}/settings` | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| read publications, preview, attempts, series, operations | ✅ | ✅ | ✅ | ✅ |
+| `GET /projects/{id}/audit` | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| schedule / reschedule / cancel | ❌ 403 | ❌ 403 | ✅ | ✅ |
 
 The flow is fixed: **project from the database → membership → role check
 → action**. A project id in a request body is never consulted; the id in
 the URL is loaded from the database first. `editor` has no endpoint of its
 own yet — it exists for the content endpoints of a later stage.
+
+For a resource addressed by its own id — `/publications/{id}`,
+`/series/{id}` — the same rule starts one step earlier: **row from the
+database → its `project_id` → membership → role → action**. The id in the
+URL grants nothing by itself, and a row belonging to another project
+answers 404 with the same body as a row that does not exist.
 
 A project the caller has no membership on answers **404, not 403**, with
 the same body as a project id that does not exist, so the API cannot be
@@ -251,7 +286,127 @@ backend does not yet own would make it impossible to delete a key.
 
 ---
 
-## 6. Errors and request ids
+## 6. Reading and steering the queue
+
+### Pagination
+
+Every list endpoint takes `limit` (1–200, default 50) and `offset`
+(default 0), and answers with the same envelope:
+
+```json
+{"items": [...], "total": 128, "limit": 50, "offset": 0}
+```
+
+`total` counts what the filter matches, not what the page holds, so a
+client can show "50 of 128" without a second request. An offset past the
+end is an empty page, not an error; a `limit` outside the range is a 422.
+
+### Publication filters
+
+`GET /api/v1/projects/{id}/publications` takes `status` (repeat it to
+narrow to a set, as `ai-smm queue --status` does), `format`, `series_id`
+and `human_reviewed`. Rows come back ordered by `ordinal`, the same order
+the CLI shows.
+
+A list row carries no body text — it is a list — but it does carry
+`body_chars` and `image_count`. The detail endpoint has the text, the
+images and the operational fields (`last_error`, `next_attempt_at`, the
+lease, the idempotency key).
+
+### Preview
+
+`GET /api/v1/publications/{id}/preview` runs the publishing layer's
+existing preflight with the claim and review gates relaxed, exactly as
+the CLI preview relaxes them: an operator inspecting a record holds no
+claim, and an unreviewed record is the normal thing to preview — that is
+how they decide whether to approve it.
+
+It reports `content_valid` / `content_error` (the preflight), whether the
+row is `human_reviewed`, whether its turn has come in its series
+(`series_ready`, `blocking_parts`), and `publishable_now` for all three
+together. **It sends nothing.** It is a pure function of the row, and a
+test asserts that touching Threads from it raises.
+
+### Operations
+
+`/operations/summary` gives per-status counts (all nine, zero-filled),
+`due_now`, `needs_attention`, `published_last_24h`, `last_published_at`,
+`next_scheduled_at`, series counts, and the deployment's `dry_run` flag
+so a panel can explain why nothing is going out. Every aggregate is
+filtered by project: the platform-wide helpers in `ai_smm.queue` are
+deliberately unused here, because over HTTP they would leak one project's
+activity into another's summary.
+
+`/operations/attention` is the HTTP counterpart of `ai-smm errors`:
+`failed` and `needs_review` rows, newest change first. **Listing one does
+not retry it.**
+
+### The three commands
+
+| Command | Allowed from | Effect |
+|---|---|---|
+| `schedule` | `approved`, `failed` | sets `scheduled_at`, clears the last error and the lease |
+| `reschedule` | `scheduled`, `failed` | moves `scheduled_at` |
+| `cancel` | `draft`, `approved`, `scheduled`, `failed` | status `cancelled`, terminal |
+
+Everything else is **409 `INVALID_STATE_TRANSITION`**, with the current
+status and the allowed set in `details`:
+
+- `claimed` — a worker holds a lease on it right now; it returns to
+  `scheduled` by itself when the lease expires;
+- `publishing`, `needs_review` — the outcome is unknown. Only a human who
+  has checked the real Threads account can say what happened, with
+  `ai-smm reconcile`. **Nothing here ever retries one of these**, which
+  is the whole reason the queue has the state;
+- `published`, `cancelled` — terminal;
+- `draft` for the scheduling commands — approve the exact text first
+  (`ai-smm approve`), which also moves it to `approved`.
+
+A row that carries publish metadata (`threads_post_id` or
+`published_at`) is refused whatever its status says: something reached
+the platform, so rescheduling it would duplicate a live post. That
+barrier is `ai_smm.queue.reschedule`'s own, and it is surfaced as the
+same 409.
+
+The allowed-from table lives in one place,
+`ai_smm.application.publications.COMMAND_POLICY`, derived from the
+transition table documented on `PublicationStatus`. The router does not
+compare statuses; it calls the application function and translates its
+one exception. The mutation and its audit entry are
+`ai_smm.queue.reschedule` / `ai_smm.queue.cancel` — the same functions
+the CLI and the worker call, unchanged.
+
+`scheduled_at` must carry a timezone offset
+(`2026-10-12T09:00:00+03:00`). The CLI reads a naive time in the operator
+timezone as a convenience; an API that guessed one could move a publish
+by hours, so a naive value is a 422. A time in the past means "due
+immediately", as `ai-smm schedule --at now` does.
+
+### Series
+
+`GET /api/v1/projects/{id}/series` lists series with `parts_total` and
+`parts_published`. `GET /api/v1/series/{id}` adds the parts in position
+order and `issues` — the structural report from
+`ai_smm.series.validate_series_structure`, so the API and the CLI cannot
+disagree about whether a series is well formed. Nothing here creates or
+changes a series; that stays in the CLI.
+
+### Audit
+
+`GET /api/v1/projects/{id}/audit` is **admin and above**: an audit trail
+names who did what, and a viewer has no business reading it. It takes an
+optional `action` filter.
+
+`audit_log` has no `project_id` column, so "the entries of this project"
+is derived: the subjects belonging to the project are selected in SQL
+from `publications` and `content_series`, and an entry matches when its
+subject is one of them or `project:{id}` itself. An entry about a user (a
+login, the owner bootstrap) belongs to no project and is therefore not
+listed — a user is not owned by one.
+
+---
+
+## 7. Errors and request ids
 
 Every failure has the same shape:
 
@@ -268,6 +423,7 @@ Every failure has the same shape:
 | `NOT_FOUND` | 404 |
 | `VALIDATION_ERROR` | 422 |
 | `VERSION_CONFLICT` | 409 |
+| `INVALID_STATE_TRANSITION` | 409 |
 | `DEPENDENCY_UNAVAILABLE` | 503 |
 | `INTERNAL_ERROR` | 500 |
 
@@ -293,7 +449,7 @@ exist.
 
 ---
 
-## 7. Audit
+## 8. Audit
 
 Written to the existing `audit_log` table, actor `user:<uuid>` or
 `system:bootstrap`:
@@ -305,13 +461,20 @@ Written to the existing `audit_log` table, actor `user:<uuid>` or
 | `auth.login_failed` | failed login, with the normalised address only |
 | `auth.logout` | session revoked |
 | `project.settings.update` | settings written, with the new version and the sections touched |
+| `rescheduled` | schedule or reschedule command (the existing action name, written by `ai_smm.queue`) |
+| `cancelled` | cancel command (likewise) |
+
+The two command actions are the queue's own vocabulary, not new ones: an
+entry written by the API is told apart from the CLI's and the worker's by
+its actor, which is `user:<uuid>` rather than `cli:<name>` or
+`worker:<id>`.
 
 No password, no raw session token and no CSRF token is ever written to an
 audit entry.
 
 ---
 
-## 8. Tests
+## 9. Tests
 
 ```bash
 AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_test \
@@ -319,7 +482,9 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_test \
 ```
 
 The API and security suites are `tests/test_api_auth.py`,
-`test_api_csrf.py`, `test_api_projects_rbac.py`, `test_api_health.py`,
+`test_api_csrf.py`, `test_api_projects_rbac.py`,
+`test_api_publications_read.py`, `test_api_publication_commands.py`,
+`test_api_series_operations.py`, `test_api_health.py`,
 `test_api_contract.py`, `test_security_passwords.py`,
 `test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
 real application through its factory against a disposable database;
