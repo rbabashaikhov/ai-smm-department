@@ -60,8 +60,14 @@ def test_comparison_rejects_a_mismatch_and_an_empty_value() -> None:
     token = generate_token()
     csrf = derive_csrf_token(token)
 
+    # Change the last character to one it is guaranteed not to be. A
+    # fixed replacement ("0") equals the original whenever the digest
+    # already ends in that digit -- one run in sixteen.
+    tampered = csrf[:-1] + ("1" if csrf[-1] == "0" else "0")
+
+    assert tampered != csrf
     assert tokens_equal(csrf, csrf) is True
-    assert tokens_equal(csrf, csrf[:-1] + "0") is False
+    assert tokens_equal(csrf, tampered) is False
     assert tokens_equal(csrf, "") is False
     assert tokens_equal(None, csrf) is False
     assert tokens_equal("", "") is False

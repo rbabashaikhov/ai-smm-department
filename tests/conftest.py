@@ -129,7 +129,10 @@ def clean_tables(request: pytest.FixtureRequest) -> Iterator[None]:
     with engine.begin() as connection:
         connection.execute(
             text(
-                "TRUNCATE publication_attempts, publications, "
+                "TRUNCATE content_publication_links, "
+                "content_approvals, content_revisions, "
+                "content_items, "
+                "publication_attempts, publications, "
                 "content_series, project_settings, "
                 "project_memberships, user_sessions, users, "
                 "projects, audit_log "
@@ -397,5 +400,45 @@ def member(session: Session, project: str, make_user, make_membership):
         make_membership(user=user, project_id=project, role=role)
 
         return user
+
+    return factory
+
+
+# --- editorial fixtures ----------------------------------------------------
+
+
+@pytest.fixture
+def make_content(session: Session, project: str):
+    """Create a content item with its first revision, through the service."""
+
+    from ai_smm.application.content import RevisionInput, create_content_item
+
+    counter = {"n": 0}
+
+    def factory(
+        *,
+        user: User | None = None,
+        project_id: str | None = None,
+        title: str | None = None,
+        body: str = "Первая версия текста.",
+        publication_format: str = "text",
+        images: list[dict[str, str]] | None = None,
+    ):
+        counter["n"] += 1
+        item, revision = create_content_item(
+            session,
+            project_id=project_id or project,
+            title=title or f"Content {counter['n']}",
+            content_type="post",
+            revision=RevisionInput(
+                body=body,
+                format=publication_format,
+                images=images or [],
+            ),
+            created_by_user=user,
+        )
+        session.commit()
+
+        return item, revision
 
     return factory

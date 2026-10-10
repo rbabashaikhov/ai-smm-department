@@ -7,16 +7,19 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from ai_smm.db.models import (
+    ApprovalDecision,
     AttemptOutcome,
     AttemptPhase,
+    ContentStatus,
     MembershipRole,
     PublicationStatus,
     PublishingStrategy,
+    RevisionSource,
     SeriesStatus,
 )
 
@@ -313,3 +316,153 @@ class CancelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     note: str | None = Field(default=None, max_length=500)
+
+
+
+# -- editorial layer -----------------------------------------------------
+# A revision has no update body anywhere in this API: the only way to
+# change content is to POST a new revision.
+
+ContentFormat = Literal["text", "image", "carousel", "thread"]
+
+
+class RevisionIn(BaseModel):
+    """The content of a new revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=500)
+    body: str = Field(min_length=1, max_length=20000)
+    format: ContentFormat = "text"
+    images: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
+    items: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    #: Provenance. A person posting through the panel is "human"; a value
+    #: such as "copywriter" records that the text came from an agent. It
+    #: grants nothing -- approval is a separate, human-only act.
+    source: RevisionSource = RevisionSource.HUMAN
+    source_ref: str | None = Field(default=None, max_length=500)
+    editor_score: float | None = Field(default=None, ge=0, le=10)
+    editor_notes: str = Field(default="", max_length=5000)
+
+
+class ContentItemCreate(BaseModel):
+    """A new item and its first revision, in one request.
+
+    The project comes from the URL. There is no project_id field, and an
+    unknown field is refused.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = Field(min_length=1, max_length=500)
+    content_type: str = Field(default="post", min_length=1, max_length=40)
+    revision: RevisionIn
+
+
+class RevisionCreate(RevisionIn):
+    #: The item version the author read. A stale number is a 409, so two
+    #: editors cannot silently stack revisions on each other's work.
+    expected_item_version: int = Field(ge=1)
+
+
+class RevisionDecisionIn(BaseModel):
+    """submit-review, approve and reject all name the exact revision."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    revision_id: uuid.UUID
+    expected_item_version: int | None = Field(default=None, ge=1)
+    note: str = Field(default="", max_length=2000)
+
+
+class MaterializeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Optional guard: the approved revision the caller expects to send.
+    #: If the approval has moved on, the request is refused as stale.
+    revision_id: uuid.UUID | None = None
+
+
+class RevisionOut(BaseModel):
+    id: uuid.UUID
+    content_item_id: uuid.UUID
+    revision_number: int
+    title: str | None
+    body: str
+    format: str
+    images: list[dict[str, Any]]
+    items: list[dict[str, Any]]
+    metadata: dict[str, Any]
+    source: RevisionSource
+    source_ref: str | None
+    editor_score: float | None
+    editor_notes: str
+    content_hash: str
+    created_by_user_id: uuid.UUID | None
+    created_at: datetime
+
+
+class RevisionList(PageMeta):
+    items: list[RevisionOut]
+
+
+class ContentItemSummary(BaseModel):
+    id: uuid.UUID
+    project_id: str
+    title: str
+    content_type: str
+    status: ContentStatus
+    current_revision_id: uuid.UUID
+    approved_revision_id: uuid.UUID | None
+    version: int
+    created_by_user_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+    archived_at: datetime | None
+
+
+class ContentItemList(PageMeta):
+    items: list[ContentItemSummary]
+
+
+class ContentItemDetail(ContentItemSummary):
+    current_revision: RevisionOut
+    #: True only when the current revision is the approved one. An older
+    #: revision's approval never counts.
+    approval_in_effect: bool
+
+
+class ApprovalOut(BaseModel):
+    id: uuid.UUID
+    content_item_id: uuid.UUID
+    revision_id: uuid.UUID
+    decision: ApprovalDecision
+    actor_user_id: uuid.UUID
+    note: str
+    created_at: datetime
+
+
+class ApprovalList(PageMeta):
+    items: list[ApprovalOut]
+
+
+class RevisionCreated(BaseModel):
+    item: ContentItemSummary
+    revision: RevisionOut
+
+
+class DecisionOut(BaseModel):
+    item: ContentItemSummary
+    approval: ApprovalOut
+
+
+class MaterializeOut(BaseModel):
+    """What the bridge did. It never rewrites, schedules or publishes."""
+
+    #: created | unchanged. A Publication's content never changes after it
+    #: is created, so there is no "updated".
+    result: Literal["created", "unchanged"]
+    platform: str
+    revision_id: uuid.UUID
+    publication: PublicationDetail

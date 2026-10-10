@@ -21,6 +21,7 @@ from ai_smm.api.csrf import csrf_guard
 from ai_smm.api.errors import install_error_handlers
 from ai_smm.api.request_id import RequestIdMiddleware
 from ai_smm.api.routers import auth as auth_router
+from ai_smm.api.routers import content as content_router
 from ai_smm.api.routers import health as health_router
 from ai_smm.api.routers import operations as operations_router
 from ai_smm.api.routers import projects as projects_router
@@ -78,6 +79,7 @@ def create_app(
     v1.include_router(publications_router.router)
     v1.include_router(series_router.router)
     v1.include_router(operations_router.router)
+    v1.include_router(content_router.router)
 
     app.include_router(v1)
 

@@ -2,11 +2,12 @@
 
 audit_log is written by the worker, the CLI, the importer and the API,
 and it has no project_id column: an entry names its subject, as
-`publication:<id>`, `series:<id>`, `project:<id>` or `user:<uuid>`.
+`publication:<id>`, `series:<id>`, `content_item:<uuid>`,
+`project:<id>` or `user:<uuid>`.
 
 So "the audit trail of this project" is derived rather than stored: the
-subjects belonging to the project are selected in SQL from publications
-and content_series, and an entry matches when its subject is one of them
+subjects belonging to the project are selected in SQL from publications,
+content_series and content_items, and an entry matches when its subject is one of them
 or the project itself. That keeps the view honest without a migration;
 it also means an entry about a user (a login, the owner bootstrap) is not
 attributed to any project, which is correct -- a user is not owned by
@@ -18,7 +19,7 @@ from sqlalchemy import String, cast, func, literal, select
 from sqlalchemy.orm import Session
 
 from ai_smm.application.publications import Page
-from ai_smm.db.models import AuditLog, ContentSeries, Publication
+from ai_smm.db.models import AuditLog, ContentItem, ContentSeries, Publication
 
 
 def _project_subjects(project_id: str):
@@ -32,7 +33,11 @@ def _project_subjects(project_id: str):
         literal("series:").concat(cast(ContentSeries.id, String))
     ).where(ContentSeries.project_id == project_id)
 
-    return publication_subjects, series_subjects
+    content_subjects = select(
+        literal("content_item:").concat(cast(ContentItem.id, String))
+    ).where(ContentItem.project_id == project_id)
+
+    return publication_subjects, series_subjects, content_subjects
 
 
 def list_project_audit_page(
@@ -43,11 +48,15 @@ def list_project_audit_page(
     limit: int,
     offset: int,
 ) -> Page:
-    publication_subjects, series_subjects = _project_subjects(project_id)
+    publication_subjects, series_subjects, content_subjects = (
+        _project_subjects(project_id)
+    )
 
     stmt = select(AuditLog).where(
         AuditLog.subject.is_not(None),
-        AuditLog.subject.in_(publication_subjects.union_all(series_subjects))
+        AuditLog.subject.in_(
+            publication_subjects.union_all(series_subjects, content_subjects)
+        )
         | (AuditLog.subject == f"project:{project_id}"),
     )
 
