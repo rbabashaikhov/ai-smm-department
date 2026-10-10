@@ -138,6 +138,7 @@ def test_a_stale_snapshot_cannot_overwrite_a_claim(
                     publication_id=publication_id,
                     expected_project_id=project,
                     actor="user:test",
+                    mutations_enabled=True,
                 )
             else:
                 schedule_publication(
@@ -147,6 +148,7 @@ def test_a_stale_snapshot_cannot_overwrite_a_claim(
                     scheduled_at=datetime.now(timezone.utc)
                     + timedelta(minutes=30),
                     actor="user:test",
+                    mutations_enabled=True,
                     command=command,
                 )
 
@@ -392,6 +394,7 @@ def test_a_command_that_waited_for_the_lock_sees_the_claim(
                 scheduled_at=datetime.now(timezone.utc)
                 + timedelta(minutes=30),
                 actor="user:test",
+                mutations_enabled=True,
                 command="reschedule",
             )
         except InvalidTransition as exc:
@@ -470,6 +473,7 @@ def test_the_locked_row_must_still_belong_to_the_authorised_project(
                 publication_id=publication.id,
                 expected_project_id=make_other_project,
                 actor="user:test",
+                mutations_enabled=True,
             )
 
         api_session.rollback()
@@ -506,6 +510,7 @@ def test_a_row_deleted_before_the_lock_is_reported_as_missing(
                 publication_id=publication_id,
                 expected_project_id=project,
                 actor="user:test",
+                mutations_enabled=True,
             )
 
         api_session.rollback()

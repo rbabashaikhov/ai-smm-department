@@ -302,7 +302,13 @@ TEST_PASSWORD = "correct-horse-battery-staple"
 def api_settings(settings: Settings) -> Settings:
     # TestClient speaks http, so the Secure attribute would stop the
     # cookie from being sent back. Production keeps the default (true).
-    return replace(settings, api_cookie_secure=False)
+    #
+    # Mutations on: the existing API suites test what an editable control
+    # plane allows. The read-only default (false) has its own suite,
+    # tests/test_api_mutation_gate.py, built on read_only_client.
+    return replace(
+        settings, api_cookie_secure=False, api_mutations_enabled=True
+    )
 
 
 @pytest.fixture

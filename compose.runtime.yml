@@ -19,6 +19,11 @@
 #                    127.0.0.1;
 #   * migrations on start -- `migrate` is a one-shot operator command.
 #
+# Read-only by default: AI_SMM_API_MUTATIONS_ENABLED is false, so the
+# Control Center can sign in and read but every business-state change is
+# refused (403 MUTATIONS_DISABLED). On this disposable database it may be
+# switched on with SMM_RUNTIME_API_MUTATIONS_ENABLED=true.
+#
 # The API and the database sit on an `internal` network with no route to
 # the outside world: even a code path that tried to call Threads or OpenAI
 # from these containers would fail to resolve the host.
@@ -58,6 +63,10 @@ x-app-env: &app-env
   AI_SMM_API_COOKIE_SECURE: ${SMM_RUNTIME_COOKIE_SECURE:-false}
   # The packaged runtime does not serve /docs, /redoc, /openapi.json.
   AI_SMM_API_DOCS_ENABLED: ${SMM_RUNTIME_API_DOCS_ENABLED:-false}
+  # Read-only Control Center unless switched on for this local runtime.
+  # Spelled out rather than left to the code default, so the packaged
+  # contract is visible here.
+  AI_SMM_API_MUTATIONS_ENABLED: ${SMM_RUNTIME_API_MUTATIONS_ENABLED:-false}
   LOG_LEVEL: INFO
   LOG_FORMAT: json
   # Defence in depth: no credentials, and an unroutable Threads base URL.

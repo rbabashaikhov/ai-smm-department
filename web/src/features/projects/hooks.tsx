@@ -10,7 +10,7 @@ import {
 
 import { useApi } from "../../api/context";
 import { qk } from "../../api/queryKeys";
-import { useProjectAccess } from "../auth/AuthProvider";
+import { useMutationsEnabled, useProjectAccess } from "../auth/AuthProvider";
 import { permissions, type Permissions } from "../auth/rbac";
 
 export function useProjects() {
@@ -31,14 +31,15 @@ export function useProject(projectId: string | undefined) {
 
 /**
  * UX permissions in one project. The role comes from GET /projects/{id}
- * when loaded (it is the freshest), else from /auth/me. Unknown role means
- * no write controls at all.
+ * when loaded (it is the freshest), else from /auth/me. Unknown role, or
+ * a read-only deployment, means no write controls at all.
  */
 export function useProjectPermissions(projectId: string | undefined): Permissions {
   const project = useProject(projectId);
   const access = useProjectAccess(projectId);
+  const mutationsEnabled = useMutationsEnabled();
 
-  return permissions(project.data?.role ?? access?.role);
+  return permissions(project.data?.role ?? access?.role, mutationsEnabled);
 }
 
 // -- the project the sidebar is pointing at ------------------------------

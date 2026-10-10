@@ -381,6 +381,7 @@ def test_concurrent_materialisations_of_one_item_make_one_publication(
                 content_item_id=item.id,
                 expected_project_id=item.project_id,
                 actor_user=user,
+                mutations_enabled=True,
             )
             db.commit()
 
@@ -434,6 +435,7 @@ def test_concurrent_materialisations_in_one_project_get_distinct_ordinals(
                 content_item_id=item.id,
                 expected_project_id=item.project_id,
                 actor_user=user,
+                mutations_enabled=True,
             )
             db.commit()
 
@@ -465,6 +467,7 @@ def _materialised_then_revised(session_factory, make_content, make_user):
             content_item_id=item.id,
             expected_project_id=item.project_id,
             actor_user=user,
+            mutations_enabled=True,
         )
         db.commit()
         publication_a = first.publication.id
@@ -507,6 +510,7 @@ def _timed_materialise(session_factory, item, user):
             content_item_id=item.id,
             expected_project_id=item.project_id,
             actor_user=user,
+            mutations_enabled=True,
         )
         db.commit()
         outcome = result.result
@@ -607,6 +611,7 @@ def test_scheduling_the_earlier_snapshot_races_safely_with_materialisation(
             expected_project_id=item.project_id,
             scheduled_at=datetime.now(timezone.utc) + timedelta(hours=1),
             actor="user:admin",
+            mutations_enabled=True,
         )
         admin.flush()
 

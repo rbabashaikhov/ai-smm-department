@@ -39,6 +39,12 @@ function describe(error: unknown): { title: string; message: string } {
         title: "Недостаточно прав",
         message: "Your role in this project does not allow this action.",
       };
+    case ErrorCode.MUTATIONS_DISABLED:
+      return {
+        title: "Только чтение",
+        message:
+          "This Control Center is read-only: the server refuses every change. Nothing was changed.",
+      };
     case ErrorCode.CSRF_REQUIRED:
     case ErrorCode.CSRF_INVALID:
       return {

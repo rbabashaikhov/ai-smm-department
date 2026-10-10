@@ -29,7 +29,7 @@ export const page = <T,>(items: T[], total = items.length, limit = 50, offset = 
   offset,
 });
 
-export function makeMe(role: Role): MeResponse {
+export function makeMe(role: Role, mutationsEnabled = true): MeResponse {
   return {
     user: {
       id: USER_ID,
@@ -40,6 +40,7 @@ export function makeMe(role: Role): MeResponse {
       created_at: T0,
     },
     projects: [{ project_id: PROJECT_ID, display_name: "Demo Project", role }],
+    control_plane: { mutations_enabled: mutationsEnabled },
   };
 }
 
@@ -161,7 +162,7 @@ export function makePublication(
   };
 }
 
-export function makeSummary(): OperationsSummary {
+export function makeSummary(overrides: Partial<OperationsSummary> = {}): OperationsSummary {
   return {
     project_id: PROJECT_ID,
     total: 12,
@@ -183,7 +184,11 @@ export function makeSummary(): OperationsSummary {
     next_scheduled_at: "2026-10-12T06:00:00+00:00",
     series_total: 2,
     series_active: 1,
-    dry_run: false,
+    api_dry_run: false,
+    api_mutations_enabled: true,
+    worker_mode: "unknown",
+    worker_mode_source: null,
+    ...overrides,
   };
 }
 
@@ -206,27 +211,35 @@ export function makePreview(detail: PublicationDetail): PublicationPreview {
  */
 export function createServer(
   role: Role | null,
-  options: { item?: ContentItemDetail; publication?: PublicationDetail } = {},
+  options: {
+    item?: ContentItemDetail;
+    publication?: PublicationDetail;
+    /** false: a read-only deployment (AI_SMM_API_MUTATIONS_ENABLED=false). */
+    mutationsEnabled?: boolean;
+  } = {},
 ): FakeApi {
   const api = new FakeApi();
   const item = options.item ?? makeItem();
   const publication = options.publication ?? makePublication();
   let signedIn = role !== null;
   const activeRole: Role = role ?? "viewer";
+  const mutationsEnabled = options.mutationsEnabled ?? true;
   const unauthorized = {
     status: 401,
     body: { error: { code: "AUTH_REQUIRED", message: "Authentication is required.", details: {}, request_id: "r" } },
   };
 
   api
-    .on("GET", "/api/v1/auth/me", () => (signedIn ? ok(makeMe(activeRole)) : unauthorized))
+    .on("GET", "/api/v1/auth/me", () =>
+      signedIn ? ok(makeMe(activeRole, mutationsEnabled)) : unauthorized,
+    )
     .on("GET", "/api/v1/auth/csrf", () =>
       signedIn ? ok({ csrf_token: api.csrfToken, header_name: "X-CSRF-Token" }) : unauthorized,
     )
     .on("POST", "/api/v1/auth/login", () => {
       signedIn = true;
 
-      return ok({ user: makeMe(activeRole).user, csrf_token: api.csrfToken });
+      return ok({ user: makeMe(activeRole, mutationsEnabled).user, csrf_token: api.csrfToken });
     })
     .on("POST", "/api/v1/auth/logout", () => {
       signedIn = false;
@@ -247,7 +260,11 @@ export function createServer(
         updated_at: T0,
       }),
     )
-    .on("GET", "/api/v1/projects/:projectId/operations/summary", ok(makeSummary()))
+    .on(
+      "GET",
+      "/api/v1/projects/:projectId/operations/summary",
+      ok(makeSummary({ api_mutations_enabled: mutationsEnabled })),
+    )
     .on("GET", "/api/v1/projects/:projectId/operations/attention", ok(page([])))
     .on("GET", "/api/v1/projects/:projectId/audit", ok(page([])))
     .on("GET", "/api/v1/projects/:projectId/content-items", ok(page([item])))

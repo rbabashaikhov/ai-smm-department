@@ -49,6 +49,10 @@ class ErrorCode:
     CSRF_REQUIRED = "CSRF_REQUIRED"
     CSRF_INVALID = "CSRF_INVALID"
     METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    #: The deployment runs the control plane read-only
+    #: (AI_SMM_API_MUTATIONS_ENABLED=false). Not a role problem: no role
+    #: can make this change on this deployment.
+    MUTATIONS_DISABLED = "MUTATIONS_DISABLED"
 
 
 #: Fallback mapping for HTTPExceptions raised by the framework itself.

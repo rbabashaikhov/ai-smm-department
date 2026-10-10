@@ -21,6 +21,7 @@ from ai_smm.api.dependencies import (
 )
 from ai_smm.api.errors import invalid_credentials
 from ai_smm.api.schemas import (
+    ControlPlaneOut,
     CsrfResponse,
     LoginRequest,
     LoginResponse,
@@ -137,7 +138,9 @@ def logout(
     response_model=MeResponse,
     summary="The signed-in user and the projects they may work on",
 )
-def me(db: DbSession, authenticated: CurrentSession) -> MeResponse:
+def me(
+    db: DbSession, settings: AppSettings, authenticated: CurrentSession
+) -> MeResponse:
     access = list_user_projects(db, user=authenticated.user)
 
     return MeResponse(
@@ -150,6 +153,11 @@ def me(db: DbSession, authenticated: CurrentSession) -> MeResponse:
             )
             for item in access
         ],
+        # Presentation hint for the client. The server enforces the same
+        # switch on every request (ai_smm.api.mutation_gate).
+        control_plane=ControlPlaneOut(
+            mutations_enabled=settings.api_mutations_enabled
+        ),
     )
 
 

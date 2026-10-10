@@ -48,6 +48,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from ai_smm.application.control_plane import require_mutations_enabled
 from ai_smm.application.publications import Page
 from ai_smm.db.models import (
     CONTENT_FORMATS,
@@ -825,10 +826,15 @@ def materialize_approved_revision(
     content_item_id: uuid.UUID,
     expected_project_id: str,
     actor_user: User,
+    mutations_enabled: bool,
     revision_id: uuid.UUID | None = None,
     now: datetime | None = None,
 ) -> MaterializeResult:
     """Turn the approved revision into a delivery Publication. Nothing more.
+
+    Refused with MutationsDisabled, before anything is read, when the
+    control plane is read-only: this is how a row enters the publication
+    queue. See ai_smm.application.control_plane.
 
     The Publication is left in `approved` with human_reviewed set and no
     scheduled_at: a safe pre-delivery state. Scheduling it is a separate,
@@ -871,6 +877,8 @@ def materialize_approved_revision(
     so no second live Publication can appear between the check and the
     insert.
     """
+
+    require_mutations_enabled(mutations_enabled, command="materialize")
 
     human = _require_human(actor_user, command="materialize")
     now = now or utcnow()

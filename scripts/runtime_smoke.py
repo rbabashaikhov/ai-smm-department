@@ -6,6 +6,10 @@
 
 Standard library only, read-only except for one login/logout pair. It never
 publishes, never schedules, and never talks to anything but --base-url.
+With a session it also probes the read-only gate with a cancel of
+publication 0, an id that never exists: refused with MUTATIONS_DISABLED
+when the API is read-only (the default), 404 when it is not -- nothing is
+written either way.
 The password is read from a file so it does not appear in a process
 listing or the shell history.
 
@@ -232,6 +236,7 @@ def check_session(
     password: str,
     project: str,
     expect_secure_cookie: bool,
+    expect_mutations: str,
 ) -> None:
     login = s.request("POST", "/api/v1/auth/login",
                       body={"email": email, "password": password})
@@ -269,6 +274,9 @@ def check_session(
             projects.status == 200 and project in ids,
             f"status={projects.status} ids={ids}")
 
+    check_mutation_gate(s, me=me, cookie=cookie, csrf=csrf,
+                        expect=expect_mutations)
+
     no_token = s.request("POST", "/api/v1/auth/logout", headers=cookie)
     s.check("logout without X-CSRF-Token is refused (CSRF intact)",
             no_token.status == 403 and no_token.error_code == "CSRF_REQUIRED",
@@ -284,6 +292,41 @@ def check_session(
             after.status == 401, f"status={after.status}")
 
 
+def check_mutation_gate(
+    s: Smoke,
+    *,
+    me: Reply,
+    cookie: dict[str, str],
+    csrf: str,
+    expect: str,
+) -> None:
+    enabled = expect == "enabled"
+    reported = None
+
+    if me.status == 200:
+        reported = me.json().get("control_plane", {}).get(  # type: ignore[union-attr]
+            "mutations_enabled"
+        )
+
+    s.check(f"/auth/me reports mutations_enabled={enabled}",
+            reported is enabled, f"reported={reported!r}")
+
+    # Publication 0 never exists, so the probe cannot change anything:
+    # the gate refuses it first, or -- with mutations on -- it is a 404.
+    probe = s.request("POST", "/api/v1/publications/0/cancel",
+                      headers={**cookie, "X-CSRF-Token": csrf}, body={})
+
+    if enabled:
+        s.check("with mutations on, a command reaches the API (404 for id 0)",
+                probe.status == 404 and probe.error_code == "NOT_FOUND",
+                f"status={probe.status} code={probe.error_code}")
+    else:
+        s.check("read-only: a queue command is refused (MUTATIONS_DISABLED)",
+                probe.status == 403
+                and probe.error_code == "MUTATIONS_DISABLED",
+                f"status={probe.status} code={probe.error_code}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--base-url", default="http://127.0.0.1:8088")
@@ -294,6 +337,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project", default="demo")
     parser.add_argument("--expect-secure-cookie", action="store_true",
                         help="Expect Secure on the session cookie (HTTPS).")
+    parser.add_argument("--expect-mutations", choices=["disabled", "enabled"],
+                        default="disabled",
+                        help="AI_SMM_API_MUTATIONS_ENABLED of the target; "
+                             "the packaged default is disabled.")
     args = parser.parse_args(argv)
 
     smoke = Smoke(args.base_url)
@@ -309,6 +356,7 @@ def main(argv: list[str] | None = None) -> int:
             password=args.password_file.read_text(encoding="utf-8").strip(),
             project=args.project,
             expect_secure_cookie=args.expect_secure_cookie,
+            expect_mutations=args.expect_mutations,
         )
     else:
         print("SKIP  login/logout (no --email/--password-file)")

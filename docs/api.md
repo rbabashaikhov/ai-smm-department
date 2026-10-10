@@ -14,9 +14,18 @@ Status:
   `compose.runtime.yml` defines `smm-api`, `smm-web`, `postgres`,
   `migrate` and `cli`. It exists and is tested locally against a
   disposable database.
+- SMM-024B.2 makes the control plane **read-only by default**
+  (`AI_SMM_API_MUTATIONS_ENABLED=false`, see
+  [Read-only mode](#read-only-mode)) and separates the API's own
+  `AI_SMM_DRY_RUN` from the worker's execution mode, which the API reports
+  as `unknown` until a verifiable source exists. Decision record:
+  [adr/automation-and-publication-safety.md](adr/automation-and-publication-safety.md).
 
 The API and the Control Center are **not deployed** to production or a
-VPS, and no migration has been applied to the production database.
+VPS, and no migration has been applied to the production database. The
+production worker itself was reported running **live** (not dry-run) by
+the 2026-10-10 discovery; see
+[production-deployment-plan.md §17](production-deployment-plan.md).
 SMM-022B needed no migration at all: it reads and moves rows in the
 schema the worker already had. `compose.runtime.yml` deliberately has no
 worker: the API never publishes, and nothing in that runtime can claim or
@@ -48,6 +57,10 @@ settings of a project. It does not publish, and it is not allowed to:
   `publish_claimed_publication`, `claim_due_publication` — is banned from
   both packages, by import and by name.
 
+Unless `AI_SMM_API_MUTATIONS_ENABLED=true`, it does not even edit: the
+packaged Control Center is read-only for every role, owner included
+([Read-only mode](#read-only-mode)).
+
 The three commands the API does have — schedule, reschedule, cancel —
 move a row *inside* the queue. They set `scheduled_at`, or take the row
 out; the worker still decides when anything is sent, and it still has to
@@ -72,6 +85,9 @@ alembic upgrade head
 # A browser will not return a Secure cookie over plain http.
 export AI_SMM_API_COOKIE_SECURE=false
 
+# Read-only unless said otherwise. A local database may be edited.
+export AI_SMM_API_MUTATIONS_ENABLED=true
+
 uvicorn ai_smm.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
@@ -93,6 +109,8 @@ see [runtime-packaging.md](runtime-packaging.md).
 | `AI_SMM_API_SESSION_IDLE_SECONDS` | `86400` (24 hours) | idle timeout, measured from the last request |
 | `AI_SMM_API_COOKIE_SECURE` | `true` | `Secure` on the session cookie; set `false` only for local http |
 | `AI_SMM_API_DOCS_ENABLED` | `true` | serve `/docs`, `/redoc`, `/openapi.json`; the packaged runtime sets `false` (they answer 404 JSON) |
+| `AI_SMM_API_MUTATIONS_ENABLED` | `false` | `false`: read-only, every business-state change is refused with 403 `MUTATIONS_DISABLED`; only login and logout write. Read by the API only — the worker ignores it |
+| `AI_SMM_DRY_RUN` | `true` | read by the API only to report it as `api_dry_run`; it gates **no** API command and is **not** the worker's mode |
 | `LOG_LEVEL`, `LOG_FORMAT` | `INFO`, `json` | as for the worker |
 
 No new secret is introduced, and there is no signing key or CSRF secret
@@ -248,6 +266,77 @@ subdomain.
 | `POST` | `/api/v1/content-items/{id}/reject` | editor+, CSRF |
 | `POST` | `/api/v1/content-items/{id}/materialize` | editor+, CSRF |
 
+Every unsafe route except login and logout is additionally refused, for
+every role, while `AI_SMM_API_MUTATIONS_ENABLED` is `false` — the
+default.
+
+### Read-only mode
+
+`AI_SMM_API_MUTATIONS_ENABLED` defaults to `false`. With it off, every
+request with an unsafe method (`POST`, `PUT`, `PATCH`, `DELETE`) under
+`/api/v1` is refused, for **every role, owner included**:
+
+```http
+HTTP/1.1 403 Forbidden
+
+{"error": {"code": "MUTATIONS_DISABLED",
+           "message": "This Control Center is read-only: changes are disabled on the server (AI_SMM_API_MUTATIONS_ENABLED=false). Nothing was changed.",
+           "details": {"reason": "read_only_control_plane"},
+           "request_id": "..."}}
+```
+
+403 is used consistently: the request is well-formed and the caller is
+authenticated, but this deployment refuses the action whatever the
+role. A client must not retry it.
+
+**What is refused.** Content creation, new revisions, submit, approve,
+reject, materialise, the project settings `PATCH`, and schedule /
+reschedule / cancel — every unsafe route except the two below. The gate
+is a dependency of the whole `/api/v1` router, so a route added later is
+refused by default; a test enumerates the effective routes and fails if
+an unsafe one is neither proven refused nor on the allowlist.
+
+**The allowlist** — the session lifecycle and nothing else:
+
+| Route | Writes |
+|---|---|
+| `POST /api/v1/auth/login` | a `user_sessions` row, `users.last_login_at`, an `auth.login` or `auth.login_failed` audit row |
+| `POST /api/v1/auth/logout` | `user_sessions.revoked_at`, an `auth.logout` audit row |
+
+Not allowlisted: user and membership bootstrap (there is no HTTP route
+for it — use `ai-smm user create-owner`), and every project, content or
+publication change.
+
+**Reads keep working**, and their only write is the session maintenance
+every authenticated request does (`user_sessions.last_seen_at`, which
+moves the idle deadline). No `GET` route changes business state.
+
+**Order of checks.** Authentication and CSRF answer first, then the
+gate: an anonymous request is 401 `AUTH_REQUIRED`, a missing or wrong
+token is 403 `CSRF_REQUIRED` / `CSRF_INVALID`, and only an authenticated
+request with a valid token reaches `MUTATIONS_DISABLED`. The gate answers
+before role checks and body validation — a read-only API does not grade a
+request it will never run. A refused request rolls the whole request
+session back: the database is unchanged, including the caller's
+`last_seen_at`.
+
+**Second barrier.** The queue commands — `schedule_publication`,
+`reschedule_publication`, `cancel_publication` and
+`materialize_approved_revision` — take a required keyword argument
+`mutations_enabled` and refuse anything but `True` before they read or
+lock a row. The routes pass the same setting, so a route that ever
+escaped the central gate still could not move the queue. The operator CLI
+and the worker do not call these functions and are unaffected.
+
+**For clients.** `GET /api/v1/auth/me` carries
+`"control_plane": {"mutations_enabled": false}` so a UI can avoid offering
+controls. It is a hint: the server enforces the switch on every request.
+
+**What it does not do.** It does not stop or start the worker, and it
+does not change what the worker publishes: the worker never reads this
+variable. A publication that is already scheduled is still sent by a live
+worker at its time.
+
 ### Health
 
 `/health/live` answers from the process alone. It must stay 200 while the
@@ -376,11 +465,26 @@ test asserts that touching Threads from it raises.
 
 `/operations/summary` gives per-status counts (all nine, zero-filled),
 `due_now`, `needs_attention`, `published_last_24h`, `last_published_at`,
-`next_scheduled_at`, series counts, and the deployment's `dry_run` flag
-so a panel can explain why nothing is going out. Every aggregate is
+`next_scheduled_at`, series counts, and the control plane's runtime facts.
+Every aggregate is
 filtered by project: the platform-wide helpers in `ai_smm.queue` are
 deliberately unused here, because over HTTP they would leak one project's
 activity into another's summary.
+
+| Field | Meaning |
+|---|---|
+| `api_dry_run` | `AI_SMM_DRY_RUN` of the **API process**. It gates nothing the API does and says nothing about the worker. |
+| `api_mutations_enabled` | `false`: this API is read-only ([Read-only mode](#read-only-mode)). |
+| `worker_mode` | `live`, `dry_run` or `unknown` — what the worker will do with a due publication, **only** from a verifiable source. |
+| `worker_mode_source` | where `worker_mode` came from; `null` while it is `unknown`. |
+
+Today `worker_mode` is always `unknown`: the worker records its mode
+nowhere the API can read (its heartbeat is a file inside its own
+container). It is deliberately not inferred from `api_dry_run` — the API
+and the worker are separate processes with separate configuration — nor
+from past attempt outcomes, which describe the past. An earlier version
+returned the API's flag as `dry_run`, and the Control Center presented it
+as "the worker sends nothing"; that field is gone.
 
 `/operations/attention` is the HTTP counterpart of `ai-smm errors`:
 `failed` and `needs_review` rows, newest change first. **Listing one does
@@ -678,6 +782,7 @@ Every failure has the same shape:
 | `INVALID_CREDENTIALS` | 401 |
 | `FORBIDDEN` | 403 |
 | `CSRF_REQUIRED`, `CSRF_INVALID` | 403 |
+| `MUTATIONS_DISABLED` | 403 |
 | `NOT_FOUND` | 404 |
 | `VALIDATION_ERROR` | 422 |
 | `VERSION_CONFLICT` | 409 |
@@ -768,8 +873,18 @@ The API and security suites are `tests/test_api_auth.py`,
 `test_api_content.py`, `test_content_materialize.py`,
 `test_content_concurrency.py`, `test_content_links.py`,
 `test_api_health.py`, `test_api_transaction_boundary.py`,
-`test_api_contract.py`, `test_security_passwords.py`,
-`test_security_tokens.py` and `tests/test_cli_user.py`. They drive the
+`test_api_contract.py`, `test_api_mutation_gate.py`,
+`test_api_auth_read_only.py`, `test_security_passwords.py`,
+`test_security_tokens.py` and `tests/test_cli_user.py`.
+
+The API suites run with `AI_SMM_API_MUTATIONS_ENABLED=true` (the
+`api_settings` fixture), because they test what an editable control plane
+allows. `test_api_mutation_gate.py` runs the read-only default: every
+gated route for every role, with a digest of every table before and after;
+the exhaustive route list; the order of 401 / CSRF / gate; the queue
+commands refusing on their own with the central gate removed. And
+`test_api_auth_read_only.py` re-runs the whole authentication suite with
+the gate off. They drive the
 real application through its factory against a disposable database;
 nothing is mocked except, where a test needs an expired session, the
 stored timestamps.

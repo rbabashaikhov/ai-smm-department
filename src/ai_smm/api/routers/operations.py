@@ -52,10 +52,13 @@ def summary(
     result = operations_summary(
         db,
         project_id=context.project.id,
-        dry_run=settings.dry_run,
+        api_dry_run=settings.dry_run,
+        api_mutations_enabled=settings.api_mutations_enabled,
     )
 
-    return OperationsSummaryOut(**vars(result))
+    return OperationsSummaryOut(
+        **{**vars(result), "worker_mode": result.worker_mode.value}
+    )
 
 
 @router.get(

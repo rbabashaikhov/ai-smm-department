@@ -14,6 +14,10 @@ decides whether the transition is permitted from the row's current
 status. That decision is written once, in COMMAND_POLICY, so a router
 never compares a status by hand.
 
+Every command first checks the control plane's mutation switch, which
+the caller must pass explicitly (ai_smm.application.control_plane): with
+the API read-only, a command is refused before the row is even read.
+
 Every command takes a row-level lock before it looks at the status. The
 row the authorisation dependency loaded is a snapshot, and a worker can
 claim the publication between that read and the write: acting on the
@@ -38,6 +42,11 @@ from sqlalchemy import Select, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from ai_smm.application.control_plane import (
+    WorkerMode,
+    observed_worker_mode,
+    require_mutations_enabled,
+)
 from ai_smm.db.models import (
     MANUAL_ONLY_STATUSES,
     TERMINAL_STATUSES,
@@ -408,6 +417,7 @@ def schedule_publication(
     expected_project_id: str,
     scheduled_at: datetime,
     actor: str,
+    mutations_enabled: bool,
     note: str | None = None,
     reset_attempts: bool = False,
     command: str = "schedule",
@@ -425,6 +435,8 @@ def schedule_publication(
     metadata, which is the barrier that matters, and that refusal is
     surfaced as the same conflict.
     """
+
+    require_mutations_enabled(mutations_enabled, command=command)
 
     publication = _lock_publication(
         db,
@@ -466,6 +478,7 @@ def reschedule_publication(
     expected_project_id: str,
     scheduled_at: datetime,
     actor: str,
+    mutations_enabled: bool,
     note: str | None = None,
     reset_attempts: bool = False,
 ) -> Publication:
@@ -477,6 +490,7 @@ def reschedule_publication(
         expected_project_id=expected_project_id,
         scheduled_at=scheduled_at,
         actor=actor,
+        mutations_enabled=mutations_enabled,
         note=note,
         reset_attempts=reset_attempts,
         command="reschedule",
@@ -489,6 +503,7 @@ def cancel_publication(
     publication_id: int,
     expected_project_id: str,
     actor: str,
+    mutations_enabled: bool,
     note: str | None = None,
 ) -> Publication:
     """Take a row out of the queue for good.
@@ -499,6 +514,8 @@ def cancel_publication(
     policy below refuses the ambiguous and terminal statuses before the
     mutation is reached, against the locked and freshly read row.
     """
+
+    require_mutations_enabled(mutations_enabled, command="cancel")
 
     publication = _lock_publication(
         db,
@@ -536,14 +553,23 @@ class OperationsSummary:
     next_scheduled_at: datetime | None
     series_total: int
     series_active: int
-    dry_run: bool
+    #: This API process's own AI_SMM_DRY_RUN. It gates nothing the API
+    #: does and says nothing about the worker; reported so it cannot be
+    #: mistaken for the worker's mode.
+    api_dry_run: bool
+    api_mutations_enabled: bool
+    #: What the worker will do with a due publication, as far as a
+    #: verifiable source says; UNKNOWN when there is none.
+    worker_mode: WorkerMode
+    worker_mode_source: str | None
 
 
 def operations_summary(
     db: Session,
     *,
     project_id: str,
-    dry_run: bool,
+    api_dry_run: bool,
+    api_mutations_enabled: bool,
     now: datetime | None = None,
 ) -> OperationsSummary:
     """Counters for one project.
@@ -619,6 +645,9 @@ def operations_summary(
         ).scalar_one()
     )
 
+    # Never derived from api_dry_run: see ai_smm.application.control_plane.
+    worker = observed_worker_mode()
+
     return OperationsSummary(
         project_id=project_id,
         total=sum(counts.values()),
@@ -632,7 +661,10 @@ def operations_summary(
         next_scheduled_at=next_scheduled,
         series_total=series_total,
         series_active=series_active,
-        dry_run=dry_run,
+        api_dry_run=api_dry_run,
+        api_mutations_enabled=api_mutations_enabled,
+        worker_mode=worker.mode,
+        worker_mode_source=worker.source,
     )
 
 

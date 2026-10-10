@@ -35,7 +35,11 @@ export function CreateContentPage() {
     return (
       <>
         <PageHeader title="Create Content" />
-        <div className="banner banner-warn">Создавать контент может роль editor и выше.</div>
+        <div className="banner banner-warn">
+          {can.readOnly
+            ? "Control Center работает только на чтение: создание контента отключено на сервере."
+            : "Создавать контент может роль editor и выше."}
+        </div>
       </>
     );
   }

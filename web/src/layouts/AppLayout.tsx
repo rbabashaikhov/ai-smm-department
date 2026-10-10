@@ -2,12 +2,13 @@ import { useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router";
 
 import { ErrorBanner } from "../components/ErrorBanner";
-import { useAuth, useMe } from "../features/auth/AuthProvider";
+import { useAuth, useMe, useMutationsEnabled } from "../features/auth/AuthProvider";
 import { atLeast } from "../features/auth/rbac";
 import { useActiveProjectId } from "../features/projects/hooks";
 
 export function AppLayout() {
   const me = useMe();
+  const mutationsEnabled = useMutationsEnabled();
   const { logout } = useAuth();
   const navigate = useNavigate();
   const projectId = useActiveProjectId();
@@ -93,6 +94,12 @@ export function AppLayout() {
           </div>
         </header>
         {logoutError ? <ErrorBanner error={logoutError} /> : null}
+        {mutationsEnabled ? null : (
+          <div className="banner banner-info" role="status" data-testid="read-only-banner">
+            <strong>Только чтение.</strong> Этот Control Center не принимает изменений: сервер
+            отклоняет их для любой роли, включая owner. Просмотр, вход и выход работают.
+          </div>
+        )}
         <main className="content">
           <Outlet />
         </main>
