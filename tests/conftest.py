@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import Engine, text
@@ -22,9 +23,12 @@ from ai_smm.config import Settings, load_settings
 from ai_smm.db.models import (
     Base,
     ContentSeries,
+    MembershipRole,
+    ProjectMembership,
     Publication,
     PublicationStatus,
     PublishingStrategy,
+    User,
 )
 from ai_smm.db.session import create_db_engine
 from ai_smm.queue import ensure_project
@@ -126,7 +130,9 @@ def clean_tables(request: pytest.FixtureRequest) -> Iterator[None]:
         connection.execute(
             text(
                 "TRUNCATE publication_attempts, publications, "
-                "content_series, projects, audit_log "
+                "content_series, project_settings, "
+                "project_memberships, user_sessions, users, "
+                "projects, audit_log "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -277,3 +283,119 @@ def make_other_project(session: Session) -> str:
     session.commit()
 
     return "other-project"
+
+
+# --- API fixtures --------------------------------------------------------
+# The API tests drive the real application through its factory, against
+# the same disposable database. Nothing is mocked except the clock, where
+# a test needs an expired session.
+
+#: Used by every test user. Long enough to pass the strength check and
+#: obviously not a real credential.
+TEST_PASSWORD = "correct-horse-battery-staple"
+
+
+@pytest.fixture
+def api_settings(settings: Settings) -> Settings:
+    # TestClient speaks http, so the Secure attribute would stop the
+    # cookie from being sent back. Production keeps the default (true).
+    return replace(settings, api_cookie_secure=False)
+
+
+@pytest.fixture
+def api_app(
+    api_settings: Settings, session_factory: sessionmaker[Session]
+):
+    from ai_smm.api.app import create_app
+
+    return create_app(
+        api_settings, session_factory=session_factory, access_log=False
+    )
+
+
+@pytest.fixture
+def client(api_app) -> Iterator[Any]:
+    from fastapi.testclient import TestClient
+
+    with TestClient(api_app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def make_user(session: Session):
+    """Create an active user with a known password."""
+
+    from ai_smm.security.passwords import hash_password
+
+    counter = {"n": 0}
+
+    def factory(
+        *,
+        email: str | None = None,
+        display_name: str = "Test User",
+        password: str = TEST_PASSWORD,
+        is_active: bool = True,
+    ) -> User:
+        counter["n"] += 1
+        user = User(
+            email=email or f"user{counter['n']}@example.com",
+            password_hash=hash_password(password),
+            display_name=display_name,
+            is_active=is_active,
+        )
+        session.add(user)
+        session.commit()
+
+        return user
+
+    return factory
+
+
+@pytest.fixture
+def make_membership(session: Session):
+    def factory(
+        *, user: User, project_id: str, role: MembershipRole
+    ) -> ProjectMembership:
+        membership = ProjectMembership(
+            project_id=project_id, user_id=user.id, role=role
+        )
+        session.add(membership)
+        session.commit()
+
+        return membership
+
+    return factory
+
+
+@pytest.fixture
+def login(client, session: Session):
+    """Sign a user in and return the CSRF token for their session."""
+
+    def do_login(user: User, password: str = TEST_PASSWORD) -> str:
+        response = client.post(
+            "/api/v1/auth/login",
+            json={"email": user.email, "password": password},
+        )
+
+        assert response.status_code == 200, response.text
+
+        # The test session must not keep a stale copy of the row the API
+        # just updated (last_login_at, and the new session row).
+        session.expire_all()
+
+        return response.json()["csrf_token"]
+
+    return do_login
+
+
+@pytest.fixture
+def member(session: Session, project: str, make_user, make_membership):
+    """A user who is a member of the standard test project."""
+
+    def factory(role: MembershipRole, **kwargs) -> User:
+        user = make_user(**kwargs)
+        make_membership(user=user, project_id=project, role=role)
+
+        return user
+
+    return factory

@@ -10,6 +10,8 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.17.1",
     "apscheduler>=3.11.0",
+    "argon2-cffi>=25.1.0",
+    "fastapi>=0.143.0",
     "httpx>=0.28.1",
     "langchain>=1.4.3",
     "langchain-openai>=1.6.7",
@@ -22,6 +24,7 @@ dependencies = [
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
     "sqlalchemy>=2.0.44",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]
