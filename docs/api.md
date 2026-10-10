@@ -66,6 +66,9 @@ migration shell can all import it safely.
 
 Interactive schema: `http://127.0.0.1:8000/docs`.
 
+For the packaged runtime (API image, web reverse proxy, single origin)
+see [runtime-packaging.md](runtime-packaging.md).
+
 ### Environment variables
 
 | Variable | Default | Meaning |
@@ -74,6 +77,7 @@ Interactive schema: `http://127.0.0.1:8000/docs`.
 | `AI_SMM_API_SESSION_LIFETIME_SECONDS` | `604800` (7 days) | absolute session lifetime, fixed at login |
 | `AI_SMM_API_SESSION_IDLE_SECONDS` | `86400` (24 hours) | idle timeout, measured from the last request |
 | `AI_SMM_API_COOKIE_SECURE` | `true` | `Secure` on the session cookie; set `false` only for local http |
+| `AI_SMM_API_DOCS_ENABLED` | `true` | serve `/docs`, `/redoc`, `/openapi.json`; the packaged runtime sets `false` (they answer 404 JSON) |
 | `LOG_LEVEL`, `LOG_FORMAT` | `INFO`, `json` | as for the worker |
 
 No new secret is introduced, and there is no signing key or CSRF secret

@@ -104,6 +104,10 @@ class Settings:
     api_session_lifetime_seconds: int
     api_session_idle_seconds: int
     api_cookie_secure: bool
+    #: /docs, /redoc and /openapi.json. On for local development; a
+    #: packaged private runtime turns them off so the schema is not served
+    #: to anyone who can reach the origin.
+    api_docs_enabled: bool = True
 
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
@@ -175,6 +179,7 @@ def load_settings() -> Settings:
         # Secure by default: an http deployment has to say so explicitly
         # rather than lose the flag by forgetting to set it.
         api_cookie_secure=_env_bool("AI_SMM_API_COOKIE_SECURE", True),
+        api_docs_enabled=_env_bool("AI_SMM_API_DOCS_ENABLED", True),
     )
 
 

@@ -1,0 +1,14 @@
+# The image is built from package-lock.json and the source only.
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# A local .env could set VITE_API_BASE_URL and bake a private API address
+# into the bundle; nothing from it belongs in the image.
+.env
+.env.*
+
+Dockerfile
+.dockerignore
+README.md

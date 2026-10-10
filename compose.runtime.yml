@@ -1,0 +1,212 @@
+# AI SMM Control Center -- LOCAL, production-like runtime (SMM-024A).
+#
+#   browser -> 127.0.0.1:${SMM_RUNTIME_WEB_PORT:-8088}
+#           -> smm-web (nginx: React build + reverse proxy)
+#                ├── /                    -> static SPA, index.html fallback
+#                └── /api/*, /health/*    -> smm-api (FastAPI)
+#                                              -> postgres (disposable)
+#
+# This file is for a workstation only. It is a separate compose project
+# (ai-smm-runtime-local) with its own network and volume, so it cannot
+# touch the production project "ai-smm" defined in compose.yaml.
+#
+# Deliberately absent:
+#   * the worker  -- the execution plane is not part of this runtime; no
+#                    service here can claim or publish a publication;
+#   * env_file    -- no .env, no ai-smm.env, no production credential is
+#                    ever read; every variable is spelled out below;
+#   * API / DB host ports -- only the web origin is published, and only on
+#                    127.0.0.1;
+#   * migrations on start -- `migrate` is a one-shot operator command.
+#
+# The API and the database sit on an `internal` network with no route to
+# the outside world: even a code path that tried to call Threads or OpenAI
+# from these containers would fail to resolve the host.
+#
+# Usage (see docs/runtime-packaging.md for the full sequence):
+#   docker compose -f compose.runtime.yml build
+#   docker compose -f compose.runtime.yml up -d postgres
+#   docker compose -f compose.runtime.yml --profile tools run --rm migrate upgrade head
+#   docker compose -f compose.runtime.yml --profile tools run --rm cli import-json /srv/ai-smm/bootstrap/demo-project.json --display-name "Demo (local)"
+#   docker compose -f compose.runtime.yml --profile tools run --rm cli user create-owner --email ... --display-name ... --project demo
+#   docker compose -f compose.runtime.yml up -d
+#   docker compose -f compose.runtime.yml down        # keep the volume
+#   docker compose -f compose.runtime.yml down -v     # discard the local DB
+
+name: ai-smm-runtime-local
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Shared by the API and the one-shot tools that run its image.
+#
+# Safety-critical values are literals, NOT ${...} interpolations: compose
+# reads a .env file next to this file for interpolation, and the repo root
+# may hold a real one. Nothing in it can redirect this runtime to another
+# database or turn dry-run off. Only harmless switches are interpolated,
+# under SMM_RUNTIME_* names that no production file uses.
+x-app-env: &app-env
+  TZ: UTC
+  # Local disposable database only. The password is a fixed, public,
+  # local-only value; it protects nothing and is not a secret.
+  AI_SMM_DATABASE_URL: postgresql+psycopg://ai_smm_local:local-disposable-not-a-secret@postgres:5432/ai_smm_runtime_local
+  AI_SMM_DRY_RUN: "true"
+  # false for plain-HTTP localhost; a future HTTPS deployment sets true.
+  AI_SMM_API_COOKIE_SECURE: ${SMM_RUNTIME_COOKIE_SECURE:-false}
+  # The packaged runtime does not serve /docs, /redoc, /openapi.json.
+  AI_SMM_API_DOCS_ENABLED: ${SMM_RUNTIME_API_DOCS_ENABLED:-false}
+  LOG_LEVEL: INFO
+  LOG_FORMAT: json
+  # Defence in depth: no credentials, and an unroutable Threads base URL.
+  OPENAI_API_KEY: ""
+  THREADS_ACCESS_TOKEN: ""
+  THREADS_API_BASE_URL: http://127.0.0.1:9
+
+x-app-hardening: &app-hardening
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  user: "10001:10001"
+  logging: *logging
+
+services:
+  postgres:
+    # postgres:16.15-bookworm, the same version the test suite runs against
+    image: postgres@sha256:0ea6700a3b4f0ae6ce746519073558aed4d88a79d8d07622a9a644946c7319c4
+    environment:
+      POSTGRES_USER: ai_smm_local
+      POSTGRES_PASSWORD: local-disposable-not-a-secret
+      POSTGRES_DB: ai_smm_runtime_local
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ai_smm_local", "-d", "ai_smm_runtime_local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    labels:
+      ai-smm.disposable: "true"
+    restart: unless-stopped
+    logging: *logging
+
+  smm-api:
+    <<: *app-hardening
+    build:
+      context: .
+      target: api
+    image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
+    environment: *app-env
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    mem_limit: 384m
+    pids_limit: 128
+
+  smm-web:
+    build:
+      context: ./web
+      target: runtime
+    image: ai-smm-web:${SMM_RUNTIME_TAG:-local}
+    ports:
+      - "127.0.0.1:${SMM_RUNTIME_WEB_PORT:-8088}:8080"
+    networks:
+      - edge
+      - backend
+    depends_on:
+      smm-api:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # The static site AND the proxied liveness probe.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ && wget -q -O /dev/null http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    mem_limit: 64m
+    pids_limit: 64
+    logging: *logging
+
+  # One-shot, never started by `up`:
+  #   docker compose -f compose.runtime.yml --profile tools run --rm migrate upgrade head
+  migrate:
+    <<: *app-hardening
+    image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
+    pull_policy: never
+    profiles:
+      - tools
+    entrypoint: ["/app/.venv/bin/alembic"]
+    working_dir: /app
+    environment: *app-env
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 256m
+    pids_limit: 64
+
+  # Operator CLI against the local database (bootstrap, inspection):
+  #   docker compose -f compose.runtime.yml --profile tools run --rm cli <command>
+  cli:
+    <<: *app-hardening
+    image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
+    pull_policy: never
+    profiles:
+      - tools
+    entrypoint: ["/app/.venv/bin/ai-smm"]
+    environment: *app-env
+    volumes:
+      # The empty "demo" project definition used for the local bootstrap.
+      - ./deploy/local-runtime:/srv/ai-smm/bootstrap:ro
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    mem_limit: 256m
+    pids_limit: 64
+
+networks:
+  # The only network with a route out, and the only one the host port is
+  # published on. smm-web is the only service attached to it.
+  edge:
+    name: ai-smm-runtime-local-edge
+  # No external connectivity: API, database and tools only.
+  backend:
+    name: ai-smm-runtime-local-backend
+    internal: true
+
+volumes:
+  pgdata:
+    name: ai-smm-runtime-local-pgdata
+    labels:
+      ai-smm.disposable: "true"

@@ -1,10 +1,20 @@
 # syntax=docker/dockerfile:1.7
 #
-# AI SMM Department runtime image.
+# AI SMM Department runtime images.
 #
-# Two stages so that uv, build tooling and the lockfile resolution never ship
-# to production. Base images are pinned by digest: a moving tag would make a
-# rebuild non-reproducible, and "latest" is forbidden for this service.
+# A builder stage so that uv, build tooling and the lockfile resolution never
+# ship to production. Base images are pinned by digest: a moving tag would
+# make a rebuild non-reproducible, and "latest" is forbidden for this service.
+#
+# Two runtime targets share one Python stack, one virtualenv and one layer
+# set (runtime-base); they differ only in what PID 1 is:
+#
+#   docker build -t ai-smm:<tag> .                  worker (default target)
+#   docker build --target api -t ai-smm-api:<tag> . HTTP control plane
+#
+# The worker stays the LAST stage on purpose: a plain `docker build` keeps
+# producing exactly the worker image it produced before the API target
+# existed.
 
 # python:3.12-slim-bookworm == Python 3.12.15, pinned by digest
 FROM python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS builder
@@ -32,7 +42,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 
-FROM python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS runtime
+FROM python@sha256:34386ef0cb081344d7ec1c103ba398e6e9f64e9ab3a1509accc92a4e24a07258 AS runtime-base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -63,6 +73,37 @@ RUN mkdir -p /srv/ai-smm/knowledge /srv/ai-smm/media \
 # Nothing in the image is writable by the runtime user; the container also
 # runs with read_only: true and a tmpfs for /tmp.
 USER 10001:10001
+
+
+# -- HTTP control plane -----------------------------------------------------
+#
+# FastAPI only. Deliberately NOT here:
+#   * migrations -- `alembic upgrade head` is an explicit operator command
+#     (the `migrate` service), never a side effect of starting the API;
+#   * the worker -- the API never publishes, and this image never starts
+#     the polling loop;
+#   * a published host port -- the port is reachable only inside the
+#     compose network, behind the web reverse proxy.
+#
+# 0.0.0.0 is the container's own interface on that internal network.
+# uvicorn's own access log is off because RequestIdMiddleware already
+# writes one line per request. Forwarded headers are left at uvicorn's
+# default (trusted from 127.0.0.1 only): nothing in the API reads the
+# client address or the scheme, so there is nothing for them to change.
+FROM runtime-base AS api
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+
+ENTRYPOINT ["/app/.venv/bin/uvicorn", "ai_smm.api.app:create_app", "--factory", \
+            "--host", "0.0.0.0", "--port", "8000", \
+            "--no-access-log", "--no-server-header"]
+
+
+# -- Worker (default target) ------------------------------------------------
+FROM runtime-base AS runtime
 
 # No EXPOSE: this service never listens on a port.
 

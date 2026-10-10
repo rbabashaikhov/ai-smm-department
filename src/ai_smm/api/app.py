@@ -55,10 +55,17 @@ def create_app(
     settings = settings or get_settings()
     setup_logging(settings)
 
+    # Disabling the schema route takes the UIs down with it, but all three
+    # are spelled out so a reader does not have to know that.
+    docs_enabled = settings.api_docs_enabled
+
     app = FastAPI(
         title="AI SMM Department API",
         description=DESCRIPTION,
         version="0.1.0",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
 
     app.state.settings = settings
