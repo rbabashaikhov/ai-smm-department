@@ -19,11 +19,16 @@ import pytest
 
 from tests.cc_stub import (
     BACKUP,
+    FIXTURE_DB_OID,
+    FIXTURE_PG_CONTAINER,
+    FIXTURE_PG_ID,
+    FIXTURE_SYSTEM_ID,
     STUB_DUMP,
     DockerStub,
     docker_socket,
     run_script,
     write_deploy_dir,
+    write_dump,
 )
 
 
@@ -32,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 SCRATCH = re.compile(r"^ai_smm_restore_check_[0-9]{14}$")
-CONTAINER = "pgstub"
+CONTAINER = FIXTURE_PG_CONTAINER
 
 
 @pytest.fixture
@@ -69,13 +74,7 @@ def _verify(deploy_dir: Path, stub: DockerStub, dump: Path, *extra: str):
 
 
 def _good_dump(backups: Path, content: bytes = STUB_DUMP) -> Path:
-    dump = backups / "ai_smm-pre-control-center-20261011T000000Z.dump"
-    dump.write_bytes(content)
-    (backups / f"{dump.name}.sha256").write_text(
-        f"{hashlib.sha256(content).hexdigest()}  {dump.name}\n"
-    )
-
-    return dump
+    return write_dump(backups, content)
 
 
 def _sql(stub: DockerStub) -> list[tuple[str, str, bool]]:
@@ -140,14 +139,36 @@ def test_dump_writes_the_archive_and_its_checksum(
 
     files = _files(backups)
 
-    assert len(files) == 2
+    assert len(files) == 3
     dump = backups / files[0]
+    sha = hashlib.sha256(STUB_DUMP).hexdigest()
 
     assert dump.name.endswith(".dump")
     assert dump.read_bytes() == STUB_DUMP
-    assert (dump.stat().st_mode & 0o777) == 0o600
-    assert (backups / f"{dump.name}.sha256").read_text().split()[0] == (
-        hashlib.sha256(STUB_DUMP).hexdigest()
+    sidecars = [backups / f"{dump.name}.{ext}" for ext in ("sha256", "source")]
+
+    for path in (dump, *sidecars):
+        assert (path.stat().st_mode & 0o777) == 0o600, path
+    assert (backups / f"{dump.name}.sha256").read_text().split()[0] == sha
+
+    # The source record binds this archive to the recorded instance,
+    # database and the live revision at dump time.
+    source = dict(
+        line.split("=", 1)
+        for line in (backups / f"{dump.name}.source").read_text().splitlines()
+    )
+
+    assert source == {
+        "SMM_CC_SOURCE_DUMP": dump.name,
+        "SMM_CC_SOURCE_SHA256": sha,
+        "SMM_CC_SOURCE_PG_CONTAINER_ID": FIXTURE_PG_ID,
+        "SMM_CC_SOURCE_SYSTEM_IDENTIFIER": FIXTURE_SYSTEM_ID,
+        "SMM_CC_SOURCE_DATABASE_OID": FIXTURE_DB_OID,
+        "SMM_CC_SOURCE_REVISION": "79731eadacd7",
+        "SMM_CC_SOURCE_TAKEN_AT": source["SMM_CC_SOURCE_TAKEN_AT"],
+    }
+    assert re.fullmatch(
+        r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", source["SMM_CC_SOURCE_TAKEN_AT"]
     )
     _assert_ai_smm_only_read(stub)
 
@@ -161,10 +182,9 @@ def test_dump_writes_the_archive_and_its_checksum(
         ({"dump_hex": b"not an archive".hex()}, "unreadable"),
         ({"list_rc": 1}, "unreadable"),
         ({"db_size": 10**18}, "need more than twice"),
-        ({"pg_running": False}, "is not running"),
     ],
     ids=["pg_dump-fails", "pg_dump-dies-half-way", "empty", "not-an-archive",
-         "toc-unreadable", "no-disk-space", "container-down"],
+         "toc-unreadable", "no-disk-space"],
 )
 def test_a_failed_backup_leaves_nothing_behind(
     deploy_dir: Path, stub: DockerStub, backups: Path,

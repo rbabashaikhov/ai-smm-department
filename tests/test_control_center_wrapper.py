@@ -10,7 +10,6 @@ wrapper accepts.
 """
 from __future__ import annotations
 
-import hashlib
 import re
 import shlex
 import shutil
@@ -24,15 +23,16 @@ from tests.cc_stub import (
     FIXTURE_DSN,
     FIXTURE_ENGINE,
     FIXTURE_NETWORK,
+    FIXTURE_PG_CONTAINER,
     FIXTURE_VERSION,
     ROOT,
-    STUB_DUMP,
     WRAPPER,
     DockerStub,
     compose_prefix,
     docker_socket,
     run_script,
     write_deploy_dir,
+    write_dump,
 )
 
 
@@ -647,7 +647,7 @@ PLACEHOLDERS = {
     "<owner-email>": "owner@example.test",
     "<name>": "Owner Name",
     "<project-id>": "demo",
-    "$PGC": "pgstub",
+    "$PGC": FIXTURE_PG_CONTAINER,
     "$s": "smm-api",
 }
 
@@ -693,7 +693,7 @@ def test_runbooks_document_every_operation_through_the_wrapper() -> None:
     for expected in (
         "config --quiet", "up", "down", "ps", "ps -a", "logs --since",
         "restart smm-api", "migrate current", "migrate upgrade",
-        "migrate downgrade", "create-owner --email",
+        "migrate downgrade", "create-owner --email", "preflight",
     ):
         assert any(c == expected or c.startswith(expected) for c in commands), (
             expected, sorted(commands),
@@ -712,7 +712,9 @@ def test_every_documented_wrapper_invocation_is_accepted(
         result = _run(deploy_dir, stub, *tokens)
 
         assert result.returncode == 0, (doc, tokens, result.stderr)
-        assert len(stub.compose_calls()) == 1, (doc, tokens)
+        # preflight is the gates alone: it never reaches Compose.
+        expected = 0 if tokens == ["preflight"] else 1
+        assert len(stub.compose_calls()) == expected, (doc, tokens)
 
 
 def test_every_documented_backup_invocation_is_accepted(
@@ -720,11 +722,7 @@ def test_every_documented_backup_invocation_is_accepted(
 ) -> None:
     backups = tmp_path / "backups"
     backups.mkdir(mode=0o700)
-    dump = backups / "ai_smm-pre-control-center-20261011T000000Z.dump"
-    dump.write_bytes(STUB_DUMP)
-    (backups / f"{dump.name}.sha256").write_text(
-        f"{hashlib.sha256(STUB_DUMP).hexdigest()}  {dump.name}\n"
-    )
+    dump = write_dump(backups)
 
     PLACEHOLDERS.update({"$BK": str(backups), "$DUMP": str(dump)})
 

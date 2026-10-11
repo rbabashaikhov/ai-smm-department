@@ -18,13 +18,27 @@
 #   control-center.env            exactly AI_SMM_DATABASE_URL, mode 600
 #   control-center.target         exactly SMM_CC_DOCKER_HOST (unix:// socket)
 #                                 and SMM_CC_DOCKER_ENGINE_ID
+#   control-center.identity       the recorded PostgreSQL identity (cc-gate.sh);
+#                                 needed by preflight, migrate upgrade|downgrade,
+#                                 create-owner
+#   control-center.window         the agreed migration window, UTC (cc-gate.sh);
+#                                 needed by preflight, migrate upgrade|downgrade
+#   control-center.backup-evidence  written by cc-db-backup.sh verify; and
+#   control-center.offhost-ack      written by the operator: both needed by
+#                                 migrate upgrade (cc-gate.sh, backup evidence)
 #
 # and must not hold .env, compose.yaml or ai-smm.env (the worker's files).
 #
 # Before anything that talks to the daemon, the daemon at the pinned
 # socket must report the pinned engine id. Before anything that creates a
 # container, both images must exist on that daemon with an OCI revision
-# label EQUAL to SMM_CC_VERSION and the daemon's architecture.
+# label EQUAL to SMM_CC_VERSION and the daemon's architecture. Before
+# anything that starts the API or the one-shot tools against the database
+# (up, restart, migrate upgrade|downgrade, create-owner) the deployment
+# gates (cc-gate.sh) must pass: the database is the recorded one; for a
+# schema change, the publication queue is quiet around the window; for an
+# upgrade, a verified dump of this database at this revision exists and a
+# copy of it was confirmed off the host. Fail closed, exit 2.
 #
 # Why: Compose takes its project name from a .env file or COMPOSE_* in the
 # shell before the file's own `name:`, and the Docker CLI picks its daemon
@@ -37,6 +51,8 @@ CC_SELF=cc-compose
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/control-center/cc-common.sh
 source "$here/cc-common.sh"
+# shellcheck source=deploy/control-center/cc-gate.sh
+source "$here/cc-gate.sh"
 
 readonly HTTP_SERVICES="smm-api smm-web"
 readonly ALL_SERVICES="smm-api smm-web migrate cli"
@@ -48,18 +64,25 @@ usage: cc-compose.sh <verb> [options]
   config [--quiet | --json | --services | --profiles] [--with-tools]
                                   render the configuration; never prints the
                                   database URL (env files are not resolved)
-  up                              start smm-api and smm-web, wait until healthy
+  up                              start smm-api and smm-web, wait until healthy;
+                                  runs the identity gate first
   down [--remove-orphans]         stop and remove this project's containers
                                   and networks (never volumes or images)
   ps [-a] [-q] [--services] [SERVICE...]
   logs [--since N{s|m|h}] [--tail N] [--timestamps] [smm-api|smm-web...]
-  restart smm-api|smm-web...
+  restart smm-api|smm-web...      runs the identity gate first
+  preflight                       the PostgreSQL identity and publication-queue
+                                  gates only, read-only; exit 2 if either fails
   migrate current | heads         alembic, read-only
-  migrate upgrade REVISION        REVISION: a 12-hex alembic id, never head/+N
-  migrate downgrade REVISION      REVISION: a 12-hex alembic id, never base/-N
+  migrate upgrade REVISION        REVISION: a 12-hex alembic id, never head/+N;
+                                  runs both gates and the backup evidence gate
+  migrate downgrade REVISION      REVISION: a 12-hex alembic id, never base/-N;
+                                  runs both gates, then invalidates the backup
+                                  evidence
   create-owner --email E --display-name NAME --project ID
                                   ai-smm user create-owner; prompts for the
-                                  password (reads it from stdin without a TTY)
+                                  password (reads it from stdin without a TTY);
+                                  runs the identity gate first
 EOF
 }
 
@@ -84,6 +107,11 @@ shift
 compose_args=()
 needs_daemon=true
 needs_images=false
+# cc-gate.sh: identity of the database; the queue as well before a schema change
+gate_identity=false
+gate_queue=false
+gate_backup=false
+invalidate_evidence=false
 
 case "$verb" in
     help|-h|--help)
@@ -124,9 +152,16 @@ case "$verb" in
         esac
         ;;
 
+    preflight)
+        [[ $# -eq 0 ]] || cc_die "preflight takes no arguments; the window is in $CC_WINDOW_FILE_NAME"
+        gate_identity=true
+        gate_queue=true
+        ;;
+
     up)
         [[ $# -eq 0 ]] || cc_die "up takes no arguments; it starts smm-api and smm-web only"
         needs_images=true
+        gate_identity=true
         compose_args=(up --detach --wait --wait-timeout 180 --no-build --pull never smm-api smm-web)
         ;;
 
@@ -206,6 +241,7 @@ case "$verb" in
     restart)
         [[ $# -gt 0 ]] || cc_die "restart: name smm-api and/or smm-web"
         needs_images=true
+        gate_identity=true
 
         for service in "$@"; do
             in_list "$service" $HTTP_SERVICES || cc_die "restart: only smm-api or smm-web, not '$service'"
@@ -231,6 +267,15 @@ case "$verb" in
                 [[ $# -eq 1 && "$1" =~ ^[0-9a-f]{12}$ ]] \
                     || cc_die "migrate $sub takes exactly one 12-hex revision id"
                 alembic_args=("$sub" "$1")
+                gate_identity=true
+                gate_queue=true
+                # No switch turns these off: an upgrade always needs the
+                # evidence, a downgrade always voids it.
+                if [[ "$sub" == upgrade ]]; then
+                    gate_backup=true
+                else
+                    invalidate_evidence=true
+                fi
                 ;;
             *)
                 cc_die "migrate: unsupported subcommand '$sub'"
@@ -276,6 +321,7 @@ case "$verb" in
         [[ -n "$email" && -n "$display_name" && -n "$project" ]] \
             || cc_die "create-owner: --email, --display-name and --project are all required"
 
+        gate_identity=true
         compose_args=(--profile cc-admin run --rm --no-deps)
         # getpass needs a terminal; without one it reads stdin.
         [[ -t 0 && -t 1 ]] || compose_args+=(-T)
@@ -301,21 +347,11 @@ for required in "$compose_file" "$interp_file" "$secret_file"; do
     cc_require_file "$required"
 done
 
-cc_check_keys "$interp_file" SMM_CC_SHARED_NETWORK SMM_CC_VERSION
-cc_check_keys "$secret_file" AI_SMM_DATABASE_URL
+cc_load_compose_env
+cc_load_secret
 
-secret_mode="$(stat -c '%a' "$secret_file")"
-(( (8#$secret_mode & 8#077) == 0 )) \
-    || cc_die "$secret_file is mode $secret_mode; it holds the database password and must be 600"
-
-version="$(cc_value_of "$interp_file" SMM_CC_VERSION)"
-[[ "$version" =~ ^[0-9a-f]{40}$ ]] \
-    || cc_die "SMM_CC_VERSION must be the full 40-hex commit id the images were built from, got '$version'"
-
-network="$(cc_value_of "$interp_file" SMM_CC_SHARED_NETWORK)"
-[[ -n "$network" ]] || cc_die "SMM_CC_SHARED_NETWORK is empty"
-[[ "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
-    || cc_die "SMM_CC_SHARED_NETWORK is not a network name: '$network'"
+version="$CC_VERSION"
+network="$CC_NETWORK"
 
 cc_load_target
 
@@ -343,6 +379,34 @@ if [[ "$needs_images" == true ]]; then
         [[ "$image_arch" == "$arch" ]] \
             || cc_die "image $image is $image_arch, the daemon is $arch"
     done
+fi
+
+# -- the gates (cc-gate.sh) ----------------------------------------------------
+#
+# Last, immediately before Compose: the API and the one-shot tools only
+# ever reach the recorded database, a schema change only a quiet queue,
+# an upgrade only a database with a verified, off-host-copied dump. Any
+# failure exits 2 here, and nothing below runs.
+
+if [[ "$gate_identity" == true ]]; then
+    cc_gate_identity "$network"
+fi
+
+if [[ "$gate_queue" == true ]]; then
+    cc_gate_queue
+fi
+
+if [[ "$gate_backup" == true ]]; then
+    cc_gate_backup_evidence
+fi
+
+if [[ "$invalidate_evidence" == true ]]; then
+    cc_invalidate_evidence
+fi
+
+if [[ "$verb" == preflight ]]; then
+    echo "preflight: PASS"
+    exit 0
 fi
 
 # -- run ------------------------------------------------------------------------
