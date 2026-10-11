@@ -1096,8 +1096,15 @@ Traefik, firewall, DNS, обновление Postgres.
 PostgreSQL 16 — изменение метаданных под кратковременной блокировкой
 `projects`; worker опрашивает очередь раз в 60 секунд.
 
-Откат схемы: `alembic downgrade 79731eadacd7` (удаляет только таблицы и
-столбцы Control Center) или восстановление из дампа, снятого до миграции.
+Откат схемы: предпочтительно — оставить аддитивную схему и остановить
+только Control Center. `alembic downgrade 79731eadacd7` удаляет таблицы и
+столбцы Control Center вместе с их данными. Восстановление дампа поверх
+рабочей БД откатывает и записи live worker'а после дампа (вплоть до
+повторной публикации) — только как крайняя мера с отдельным планом.
+Подробно: [control-center-rollback.md §4](control-center-rollback.md#4-migration-failure).
+Дополнительно проверено в SMM-024B.3: набор тестов самого worker'а
+(`6c54669`) проходит на схеме head, а миграция выполняется одной
+транзакцией с `lock_timeout` ([control-center-deployment.md §4](control-center-deployment.md#4-database-migration-compatibility-assessment)).
 
 Миграция production **не выполнялась** и требует отдельного одобрения.
 
@@ -1116,9 +1123,9 @@ PostgreSQL 16 — изменение метаданных под кратков�
 | Изменения через API | **выключены**: `AI_SMM_API_MUTATIONS_ENABLED=false`; любая бизнес-мутация отклоняется с 403 `MUTATIONS_DISABLED` для любой роли, работают только вход и выход |
 | Режим worker в UI | `UNKNOWN`: надёжного источника пока нет; `AI_SMM_DRY_RUN` API не выдаётся за режим worker |
 | Документация API | выключена: `AI_SMM_API_DOCS_ENABLED=false` |
-| Секреты | минимальный env-файл вне Git, права 600; без Threads- и OpenAI-ключей; роль БД — существующая `ai_smm` |
-| Образы | собираются локально и переносятся `docker save` / `docker load`; сборка на хосте не нужна |
-| Миграция | отдельный явный шаг оператора: `pg_dump -Fc` → проверка дампа (`pg_restore --list`) → `alembic upgrade head` → `alembic current` = `3d4ac1986f07`. Никогда — при старте контейнера |
+| Секреты | минимальный env-файл вне Git, права 600; без Threads- и OpenAI-ключей; роль БД — существующая `ai_smm`. В SMM-024B.3: `control-center.env` содержит ровно `AI_SMM_DATABASE_URL`, всё остальное — литералы в compose-файле |
+| Образы | собираются локально из `git archive` проверенного коммита, с OCI-меткой ревизии, и переносятся `docker save` / `docker load`; сборка и `pull` на хосте невозможны (`pull_policy: never`) |
+| Миграция | отдельный явный шаг оператора: `pg_dump -Fc` → проверка дампа (`pg_restore --list` и пробное восстановление в отдельную БД) → `alembic upgrade 3d4ac1986f07` (явная ревизия, `lock_timeout=5s`, одна транзакция) → `alembic current` = `3d4ac1986f07`. Никогда — при старте контейнера |
 | Проверка после запуска | добавлен только `127.0.0.1:8088`; Id и StartedAt worker не изменились; `scripts/runtime_smoke.py` через туннель проходит, включая проверку read-only gate |
 | Откат | `down` проекта Control Center (внешняя сеть не удаляется); схема — §17.2 |
 
@@ -1134,3 +1141,24 @@ worker'ом в своё время.
 шаг (миграция, развёртывание, включение изменений через API) требует
 отдельного одобрения владельца.
 
+### 17.5 Production-упаковка (SMM-024B.3)
+
+Подготовлена локально, в feature-ветке, **не развёрнута**:
+
+| Артефакт | Назначение |
+|---|---|
+| `compose.control-center.yml` | проект `ai-smm-control-center`: `smm-api`, `smm-web`, одноразовые `migrate` (профиль `cc-migrate`) и `cli` (профиль `cc-admin`, только `ai-smm user`); без worker, scheduler и PostgreSQL |
+| `deploy/control-center/cc-compose.sh` | единственный способ запуска: только фиксированный набор команд (allowlist), сама строит командную строку Compose, закрепляет Docker daemon (`control-center.target`: unix-сокет + engine id), сверяет OCI-метку ревизии образов с полным SHA |
+| `deploy/control-center/cc-db-backup.sh` | dump перед миграцией и проверка восстановления во временную БД; при любой ошибке безопасная остановка, `ai_smm` только читается |
+| `deploy/control-center/*.example` | контракт окружения и Docker target |
+| [control-center-deployment.md](control-center-deployment.md) | runbook из 12 шагов; все production-команды помечены NOT EXECUTED |
+| [control-center-rollback.md](control-center-rollback.md) | откат по сценариям |
+
+Найдено при подготовке: Compose берёт имя проекта из `COMPOSE_PROJECT_NAME`
+(в окружении или в `.env` рабочего каталога) раньше, чем из `name:` в
+файле. Запущенный из `/root/ai-smm` голый `docker compose -f
+compose.control-center.yml down` действовал бы на проект worker'а.
+Поэтому Control Center живёт в отдельном каталоге
+`/root/ai-smm-control-center/` и запускается только через обёртку.
+
+Развёртывание по-прежнему **не авторизовано** (§17.4).

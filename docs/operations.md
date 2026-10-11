@@ -30,6 +30,15 @@ for the publication-safety rules.
 > read-only by default (`AI_SMM_API_MUTATIONS_ENABLED=false`). That switch
 > belongs to the API: it does not stop, start or slow the worker. To stop
 > publishing, use the worker's own levers in §7.
+>
+> Its production packaging is a separate compose project,
+> `ai-smm-control-center`, in its own directory
+> `/root/ai-smm-control-center/`, run only through `cc-compose.sh`:
+> [control-center-deployment.md](control-center-deployment.md),
+> [control-center-rollback.md](control-center-rollback.md). Nothing in
+> this runbook applies to it, and nothing in its rollback touches the
+> worker. Never run its compose file from `/root/ai-smm`: the `.env` there
+> would be read by Compose.
 
 ---
 

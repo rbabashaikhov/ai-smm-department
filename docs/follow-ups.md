@@ -37,6 +37,10 @@ Proposed fix:
 Done when: 50 consecutive `npx vitest run` pass, with no test weakened
 (no removed assertions, no `retry`).
 
+Re-observed during SMM-024B.3 (2026-10-11, Node 24.21.0, no web code
+changed): 2 of 10 consecutive runs failed, both on the `auth.test.tsx`
+call-order assertion.
+
 ### FU-024B2-2 — Validate `worker_mode_source` when a worker heartbeat is introduced
 
 **Status:** open. **Depends on:** a worker change, which the ADR
@@ -102,3 +106,79 @@ rows". Places to align:
 Done when: no document or UI text claims that the read-only Control Center
 writes nothing, and each of them names the session and audit writes, or
 links to the table in `docs/api.md`.
+
+---
+
+## From SMM-024B.3 (production packaging)
+
+Recorded on 2026-10-11 while preparing `compose.control-center.yml`. None
+blocks the read-only deployment; each changes what a later step may do.
+
+### FU-024B3-1 — A least-privilege database role for the API
+
+**Status:** open. **Needs:** a write to the shared PostgreSQL instance
+(creating a role), which requires separate approval.
+
+The API connects as `ai_smm`, the database owner, the same role the
+worker and the migrations use. The read-only guarantee therefore rests on
+the application (central mutation gate plus service-level checks), not on
+privileges: a code path that escaped both could change anything.
+
+Proposed: a role `ai_smm_cc` with `SELECT` on the queue and editorial
+tables and only the writes authentication needs (`INSERT`/`UPDATE` on
+`user_sessions`, `UPDATE (last_login_at, updated_at)` on `users`,
+`INSERT` on `audit_log`); `migrate` and `cli` keep the owner role through
+a second env file. Done when the read-only smoke test passes with the
+restricted role and a direct `UPDATE publications` from the API's
+connection is refused by PostgreSQL.
+
+### FU-024B3-2 — Take the API off the shared network
+
+**Status:** open. **Needs:** a change to another project's stack.
+
+`smm-api` joins `<shared-network>` because the database is only reachable
+there. That gives it outbound internet access and makes `smm-api:8000`
+reachable from every container on that network, bypassing nginx (the API
+still requires a session and CSRF). Done when the database is reachable
+from a network that holds only the database and the Control Center, and
+`smm-api` is detached from `<shared-network>`.
+
+### FU-024B3-3 — `Secure` session cookie
+
+**Status:** open. **Depends on:** HTTPS in front of the Control Center.
+
+The production compose sets `AI_SMM_API_COOKIE_SECURE=false`, because the
+only transport is an SSH tunnel to plain-HTTP loopback. If the Control
+Center is ever served over HTTPS (still private), switch it to `true` in
+the same change and run the smoke test with `--expect-secure-cookie`.
+
+
+### FU-024B3-4 — Atomic finalisation of dump and checksum
+
+**Status:** open. **Found in:** review of the SMM-024B.3 fixes.
+
+`cc-db-backup.sh dump` renames `<name>.dump.partial` to `<name>.dump` and
+only then writes `<name>.dump.sha256`. A crash or kill between the two
+leaves a final-looking dump without a checksum. `verify` refuses it
+(".sha256 is missing"), so it cannot be trusted by mistake, but the dump
+is then unusable until re-taken. Done when the checksum is written first
+(to a `.partial`) and both files are published so that a final `.dump`
+never exists without a valid `.sha256` (for example checksum computed on
+the `.partial`, `.sha256` renamed first, then `.dump`, with `verify`
+treating a lone `.sha256` as incomplete), with a test that kills the
+script between the steps.
+
+### FU-024B3-5 — Verify the PostgreSQL identity before the production run
+
+**Status:** open. **Found in:** review of the SMM-024B.3 fixes.
+
+`cc-db-backup.sh` checks the Docker engine and that the named container
+is running, but not that the container is the intended PostgreSQL
+instance: a mistyped `--container` naming another database container on
+the shared host would be dumped and restored into, and the scratch
+database created there. Only `ai_smm` is read and only a uniquely named
+scratch database is written, but it would be the wrong instance. Done
+when the deployment step records the expected container id (or image
+and `ai_smm` system identifier) alongside the engine id, the script
+refuses a mismatch, and the runbook captures it in the evidence
+directory in step 3.

@@ -311,6 +311,8 @@ Publication status: blocked
 | [docs/live-smoke-test.md](docs/live-smoke-test.md) | пошаговая процедура первой реальной публикации |
 | [docs/content-series.md](docs/content-series.md) | контентные серии: модель, стратегии, регистрация существующей серии |
 | [docs/api.md](docs/api.md) | HTTP API (control plane): локальный запуск, сессии, CSRF, RBAC, ошибки |
+| [docs/control-center-deployment.md](docs/control-center-deployment.md) | production-упаковка Control Center: топология, контракт окружения, совместимость миграций, runbook (не выполнялся) |
+| [docs/control-center-rollback.md](docs/control-center-rollback.md) | откат Control Center без участия worker; почему `downgrade` и restore дампа не безобидны |
 
 ### Устройство
 
@@ -479,7 +481,14 @@ Publish / Publish Now / Retry Publish нет нигде, тест проверя
 cd web && npm ci && npm run dev    # http://127.0.0.1:5173, /api проксируется на :8000
 ```
 
-Не развёрнут, публичного домена нет.
+Не развёрнут, публичного домена нет. Production-упаковка подготовлена
+(SMM-024B.3): отдельный compose-проект `ai-smm-control-center`
+([`compose.control-center.yml`](compose.control-center.yml), запуск только
+через [`deploy/control-center/cc-compose.sh`](deploy/control-center/cc-compose.sh)),
+только `smm-api` + `smm-web`, единственный порт — `127.0.0.1:8088` за
+SSH-туннелем, существующий PostgreSQL, миграция — отдельная явная команда.
+Runbook и откат: [docs/control-center-deployment.md](docs/control-center-deployment.md),
+[docs/control-center-rollback.md](docs/control-center-rollback.md).
 
 ### Локальный запуск
 
@@ -521,7 +530,7 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-721 тест на стороне Python (и 98 тестов web), все внешние API замоканы. Набор покрывает миграции,
+1010 тестов на стороне Python (и 98 тестов web), все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
@@ -530,7 +539,14 @@ read-only режим (`MUTATIONS_DISABLED` для любой роли),
 проектов, optimistic locking, health endpoints, отсутствие publish
 endpoint, а также read API существующей очереди, пагинацию, preview,
 безопасные команды, отказ от запрещённых переходов и реальную
-конкуренцию с worker'ом за строку в PostgreSQL.
+конкуренцию с worker'ом за строку в PostgreSQL. Упаковка Control Center
+проверяется отдельно: контракт `compose.control-center.yml` и обёртки
+(`tests/test_control_center_packaging.py`), allowlist обёртки и попытки
+её обойти (`tests/test_control_center_wrapper.py`), сбои backup/restore
+(`tests/test_control_center_backup.py`), откат миграции по
+`lock_timeout`, набор тестов развёрнутого worker'а на схеме head
+(`scripts/check_worker_schema_compat.sh`) и полный прогон runbook на
+одноразовых заменителях (`scripts/control_center_rehearsal.sh`).
 
 Набор отказывается работать с базой, в имени которой нет `test`: он
 удаляет таблицы, и указание на рабочую базу уничтожило бы очередь.

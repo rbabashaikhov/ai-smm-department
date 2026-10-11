@@ -1,0 +1,18 @@
+# Control Center -- the Docker daemon every cc-*.sh command must talk to.
+#
+# Copy to control-center.target next to compose.control-center.yml. Not a
+# secret, but host-specific: never commit the filled copy (.gitignore).
+#
+# The Docker CLI otherwise chooses its daemon from DOCKER_HOST,
+# DOCKER_CONTEXT or the current context in ~/.docker/config.json. The
+# scripts run every docker command with DOCKER_HOST set to the value
+# below, refuse a shell that names another daemon, and check the engine
+# id before acting.
+#
+# Exactly these two keys. KEY=value, no quotes, no `export`.
+
+# A local socket only: unix:///<absolute path>. tcp:// and ssh:// are refused.
+SMM_CC_DOCKER_HOST=unix:///var/run/docker.sock
+
+# DOCKER_HOST=unix:///var/run/docker.sock docker info --format '{{.ID}}'
+SMM_CC_DOCKER_ENGINE_ID=<engine-id>
