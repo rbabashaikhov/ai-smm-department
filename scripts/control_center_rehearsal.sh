@@ -18,7 +18,15 @@
 #
 # The deployment directory is laid out as on the host (compose file and
 # cc-*.sh copied in), the database starts at 79731eadacd7 with one
-# published row, and the runbook is followed: dump and restore check
+# published row, the stand-ins' identity is recorded in
+# control-center.identity (the rehearsal's "deployment record") and a
+# window around now in control-center.window, and the runbook is
+# followed: the deployment gates (preflight), each refusing live -- a
+# publication due in the window, an unrecorded system identifier, a URL
+# naming an alias, a decoy container answering to the database's name, a
+# database without the queue -- then dump and restore check, the backup
+# evidence (missing, unconfirmed off-host, edited, dump changed, a marker
+# file, stale after the upgrade, voided by a downgrade)
 # (plus a truncated archive, a checksum mismatch and a leftover scratch
 # database, each of which must stop the scripts), explicit migration,
 # owner bootstrap, API and web only, smoke test through 127.0.0.1:8088,
@@ -75,7 +83,7 @@ expect_exit() {
 cleanup() {
     step "cleanup"
     [[ -x "$dir/cc-compose.sh" ]] && cc down --remove-orphans >/dev/null 2>&1 || true
-    docker rm -f "$WORKER" "$PG" >/dev/null 2>&1 || true
+    docker rm -f "$WORKER" "$PG" "$PG-decoy" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     rm -rf "$work"
 }
@@ -89,7 +97,10 @@ password="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 docker run -d --name "$PG" --network "$NET" --network-alias postgres \
     -e POSTGRES_USER=ai_smm -e POSTGRES_PASSWORD="$password" -e POSTGRES_DB=ai_smm \
     "$PG_IMAGE" >/dev/null
+dsn="postgresql+psycopg://ai_smm:$password@$PG:5432/ai_smm"
+# The worker's database URL is the identity gate's reference.
 docker run -d --name "$WORKER" --network "$NET" --read-only \
+    -e AI_SMM_DATABASE_URL="$dsn" \
     --entrypoint python "ai-smm-api:$version" -c "import time; time.sleep(10**9)" >/dev/null
 
 for _ in $(seq 60); do
@@ -100,30 +111,79 @@ sleep 2
 
 step "deployment directory, laid out as /root/ai-smm-control-center"
 cp "$repo/compose.control-center.yml" "$repo"/deploy/control-center/cc-*.sh "$dir/"
-chmod 644 "$dir/compose.control-center.yml" "$dir/cc-common.sh"
+chmod 644 "$dir/compose.control-center.yml" "$dir/cc-common.sh" "$dir/cc-gate.sh"
 chmod 755 "$dir/cc-compose.sh" "$dir/cc-db-backup.sh"
 printf 'SMM_CC_VERSION=%s\nSMM_CC_SHARED_NETWORK=%s\n' "$version" "$NET" \
     > "$dir/control-center.compose.env"
 printf 'SMM_CC_DOCKER_HOST=%s\nSMM_CC_DOCKER_ENGINE_ID=%s\n' "$DOCKER_HOST" "$engine_id" \
     > "$dir/control-center.target"
-( umask 077
-  printf 'AI_SMM_DATABASE_URL=postgresql+psycopg://ai_smm:%s@postgres:5432/ai_smm\n' "$password" \
-      > "$dir/control-center.env" )
+( umask 077; printf 'AI_SMM_DATABASE_URL=%s\n' "$dsn" > "$dir/control-center.env" )
+# The rehearsal's deployment record: recorded once, here, from the stand-ins.
+printf '%s\n' \
+    "SMM_CC_PG_CONTAINER=$PG" \
+    "SMM_CC_PG_CONTAINER_ID=$(docker inspect -f '{{.Id}}' "$PG")" \
+    "SMM_CC_PG_SYSTEM_IDENTIFIER=$(psql_ai_smm 'SELECT system_identifier FROM pg_control_system()')" \
+    "SMM_CC_PG_DATABASE_OID=$(psql_ai_smm "SELECT oid FROM pg_database WHERE datname = 'ai_smm'")" \
+    "SMM_CC_WORKER_CONTAINER=$WORKER" > "$dir/control-center.identity"
+printf 'SMM_CC_WINDOW_START=%s\nSMM_CC_WINDOW_END=%s\n' \
+    "$(date -u -d '-10 min' +%FT%TZ)" "$(date -u -d '+110 min' +%FT%TZ)" > "$dir/control-center.window"
+cat "$dir/control-center.window"
 cc config --quiet
 cc config --json --with-tools | grep -q "$password" && fail "config printed the database password"
 echo "config ok; the database password is not printed"
 
 step "production-like baseline: $BASELINE with one published row"
-cc migrate upgrade "$BASELINE" </dev/null
+# Fail closed on a database without the queue: the gate's SQL errors out.
+expect_exit 2 cc migrate upgrade "$BASELINE" </dev/null
+grep -q "cannot read the publication queue" "$work/stderr" || fail "an empty database did not close the queue gate"
+# The stand-in's baseline itself is set up outside the runbook.
+docker run --rm --network "$NET" -e AI_SMM_DATABASE_URL="$dsn" \
+    --entrypoint /app/.venv/bin/alembic -w /app "ai-smm-api:$version" upgrade "$BASELINE" 2>&1 | tail -n 1
 psql_ai_smm "INSERT INTO projects (id, display_name, knowledge_path)
              VALUES ('rehearsal', 'Rehearsal', 'knowledge/projects/rehearsal')" >/dev/null
 psql_ai_smm "INSERT INTO publications (project_id, ordinal, title, format, body, status,
                  idempotency_key, threads_post_id, published_at, human_reviewed)
              VALUES ('rehearsal', 1, 'Seed', 'text', 'seed body', 'published',
-                 'rehearsal-1', 'stand-in-post-1', now(), true)" >/dev/null
+                 'rehearsal-1', 'stand-in-post-1', now() - interval '1 day', true)" >/dev/null
 
 worker_before="$(identity "$WORKER")"
 pg_before="$(identity "$PG")"
+
+step "runbook 3: the deployment gates"
+cc preflight
+
+step "runbook 3, gate failures: each must stop preflight, the dump and the migration"
+# (a) a publication due inside the window
+psql_ai_smm "INSERT INTO publications (project_id, ordinal, title, format, body, status,
+                 idempotency_key, scheduled_at, human_reviewed)
+             VALUES ('rehearsal', 2, 'Due', 'text', 'due body', 'scheduled',
+                 'rehearsal-2', now() + interval '30 minutes', true)" >/dev/null
+expect_exit 2 cc preflight
+grep -q "due-in-window=1" "$work/stderr" || fail "a due publication did not close the queue gate"
+expect_exit 2 bk dump --container "$PG" --out-dir "$backups"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+[[ -z "$(ls -A "$backups")" ]] || fail "a closed gate left a dump"
+psql_ai_smm "DELETE FROM publications WHERE idempotency_key = 'rehearsal-2'" >/dev/null
+# (b) not the recorded instance
+cp "$dir/control-center.identity" "$work/identity"
+sed -i 's/^SMM_CC_PG_SYSTEM_IDENTIFIER=.*/SMM_CC_PG_SYSTEM_IDENTIFIER=1/' "$dir/control-center.identity"
+expect_exit 2 cc preflight
+grep -q "another instance" "$work/stderr" || fail "a foreign system identifier did not close the gate"
+cp "$work/identity" "$dir/control-center.identity"
+# (c) the URL names an alias, not the recorded container
+cp "$dir/control-center.env" "$work/secret"
+sed -i "s/@$PG:/@postgres:/" "$dir/control-center.env"
+expect_exit 2 cc preflight
+grep -q "points at host 'postgres'" "$work/stderr" || fail "an alias host did not close the gate"
+cp "$work/secret" "$dir/control-center.env"
+# (d) a decoy on the shared network answering to the database's name
+docker run -d --name "$PG-decoy" --network "$NET" --network-alias "$PG" \
+    --entrypoint sleep "$PG_IMAGE" 1000000 >/dev/null
+expect_exit 2 cc preflight
+grep -q "resolves to 2 containers" "$work/stderr" || fail "an ambiguous database name did not close the gate"
+expect_exit 2 bk verify --container "$PG" --dump /dev/null
+docker rm -f "$PG-decoy" >/dev/null
+cc preflight >/dev/null && echo "gates open again"
 
 step "runbook 3: revision"
 current="$(cc migrate current </dev/null 2>/dev/null | tail -n 1)"
@@ -168,13 +228,65 @@ psql_ai_smm 'DROP DATABASE "ai_smm_restore_check_20000101000000"' postgres >/dev
 install -d -m 755 "$work/open"
 expect_exit 2 bk dump --container "$PG" --out-dir "$work/open"
 [[ -z "$(ls -A "$work/open")" ]] || fail "a refused dump left a file"
+# (e) a directory the nightly rotation prunes
+install -d -m 700 "$work/rotated"; : > "$work/rotated/ai_smm-20260101T003001Z.dump"
+expect_exit 2 bk dump --container "$PG" --out-dir "$work/rotated"
+[[ "$(ls "$work/rotated")" == ai_smm-20260101T003001Z.dump ]] || fail "a refused dump left a file"
 # ai_smm itself was only read
 [[ "$(psql_ai_smm "SELECT version_num FROM alembic_version")/$(psql_ai_smm "SELECT count(*) FROM publications")" \
     == "$BASELINE/1" ]] || fail "ai_smm changed"
 echo "ai_smm unchanged"
 
-step "runbook 6: the migration, by explicit revision"
+step "runbook 5 again: every verify voids the evidence first, so the last one must pass"
+[[ ! -e "$dir/control-center.backup-evidence" ]] || fail "a failed verify left the evidence"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "no backup evidence" "$work/stderr" || fail "an upgrade ran without backup evidence"
+bk verify --container "$PG" --dump "$dump" --expect-revision "$BASELINE"
+[[ -s "$dir/control-center.backup-evidence" ]] || fail "a passed verify wrote no evidence"
+
+step "runbook 5b: off-host copy (here: another directory) and its confirmation"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "no off-host copy confirmation" "$work/stderr" || fail "an upgrade ran without the off-host confirmation"
+offhost="$work/offhost"; install -d -m 700 "$offhost"
+cp "$dump" "$dump.sha256" "$dump.source" "$offhost/"
+(cd "$offhost" && sha256sum -c "$(basename "$dump").sha256")
+offhost_sha="$(cd "$offhost" && sha256sum "$(basename "$dump")" | cut -d' ' -f1)"
+ack() {
+    printf '%s\n' "SMM_CC_OFFHOST_DUMP_SHA256=$1" \
+        "SMM_CC_OFFHOST_CONFIRMED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "SMM_CC_OFFHOST_CONFIRMED_BY=rehearsal" > "$dir/control-center.offhost-ack"
+}
+# a confirmation for another archive
+ack "$(printf other | sha256sum | cut -d' ' -f1)"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "for another dump" "$work/stderr" || fail "a mismatched confirmation was accepted"
+ack "$offhost_sha"
+
+step "backup evidence, failure cases: each must stop the upgrade"
+cp "$dir/control-center.backup-evidence" "$work/evidence"
+# (a) edited by hand
+sed -i 's/^SMM_CC_EVIDENCE_TAKEN_AT=.*/SMM_CC_EVIDENCE_TAKEN_AT=2026-01-01T00:00:00Z/' "$dir/control-center.backup-evidence"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "checksum does not match" "$work/stderr" || fail "an edited evidence was accepted"
+cp "$work/evidence" "$dir/control-center.backup-evidence"
+# (b) the dump changed after the restore check
+cp "$dump" "$work/dump.bak"; printf '\0' >> "$dump"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "no longer matches" "$work/stderr" || fail "a changed dump was accepted"
+cp "$work/dump.bak" "$dump"
+# (c) a marker file instead of evidence
+echo VERIFIED=true > "$dir/control-center.backup-evidence"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+cp "$work/evidence" "$dir/control-center.backup-evidence"
+[[ "$(psql_ai_smm "SELECT version_num FROM alembic_version")" == "$BASELINE" ]] || fail "a refused upgrade changed the schema"
+
+step "runbook 5c: the gates again, immediately before the migration"
+cc preflight
+
+step "runbook 6: the migration, by explicit revision (gates and backup evidence inside)"
 cc migrate upgrade "$HEAD_REVISION" </dev/null
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "stale" "$work/stderr" || fail "the evidence was accepted after the schema moved"
 
 step "runbook 7: schema after"
 current="$(cc migrate current </dev/null 2>/dev/null | tail -n 1)"
@@ -233,6 +345,16 @@ sed -i "s/^SMM_CC_DOCKER_ENGINE_ID=.*/SMM_CC_DOCKER_ENGINE_ID=$engine_id/" "$dir
 step "runbook 12: worker stand-in unchanged"
 [[ "$(identity "$WORKER")" == "$worker_before" ]] || fail "the worker stand-in was restarted or replaced"
 echo "worker: unchanged"
+
+step "rollback B: a downgrade needs no evidence and voids it"
+cc down
+cc migrate downgrade "$BASELINE" </dev/null
+[[ ! -e "$dir/control-center.backup-evidence" ]] || fail "the downgrade kept the evidence"
+expect_exit 2 cc migrate upgrade "$HEAD_REVISION" </dev/null
+grep -q "no backup evidence" "$work/stderr" || fail "old evidence authorised an upgrade after a downgrade"
+docker run --rm --network "$NET" -e AI_SMM_DATABASE_URL="$dsn" \
+    --entrypoint /app/.venv/bin/alembic -w /app "ai-smm-api:$version" upgrade "$HEAD_REVISION" 2>&1 | tail -n 1
+cc up
 
 step "rollback A: stop the Control Center only"
 cc down

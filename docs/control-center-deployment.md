@@ -47,6 +47,8 @@ ai-smm-worker (project "ai-smm")                  untouched: not recreated,
 | Not in this project | worker, scheduler, PostgreSQL, any volume or bind mount |
 | Images | `ai-smm-api:<full commit>`, `ai-smm-web:<full commit>`, built locally, loaded with `docker load`; never built or pulled on the host (`pull_policy: never`); revision label checked for equality |
 | Docker daemon | pinned in `control-center.target` (socket + engine id) and checked before every command |
+| Deployment gates | PostgreSQL identity (against `control-center.identity`), publication queue (against `control-center.window`) and backup evidence (a verified, off-host-confirmed dump of this database at this revision), fail-closed, run **inside** `cc-db-backup.sh dump`/`verify` and `cc-compose.sh up`/`restart`/`migrate upgrade`/`downgrade`/`create-owner`, and on their own as `cc-compose.sh preflight` (§2.1) |
+| Pre-migration dump | `cc-premigration-ai_smm-<stamp>.dump` in a directory of its own, outside the nightly 14-day rotation (§5, *Keeping the pre-migration dump*) |
 | Host ports | `127.0.0.1:8088` → `smm-web:8080`, nothing else |
 | Public routes | none; `traefik.enable=false` on every service |
 | Business mutations | **off** for every role, owner included (literal in the compose file) |
@@ -93,12 +95,18 @@ Everything lives in `/root/ai-smm-control-center/`:
 | `cc-compose.sh` | `deploy/control-center/cc-compose.sh` | the only way to run Compose here | 755 |
 | `cc-db-backup.sh` | `deploy/control-center/cc-db-backup.sh` | pre-migration dump and restore check | 755 |
 | `cc-common.sh` | `deploy/control-center/cc-common.sh` | shared checks, sourced by both | 644 |
+| `cc-gate.sh` | `deploy/control-center/cc-gate.sh` | the PostgreSQL identity and queue gates (§2.1), sourced by both | 644 |
 | `control-center.compose.env` | `deploy/control-center/control-center.compose.env.example` | **exactly** `SMM_CC_VERSION` (the full 40-hex commit) and `SMM_CC_SHARED_NETWORK` — not secret | 644 |
 | `control-center.env` | `deploy/control-center/control-center.env.example` | **exactly** `AI_SMM_DATABASE_URL` — secret | **600** |
 | `control-center.target` | `deploy/control-center/control-center.target.example` | **exactly** `SMM_CC_DOCKER_HOST` (a `unix://` socket) and `SMM_CC_DOCKER_ENGINE_ID` — host-specific | 644 |
+| `control-center.identity` | `deploy/control-center/control-center.identity.example` | **exactly** the five confirmed PostgreSQL identifiers (§2.1), copied from the deployment record — host-specific | 644 |
+| `control-center.window` | `deploy/control-center/control-center.window.example` | **exactly** `SMM_CC_WINDOW_START` and `SMM_CC_WINDOW_END`, UTC `YYYY-MM-DDTHH:MM:SSZ` — the agreed migration window | 644 |
+| `control-center.backup-evidence` | none — written **only** by a successful `cc-db-backup.sh verify` (step 5) | the verified dump's path and sha256, the instance, database and revision it was taken at, when; self-checksummed (§2.1) | 600 |
+| `control-center.offhost-ack` | none — written **by the operator** after checking the off-host copy (step 5b) | **exactly** `SMM_CC_OFFHOST_DUMP_SHA256` (computed off the host), `SMM_CC_OFFHOST_CONFIRMED_AT`, `SMM_CC_OFFHOST_CONFIRMED_BY` | 600 |
 
 The filled files never enter Git (`.gitignore`: `*.env`,
-`control-center.target`) or an image (`.dockerignore`: `deploy/`, `.env*`;
+`control-center.target`, `control-center.identity`, `control-center.window`,
+`control-center.backup-evidence*`, `control-center.offhost-ack`) or an image (`.dockerignore`: `deploy/`, `.env*`;
 the web context is `web/` only).
 
 ### Container environment
@@ -148,14 +156,16 @@ line itself:
 | Verb | Compose command it runs (after the fixed prefix) |
 |---|---|
 | `config [--quiet\|--json\|--services\|--profiles] [--with-tools]` | `config …`; anything but `--quiet` adds `--no-env-resolution`, so the database URL is never printed |
-| `up` | `up --detach --wait --wait-timeout 180 --no-build --pull never smm-api smm-web` |
+| `up` | identity gate, then `up --detach --wait --wait-timeout 180 --no-build --pull never smm-api smm-web` |
 | `down [--remove-orphans]` | `down [--remove-orphans]` — never `-v` or `--rmi` |
 | `ps [-a] [-q] [--services] [service…]` | `ps …`, services of this project only |
 | `logs [--since N{s,m,h}] [--tail N] [--timestamps] [smm-api\|smm-web…]` | `logs --no-color …` |
-| `restart smm-api\|smm-web…` | `restart …` |
+| `restart smm-api\|smm-web…` | identity gate, then `restart …` |
+| `preflight` | none: runs the identity and queue gates (§2.1) and exits 0 (`preflight: PASS`) or 2 |
 | `migrate current\|heads` | `--profile cc-migrate run --rm --no-deps -T migrate current\|heads` |
-| `migrate upgrade\|downgrade <12-hex revision>` | `… migrate upgrade\|downgrade <revision>` — never `head`, `base`, `+N`, `-N`, ranges, `--sql`, `stamp` |
-| `create-owner --email E --display-name N --project P` | `--profile cc-admin run --rm --no-deps [-T] cli create-owner --email=E --display-name=N --project=P`; values validated, `-T` only without a terminal |
+| `migrate upgrade <12-hex revision>` | identity, queue and backup-evidence gates, then `… migrate upgrade <revision>` — never `head`, `+N`, ranges, `--sql`, `stamp` |
+| `migrate downgrade <12-hex revision>` | identity and queue gates (no backup evidence needed), then the evidence is invalidated, then `… migrate downgrade <revision>` — never `base`, `-N` |
+| `create-owner --email E --display-name N --project P` | identity gate, then `--profile cc-admin run --rm --no-deps [-T] cli create-owner --email=E --display-name=N --project=P`; values validated, `-T` only without a terminal |
 
 The fixed prefix is `docker compose --project-name ai-smm-control-center
 --project-directory <dir> --file <dir>/compose.control-center.yml
@@ -192,8 +202,157 @@ Before running, the wrapper also:
   prefix, a longer string, another case or a missing label is refused)
   and the daemon's architecture.
 
-It performs only reads itself. `cc-db-backup.sh` uses the same directory
-checks and the same pinned daemon (§5, steps 4–5).
+It performs only reads itself, with one exception: `migrate downgrade`
+renames `control-center.backup-evidence` to
+`control-center.backup-evidence.invalidated-<stamp>` (§2.1).
+`cc-db-backup.sh` uses the same directory checks and the same pinned
+daemon (§5, steps 4–5).
+
+### 2.1 Deployment gates
+
+`deploy/control-center/cc-gate.sh` holds the checks that every operation
+touching the production database passes first. All **fail closed**:
+a value that cannot be read, does not parse, is not unique or does not
+match is a refusal (exit 2, `GATE CLOSED: <reason>`), and the operation
+behind the gate never starts. The gates only read: `docker inspect`,
+`docker network inspect`, `psql` in the database container with
+`default_transaction_read_only=on`, and the files below. None prints the
+database URL. No option, environment variable or file switches a gate
+off: the wrapper decides from the verb alone.
+
+| Operation | Identity gate | Queue gate | Backup evidence |
+|---|---|---|---|
+| `cc-compose.sh preflight` | yes | yes | — |
+| `cc-db-backup.sh dump` | yes, before anything is read | yes, immediately before `pg_dump` | writes `<dump>.source` |
+| `cc-db-backup.sh verify` | yes, before the scratch database is created | — | deletes the old evidence first; writes new evidence only on full success |
+| `cc-compose.sh up`, `restart` | yes | — | — |
+| `cc-compose.sh create-owner` | yes | — | — |
+| `cc-compose.sh migrate upgrade` | yes | yes | **required**, immediately before Compose |
+| `cc-compose.sh migrate downgrade` | yes | yes | not needed; **invalidated** before Compose |
+| `down`, `ps`, `logs`, `config`, `migrate current\|heads` | — | — | — |
+
+The read-only verbs and `down` stay ungated on purpose: stopping or
+inspecting the Control Center must work while the database is
+unreachable, which is when a rollback needs them.
+
+**Identity gate.** The expected values are not constants of the code:
+they are what SMM-024B.4A confirmed, kept in the private deployment
+record and copied into `control-center.identity` at step 0. They are
+**never** derived from the live host in the same session — a value read
+from the thing being checked proves nothing.
+
+| Key | What it pins |
+|---|---|
+| `SMM_CC_PG_CONTAINER` | the container name; must be the host of the database URL |
+| `SMM_CC_PG_CONTAINER_ID` | that container's full 64-hex id |
+| `SMM_CC_PG_SYSTEM_IDENTIFIER` | `pg_control_system().system_identifier` of the instance |
+| `SMM_CC_PG_DATABASE_OID` | the oid of `ai_smm` in that instance |
+| `SMM_CC_WORKER_CONTAINER` | the live worker, whose database URL is the reference |
+
+The gate requires, in order:
+
+1. `control-center.env` parses in exactly one way
+   (`postgresql[+driver]://user:password@host[:port]/database`, password
+   URL-encoded, **no query string** — `?host=` or `?service=` would
+   override the host), its host is `SMM_CC_PG_CONTAINER` (not an alias),
+   its database is `ai_smm`;
+2. the worker runs, its environment holds `AI_SMM_DATABASE_URL` exactly
+   once, **byte-identical** to `control-center.env`, and it is attached to
+   `SMM_CC_SHARED_NETWORK`;
+3. the container named `SMM_CC_PG_CONTAINER` has the recorded id and runs;
+4. on `SMM_CC_SHARED_NETWORK` **exactly one** container answers to that
+   host name (container name, DNS names, aliases, compared without case),
+   and it is the recorded id — that is what the worker, `migrate`, `cli`
+   and the API resolve;
+5. inside it, one row: the recorded system identifier, the recorded oid
+   of `ai_smm`, and the port of the URL.
+
+`cc-db-backup.sh` additionally refuses a `--container` other than
+`SMM_CC_PG_CONTAINER`: the dump, the restore check and the migration all
+reach the same instance.
+
+**Queue gate.** `control-center.window` holds the agreed window in UTC
+(`Z` required; a local time or an offset is refused). With a margin of
+**60 minutes** on both sides (a constant, `CC_QUEUE_MARGIN_MINUTES`) the
+protected span is `[start − 60 min, end + 60 min]`, and all times are the
+database's `now()`. The gate is closed when:
+
+| Counter | Closed when |
+|---|---|
+| — | `now()` is outside `[start, end]`, or the window is longer than 12 h |
+| `publishing` | a publication is `claimed` or `publishing` |
+| `active-lease` | a lease expires after `start − 60 min` |
+| `due-in-window` | a `scheduled` publication becomes claimable before `end + 60 min` — the later of `scheduled_at` and `next_attempt_at`; an **overdue** one counts, the worker would claim it at once |
+| `retry-in-window` | of those, a retry (`next_attempt_at` set) |
+| `published-in-margin` | something was published after `start − 60 min` |
+| `attempts-active-or-in-margin` | an attempt is unfinished, or started after `start − 60 min` |
+| `needs-review` | a publication awaits review (an `unknown` outcome) |
+
+When closed, the gate lists the publications concerned — id, status and
+times only, never a body. The answer must be exactly one well-formed
+row; a second row, a missing or non-numeric counter, or a SQL error
+(including an impossible date in the window file) closes the gate.
+
+**Backup evidence gate** (`migrate upgrade` only). Three records, three
+writers:
+
+| Record | Written by | Holds |
+|---|---|---|
+| `<dump>.source` | `cc-db-backup.sh dump`, after the archive and its `.sha256` | the dump's sha256; the recorded container id, system identifier and `ai_smm` oid; the **live** alembic revision; the time it was taken |
+| `control-center.backup-evidence` | `cc-db-backup.sh verify`, **only** after: the identity gate; the `.sha256` check; a readable archive; a restore into a scratch database (one transaction); the scratch database dropped; the `.source` describing exactly this archive, the recorded instance and database, the restored revision — and the live database still at that revision. Every `verify` run first **deletes** the previous evidence, so only the last run's outcome counts | the dump's absolute path and sha256, instance, database, revision, taken / verified times, and a last line that is the sha256 of the lines above it |
+| `control-center.offhost-ack` | **the operator**, after copying the dump off the host and checking it there (step 5b) | the sha256 computed on the receiving machine, when, by whom |
+
+`migrate upgrade` refuses unless:
+
+1. the evidence exists, is a regular file with exactly its keys, and its
+   self-checksum matches — a truncated, hand-edited or `VERIFIED=true`
+   style file is refused;
+2. its instance, container and database are the recorded ones (which the
+   identity gate has just matched against the live ones);
+3. its revision is the **live** revision — after the schema moved, the
+   evidence is stale;
+4. it was taken and verified inside the current window, in that order —
+   evidence from an earlier window is stale;
+5. the dump is still a regular file whose sha256 **recomputed now** equals
+   the evidence, as does its `.sha256`;
+6. `control-center.offhost-ack` names the **same** sha256, was confirmed
+   after the restore check and within the window.
+
+`migrate downgrade` needs none of this and renames the evidence to
+`…invalidated-<stamp>` before running: after the schema went back, an
+earlier dump is not a backup of the database as it now is, and must not
+authorise another upgrade. A failed upgrade changes nothing (one
+transaction), so its evidence stays valid for one retry in the same
+window.
+
+Tests: `tests/test_control_center_gates.py` — every refusal on every
+guarded operation, with no Compose call, `pg_dump`, `pg_restore`,
+`CREATE`/`DROP` or file left behind, and no password printed; the queue
+SQL is also run against a real PostgreSQL with publications in each
+state. `tests/test_control_center_backup_evidence.py` — missing,
+corrupted, substituted and stale evidence; changed dump; off-host
+confirmation missing, mismatched or out of order; no option or
+environment variable skips the check; downgrade independent of it and
+voiding it; a failed `verify` leaves no evidence and removes the old one.
+
+### 2.2 Trust boundary
+
+What the code guarantees, and what rests on the operator. Everyone who
+runs these scripts is root on the host.
+
+| Guaranteed by the scripts (fail closed) | Rests on the operator with root |
+|---|---|
+| Every Docker call goes to the pinned engine; the images carry exactly the pinned revision | Root can edit the scripts, `control-center.target`, retag images, or run `docker` and `alembic` by hand — no file on the host can prevent that. The step 0 manifest and a `diff` against the reviewed commit detect a changed copy |
+| The database reached is the recorded one: name, container id, unique DNS name, system identifier, oid, same URL as the worker | `control-center.identity` is copied from the deployment record, not derived on the spot. If it was filled from the live host, the identity gate proves nothing |
+| No schema change while anything is publishing, leased or due within the window ± 60 min | The window is the one the owner approved; moving it to open the gate is a human decision the gate cannot see |
+| An upgrade needs a dump of this instance and database at the live revision, taken and restore-checked in this window, still byte-identical on disk; evidence is only written by a successful `verify`, voided by each new `verify` and by a downgrade | Root can write a forged `control-center.backup-evidence` (the self-checksum detects accidents and hand edits, not a deliberate forgery: there is no key the operator does not also hold) |
+| The off-host confirmation names the same sha256 as the verified dump and is dated after the restore check | **Not verifiable from the host.** The gate cannot tell whether a copy left the host or whether the sha256 was computed off the host or copied from the host's own files. It is an attestation: the owner's approval gate, step 5b |
+| The database URL is never printed; read-only queries run with `default_transaction_read_only=on` | The DSN is in a root-readable file; root can read it |
+
+In short: the gates stop mistakes — a wrong container, a busy queue, a
+missing, stale, corrupted or mismatched backup — and make every
+deliberate override visible as an edit of a recorded file. They do not
+defend against a root operator who decides to bypass them.
 
 ### Database role
 
@@ -347,11 +506,13 @@ has a stop condition; on any stop, go to the rollback document and do not
 continue.
 
 ```bash
-# Used throughout. Values come from `docker ps` / the deployment record.
+# Used throughout. Values come from the deployment record.
 CC=/root/ai-smm-control-center
 EV=$CC/evidence                              # evidence of this run, mode 700
-BK=/root/backups/ai-smm                      # existing, mode 700
-PGC='<postgres-container>'
+# NOT /root/backups/ai-smm: the nightly rotation prunes that directory
+# (see "Keeping the pre-migration dump" below). Created at step 0, mode 700.
+BK=/root/backups/ai-smm-control-center
+PGC='<postgres-container>'                   # = SMM_CC_PG_CONTAINER in control-center.identity
 V='<full 40-hex commit>'
 # Every docker command of this session -- including the ones the runbook
 # runs directly -- talks to this daemon, whatever context ~/.docker
@@ -368,13 +529,13 @@ set -o pipefail
 
 ```bash
 # From the laptop (S = the directory with the manifest, section 3)
-ssh <vps> 'install -d -m 700 /root/ai-smm-control-center /root/ai-smm-control-center/evidence'
+ssh <vps> 'install -d -m 700 /root/ai-smm-control-center /root/ai-smm-control-center/evidence /root/backups/ai-smm-control-center'
 scp "$S"/* <vps>:/root/ai-smm-control-center/
 
 # On the host
 cd "$CC"
 sha256sum -c "MANIFEST-$V.sha256"            # compose file, cc-*.sh, image tarball
-chmod 644 compose.control-center.yml cc-common.sh
+chmod 644 compose.control-center.yml cc-common.sh cc-gate.sh
 chmod 755 cc-compose.sh cc-db-backup.sh
 
 # The daemon: the host's own engine, on the socket pinned above
@@ -391,18 +552,31 @@ done | tee "$EV/images.txt"
 docker run --rm --network none --entrypoint /app/.venv/bin/alembic -w /app "ai-smm-api:$V" heads
 
 printf 'SMM_CC_VERSION=%s\nSMM_CC_SHARED_NETWORK=%s\n' "$V" '<shared-network>' > control-center.compose.env
-( umask 077 && install -m 600 /dev/null control-center.env )
-# Edit control-center.env by hand: one line, AI_SMM_DATABASE_URL=..., the
-# same DSN the worker uses (read it from /root/ai-smm/ai-smm.env without
-# printing it). Do not copy any other line.
+# Exactly the worker's database URL, one line, never printed. The identity
+# gate later requires it to be byte-identical to the running worker's.
+( umask 077 && grep '^AI_SMM_DATABASE_URL=' /root/ai-smm/ai-smm.env > control-center.env )
+chmod 600 control-center.env; test "$(wc -l < control-center.env)" = 1 && echo one-line
+
+# The PostgreSQL identity CONFIRMED by the read-only gate (SMM-024B.4A),
+# copied from the deployment record. Never fill it from this host now:
+# a value read from the instance being checked proves nothing.
+cat > control-center.identity <<'EOF'
+SMM_CC_PG_CONTAINER=<recorded container name>
+SMM_CC_PG_CONTAINER_ID=<recorded full 64-hex container id>
+SMM_CC_PG_SYSTEM_IDENTIFIER=<recorded system identifier>
+SMM_CC_PG_DATABASE_OID=<recorded oid of ai_smm>
+SMM_CC_WORKER_CONTAINER=<recorded worker container name>
+EOF
 ls -l "$CC"
 ./cc-compose.sh config --quiet && echo config-ok
 ./cc-compose.sh ps                           # checks the engine id; lists nothing yet
 ```
 
 Stop if: a manifest line fails; `docker info` names a host or engine you
-did not expect; a label is not exactly `$V`; architecture ≠ host's
-`uname -m`; `alembic heads` ≠ `3d4ac1986f07 (head)`; the wrapper refuses.
+did not expect (compare the engine id with the deployment record); a
+label is not exactly `$V`; architecture ≠ host's `uname -m`; `alembic
+heads` ≠ `3d4ac1986f07 (head)`; `control-center.env` is not one line; the
+wrapper refuses.
 
 `docker load` only adds two images; it does not touch any container.
 
@@ -441,11 +615,20 @@ docker logs --since 30m ai-smm-worker 2>&1 | tail -n 20
 
 Stop if: the worker is not `healthy`, or its logs show errors.
 
-### Step 3 — Database revision and a quiet window
+### Step 3 — Gates before the backup: identity, queue, revision
 
 > **NOT EXECUTED — REQUIRES OWNER APPROVAL** (read-only queries)
 
+Immediately before step 4. The window is the one the owner approved; it
+and its 60-minute margins must not include the nightly backup (03:30
+host time, Europe/Vilnius).
+
 ```bash
+cd "$CC"
+printf 'SMM_CC_WINDOW_START=%s\nSMM_CC_WINDOW_END=%s\n' \
+    '<approved start, YYYY-MM-DDTHH:MM:SSZ>' '<approved end, YYYY-MM-DDTHH:MM:SSZ>' > control-center.window
+./cc-compose.sh preflight | tee "$EV/preflight-before-backup.txt"   # exit 2 = STOP
+
 PGU=$(docker inspect "$PGC" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^POSTGRES_USER=//p')
 ro() { docker exec -i -e PGOPTIONS='-c default_transaction_read_only=on' "$PGC" \
          psql -U "$PGU" -d ai_smm -v ON_ERROR_STOP=1 -tA -c "$1"; }
@@ -454,17 +637,15 @@ ro "SELECT version_num FROM alembic_version"                          # 79731ead
 ro "SELECT to_regclass('public.users'), to_regclass('public.content_items')"   # both empty
 ro "SELECT status, count(*) FROM publications GROUP BY 1 ORDER BY 1" | tee "$EV/publications-before.txt"
 ro "SELECT count(*), max(id) FROM publication_attempts"            | tee "$EV/attempts-before.txt"
-ro "SELECT id, status, scheduled_at, next_attempt_at FROM publications
-    WHERE status IN ('claimed','publishing','needs_review')
-       OR (status = 'scheduled' AND scheduled_at < now() + interval '60 minutes')"
 ro "SELECT pid, application_name, state, now() - xact_start AS age
     FROM pg_stat_activity WHERE datname = 'ai_smm' AND xact_start IS NOT NULL"
 ```
 
-Stop if: revision ≠ `79731eadacd7`; new tables already exist; any row
-`claimed`/`publishing`; a publication due within 60 minutes (wait, or
-choose another window); a transaction on `ai_smm` older than a minute; the
-nightly backup window.
+Stop if: `preflight` does not end with `preflight: PASS` (it exits 2 and
+says `GATE CLOSED: <reason>` — §2.1); revision ≠ `79731eadacd7`; new
+tables already exist; a transaction on `ai_smm` older than a minute. A
+closed queue gate means: wait, or agree another window — never edit
+`control-center.window` or `control-center.identity` to make a gate pass.
 
 ### Step 4 — Pre-migration dump
 
@@ -476,19 +657,24 @@ cd "$CC"
 DUMP=$(sed -n 's/^dump: *//p' "$EV/dump.txt"); test -s "$DUMP" && echo "$DUMP"
 ```
 
-`pg_dump` takes only ACCESS SHARE locks; the worker keeps running. The
-script only reads `ai_smm`, and stops — exit 2, nothing kept — when:
+The script runs both gates again itself: the identity gate before it
+reads anything, the queue gate immediately before `pg_dump`. `pg_dump`
+takes only ACCESS SHARE locks; the worker keeps running. The script only
+reads `ai_smm`, and stops — exit 2, nothing kept — when:
 
 | Failure | What is left |
 |---|---|
-| the daemon is not the pinned engine; the container is not running; `ai_smm` does not exist | nothing was run |
-| `$BK` is readable by group/others, or has less free space than twice the database size | nothing was run |
+| the daemon is not the pinned engine; `--container` is not `SMM_CC_PG_CONTAINER`; the identity gate is closed (§2.1); `ai_smm` does not exist | nothing was run |
+| `$BK` is readable by group/others, holds `ai_smm-*.dump` files (a directory the nightly rotation prunes), or has less free space than twice the database size | nothing was run |
+| the queue gate is closed (§2.1) | nothing was run |
 | `pg_dump` exits non-zero (connection lost, disk full, killed) | the `.partial` file is removed |
 | the output is empty, lacks the custom-format header, or its table of contents does not list `alembic_version` and `publications` | the `.partial` file is removed |
 | Ctrl-C / SIGTERM | the `.partial` file is removed |
 
 Only a dump that passed all of that is renamed to
-`ai_smm-pre-control-center-<UTC stamp>.dump` (600) with its `.sha256`. An
+`cc-premigration-ai_smm-<UTC stamp>.dump` (600) with its `.sha256` and
+its `.source` (the sha256, the recorded instance and database, the live
+revision, the time — what step 5 turns into backup evidence). An
 existing file is never overwritten. Stop on any failure: no migration
 without a verified dump.
 
@@ -499,10 +685,11 @@ without a verified dump.
 ```bash
 ./cc-db-backup.sh verify --container "$PGC" --dump "$DUMP" --expect-revision 79731eadacd7 \
   | tee "$EV/restore-check.txt"
-grep -q '^restore check passed' "$EV/restore-check.txt" && echo VERIFIED || echo 'STOP: no verified dump'
+grep -q '^evidence: ' "$EV/restore-check.txt" && echo VERIFIED || echo 'STOP: no verified dump'
 ```
 
-The script restores into a **new** scratch database
+The script passes the identity gate first: the scratch database is only
+ever created on the recorded instance. It restores into a **new** scratch database
 `ai_smm_restore_check_<UTC YYYYmmddHHMMSS>` — the only name it ever
 creates, restores into or drops, checked against
 `^ai_smm_restore_check_[0-9]{14}$` before each statement — then prints
@@ -510,21 +697,100 @@ its revision and publication counts and drops it.
 
 | Failure | Exit | What is left |
 |---|---|---|
+| the identity gate is closed (§2.1) | 2 | nothing was created |
 | `$DUMP.sha256` missing, or the checksum does not match (archive corrupted or replaced) | 2 | nothing was created |
 | not a readable custom-format archive of the queue | 2 | nothing was created |
 | an `ai_smm_restore_check_*` database already exists | 2 | nothing was created; the existing one is **not** dropped — it is not this run's. Review it and drop it by hand |
 | `CREATE DATABASE` fails | 2 | nothing to drop |
 | `pg_restore` fails or is interrupted (one transaction, `--exit-on-error`), or Ctrl-C / SIGTERM | 2 | the scratch database is dropped |
 | the restored revision is not `79731eadacd7` | 2 | the scratch database is dropped |
+| the dump's `.source` is missing, describes another archive, another instance or database, or another revision than the restored one | 2 | the scratch database is dropped |
+| the live database moved to another revision since the dump | 2 | the scratch database is dropped; take a new dump |
 | dropping the scratch database fails | **3** | the scratch database; the script prints its name and the `DROP DATABASE` to run by hand |
 
-In every case `ai_smm` was only read. Stop on any non-zero exit. Also
+Any earlier `control-center.backup-evidence` is deleted when `verify`
+starts; a new one is written only when every row above passed. In every
+case `ai_smm` was only read. Stop on any non-zero exit. Also
 stop if the status counts differ from `publications-before.txt` other
 than by publications the worker sent in between (check the worker log).
 
 This proves the dump is **restorable**. It does not make restoring it over
 the live database a safe rollback — see
 [rollback §4.4](control-center-rollback.md#44-restore-the-pre-migration-dump--last-resort).
+
+### Keeping the pre-migration dump
+
+The nightly `backup.sh` ([operations.md](operations.md)) writes
+`ai_smm-<stamp>.dump` into `/root/backups/ai-smm/` and **deletes every
+`ai_smm-*.dump` there older than 14 days**. The pre-migration dump must
+outlive that: it is the only copy of the database as it was before the
+schema change.
+
+| Rule | How it is held |
+|---|---|
+| Its own directory: `/root/backups/ai-smm-control-center/`, mode 700, created at step 0 | `$BK`; `cc-db-backup.sh dump` refuses a directory that holds `ai_smm-*.dump` files, i.e. one a rotation prunes |
+| A name no rotation pattern of this project matches: `cc-premigration-ai_smm-<UTC stamp>.dump` + `.sha256` | fixed in the script (`tests/test_control_center_gates.py`) |
+| Recorded: path and SHA-256 | `$EV/dump.txt`, and the change record |
+| Off the host as well — the host disk is a single point of failure (SMM-024B.4A found no off-host copy of any backup) | step 5b, after the restore check passed; `migrate upgrade` refuses without the confirmation |
+| Never deleted automatically. Deletion is a manual, recorded owner decision, **no earlier than 30 days after step 12** and only once a later verified dump (nightly or the next migration's) exists | owner; nothing in this repository deletes it |
+
+The pre-migration dump holds publication texts and the audit log (the
+tables with Control Center credentials do not exist yet at that point):
+keep both copies readable by root / the owner only.
+
+### Step 5b — Off-host copy of the dump — MANUAL APPROVAL GATE
+
+> **NOT EXECUTED — REQUIRES OWNER APPROVAL** (copies the dump to the owner's machine; writes one file in `$CC`)
+
+This step cannot be verified from the host: nothing on the host can
+prove that a copy left it, or that a checksum was computed elsewhere. It
+is therefore the **owner's** gate. `migrate upgrade` refuses without
+`control-center.offhost-ack`, and refuses one whose sha256 differs from
+the verified dump's — but a correct-looking file is an attestation,
+nothing more (§2.2).
+
+```bash
+# 1. On the laptop, into an encrypted location only the owner can read.
+#    <dump> = the path printed by step 4 (also in $EV/dump.txt on the host).
+scp '<vps>:<dump>' '<vps>:<dump>.sha256' '<vps>:<dump>.source' ./
+sha256sum -c ./cc-premigration-ai_smm-*.dump.sha256           # must print: OK
+sha256sum ./cc-premigration-ai_smm-*.dump                     # the value for 2.
+```
+
+Stop if `scp` fails or `sha256sum -c` does not print `OK`: no migration.
+
+```bash
+# 2. On the host, only after 1. succeeded. The sha256 is the value the
+#    LAPTOP printed, typed or pasted from the laptop's terminal -- never
+#    read from the host's own files, which would prove nothing.
+cd "$CC"
+( umask 077
+  printf '%s\n' \
+    'SMM_CC_OFFHOST_DUMP_SHA256=<sha256 printed on the laptop>' \
+    "SMM_CC_OFFHOST_CONFIRMED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    'SMM_CC_OFFHOST_CONFIRMED_BY=<owner>' > control-center.offhost-ack )
+```
+
+Do not delete the host copy.
+
+### Step 5c — Gates again, immediately before the migration
+
+> **NOT EXECUTED — REQUIRES OWNER APPROVAL** (read-only queries)
+
+```bash
+cd "$CC"
+./cc-compose.sh preflight | tee "$EV/preflight-before-migrate.txt"   # exit 2 = STOP
+```
+
+Stop if it is not `preflight: PASS`. Step 6 runs every gate once more
+inside `migrate upgrade` — identity, queue and backup evidence —
+immediately before Compose; this step records the evidence and is the
+last point to stop with nothing started.
+
+The order is fixed, and each step refuses to start on the previous
+step's failure: dump (4) → checksum and test restore → evidence (5) →
+off-host copy and its check → confirmation (5b) → gates (5c) → migration
+(6).
 
 ### Step 6 — Migration
 
@@ -536,10 +802,19 @@ cd "$CC"
 ./cc-compose.sh migrate upgrade 3d4ac1986f07 </dev/null 2>&1 | tee "$EV/migrate.log"
 ```
 
-If it fails with `lock timeout` or any other error: nothing was applied
-(one transaction). Confirm with `migrate current` = `79731eadacd7` and go
-to [rollback §4.1](control-center-rollback.md#41-the-upgrade-failed).
-Retry at most once, after re-running step 3's checks.
+`migrate upgrade` passes the identity, queue and backup-evidence gates
+first; a closed gate (`GATE CLOSED`, exit 2) means Compose was never
+called and nothing was applied. Queue closed: wait or agree another
+window, then step 5c again. Evidence stale or missing (for example a new
+window): steps 4, 5 and 5b again — never edit the evidence or the
+confirmation.
+
+If the migration itself fails with `lock timeout` or any other error:
+nothing was applied (one transaction). Confirm with `migrate current` =
+`79731eadacd7` and go to
+[rollback §4.1](control-center-rollback.md#41-the-upgrade-failed).
+Retry at most once, after step 5c passes again (the evidence stays valid:
+nothing was applied).
 
 ### Step 7 — Schema after
 
@@ -677,6 +952,15 @@ Control Center is reachable only through the tunnel.
 - `migrate upgrade head` (the wrapper refuses it), or any migration while
   a publication is due, or without a dump that passed `cc-db-backup.sh
   verify`;
+- fill `control-center.identity` from the live host instead of the
+  deployment record, or edit it or `control-center.window` to make a
+  closed gate open — a closed gate is a stop, not an obstacle;
+- write the pre-migration dump into `/root/backups/ai-smm` or any other
+  directory a rotation prunes, or delete it before the owner releases it;
+- write, edit or copy `control-center.backup-evidence` by hand — only
+  `cc-db-backup.sh verify` writes it;
+- write `control-center.offhost-ack` before the off-host copy was
+  checked on the receiving machine, or with a sha256 read on the host;
 - drop an `ai_smm_restore_check_*` database you did not just see the
   script create, or anything else on the shared instance;
 - restore a dump over the live `ai_smm` database while the worker runs;
@@ -708,6 +992,28 @@ engine id), not whatever the CLI context happened to be.
 | Web: `tsc --noEmit`, `eslint`, `vite build` (Node 24.21.0) | clean |
 | Web: `vitest run` ×10 | 8/10 green; 2 runs failed on `auth.test.tsx › loads me, then the CSRF token…` — the known pre-existing flake FU-024B2-1, no web code changed here |
 
+### 7.1 Deployment gates (SMM-024B.4A-FIX, 2026-10-11)
+
+Branch `feat/smm-024b4a-fix-deployment-gate` from `ffc07a9`; Docker
+29.7.2, Compose v5.4.0, PostgreSQL 16.15 (test container). No production
+access.
+
+| Check | Result |
+|---|---|
+| `tests/test_control_center_backup_evidence.py` — backup evidence: missing, a `VERIFIED=true` marker, corrupted (hand edits, truncated, reordered, comment added, empty, symlink, malformed), dump changed after the check (modified, deleted, symlinked, `.sha256` changed), substituted (evidence re-pointed at another dump, confirmation for another dump, another instance/database/container), stale (schema moved, previous window, verified before taken), off-host confirmation missing, malformed or out of order, live revision unreadable; no option or environment variable skips it, another deployment directory does not help; downgrade needs none and voids it; `dump` → `verify` → confirmation → `upgrade`; a failed `verify` (restore, checksum, no/foreign/mismatched `.source`, database moved, identity gate) leaves no evidence and removes the old one | 57 passed |
+| Mutation checks: the evidence gate call removed; `verify` not deleting the old evidence | 41 and 8 tests fail |
+| `tests/test_control_center_gates.py` — `up` and `restart` added to every identity refusal; wrong PostgreSQL (replaced container, other system identifier, other database oid, host ambiguous / another container / absent on the shared network, database stopped, port, URL host ≠ recorded container); mismatched URL (worker password or host differs, missing or doubled, alias host, other database, second `@`, query string, no database, worker stopped or off the network); unreachable database, failing or ambiguous answers (two rows, garbage, empty, missing field, failing `inspect`/`network inspect`, no or two `POSTGRES_USER`); identity and window files (missing, extra key, malformed, symlink, local time, offset, end ≤ start, injection); busy queue (publishing, lease, due, retry, published in margin, unfinished attempt, needs review, outside window, window > 12 h); SQL error and ambiguous queue answers — each on every guarded operation, each with no Compose call, `pg_dump`, `pg_restore`, `CREATE`/`DROP` or file left behind and no password printed; the gates run read-only and before the guarded step; read-only verbs and `down` stay ungated; rotation-proof dump name and directory | 423 passed |
+| same file, queue SQL on a real PostgreSQL — overdue, in-window, trailing-margin and after-margin publications; retries due and deferred; claimed/publishing with lease; lease expired inside the margin; published 5/65/75 min before the window; unfinished attempt; needs review; outside window (before/after); window > 12 h; impossible date → SQL error | 20 passed |
+| Mutation check: `CC_QUEUE_MARGIN_MINUTES=0` | 4 tests fail (both margins detected) |
+| `tests/test_control_center_wrapper.py`, `_packaging.py`, `_backup.py` (documented invocations now include `preflight`) | 220, 42, 25 passed |
+| Full backend suite (`pytest`, live PostgreSQL) | 1509 passed |
+| `ruff check .` | clean |
+| `scripts/control_center_rehearsal.sh 50f2f113…` (images code-identical to `ffc07a9`; scripts from the branch) — live gate refusals on a real daemon and database: empty database (queue SQL fails), publication due in the window (preflight, dump and migrate all refused, no dump written), foreign system identifier, alias host in the URL, a decoy container answering to the database's name (preflight and verify refused), a directory with `ai_smm-*.dump`; then dump (with `.source`), restore check writing the evidence, the failed restore checks voiding it, a re-check; upgrade refused without evidence, without the off-host confirmation, with a confirmation for another archive, with hand-edited evidence, with a changed dump, with a marker file; off-host copy checked with `sha256sum -c` and confirmed; preflight; migration through every gate; the same evidence refused as stale after it; owner bootstrap and `up` through the identity gate; smoke test 37/37; downgrade without evidence, voiding it, the next upgrade refused; rollback | passed |
+
+The rehearsal found what the stub could not: the Docker CLI hands
+`DNSNames`/`Aliases` to `--format` templates untyped, so `join` fails on a
+real daemon; the gate uses `range` (pinned by a test).
+
 ---
 
 ## 8. Residual risks
@@ -722,4 +1028,7 @@ engine id), not whatever the CLI context happened to be.
 | Worker publishes LIVE; the UI cannot confirm the mode | UI shows UNKNOWN with a warning; FU-024B2-2 |
 | Cookie without `Secure` | Only transport is the SSH tunnel to loopback; revisit when HTTPS terminates in front |
 | `docker load` disk usage on a 25 GB host | step 0 `df` check; remove superseded tags after a successful rollout |
-| Migration lock contention | `lock_timeout`, single transaction, quiet-window checks |
+| Migration lock contention | `lock_timeout`, single transaction, the queue gate (§2.1) |
+| A publication becomes due between the queue gate and the migration | The gate runs immediately before Compose, seconds before the DDL, and protects the whole window ± 60 min; nothing can be scheduled through the Control Center (mutations off); the migration is one transaction with `lock_timeout` |
+| The recorded identity is wrong or stale (for example, the database container was recreated after SMM-024B.4A) | The gate refuses (fail closed). Re-confirm with a separate read-only check and update the deployment record through review — never edit `control-center.identity` on the spot |
+| The gates trust Docker's and PostgreSQL's answers | They read the pinned daemon only; root on the host is outside any check (row above) |

@@ -16,8 +16,14 @@ wheels/
 .env.*
 *.env
 !.env.example
-# Host-specific Docker target of the Control Center (engine id).
+# Host-specific files of the Control Center: Docker target (engine id),
+# the recorded PostgreSQL identity and the agreed migration window.
 control-center.target
+control-center.identity
+control-center.window
+# Written during a deployment: backup evidence and the off-host attestation.
+control-center.backup-evidence*
+control-center.offhost-ack
 
 # Tool caches
 .ruff_cache/

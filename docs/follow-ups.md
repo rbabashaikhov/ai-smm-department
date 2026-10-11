@@ -170,7 +170,12 @@ script between the steps.
 
 ### FU-024B3-5 — Verify the PostgreSQL identity before the production run
 
-**Status:** open. **Found in:** review of the SMM-024B.3 fixes.
+**Status:** done in SMM-024B.4A-FIX: `deploy/control-center/cc-gate.sh`
+(identity gate against `control-center.identity`, run inside
+`cc-db-backup.sh` and before every schema change; `--container` must be
+the recorded container), see
+[control-center-deployment.md §2.1](control-center-deployment.md#21-deployment-gates).
+**Found in:** review of the SMM-024B.3 fixes.
 
 `cc-db-backup.sh` checks the Docker engine and that the named container
 is running, but not that the container is the intended PostgreSQL
@@ -182,3 +187,37 @@ when the deployment step records the expected container id (or image
 and `ai_smm` system identifier) alongside the engine id, the script
 refuses a mismatch, and the runbook captures it in the evidence
 directory in step 3.
+
+### FU-024B4A-1 — The gap between the queue gate and the first DDL statement
+
+**Status:** open. **Found in:** review v2 of SMM-024B.4A-FIX.
+
+`cc-compose.sh migrate upgrade|downgrade` runs the queue gate and then
+starts Compose; the DDL begins seconds later, in another process and
+another database session. A publication that becomes claimable in that
+gap (inserted by the operator CLI, or by anything else with the
+superuser role) is not seen by the gate. It is narrow — the gate already
+protects the whole window ± 60 minutes, the Control Center cannot
+schedule (mutations off), the migration is one transaction with
+`lock_timeout` — but it is a time-of-check/time-of-use gap. Done when the
+check moves into the migration's own transaction (for example an Alembic
+pre-step that takes `LOCK TABLE publications IN SHARE MODE`, re-runs the
+same queue query and aborts the transaction on any row), with a test that
+inserts a due publication between the gate and the DDL.
+
+### FU-024B4A-2 — The trust model of backup evidence and the off-host acknowledgement
+
+**Status:** open (accepted limitation). **Found in:** review v2 of SMM-024B.4A-FIX.
+
+`control-center.backup-evidence` is self-checksummed but not signed, and
+`control-center.offhost-ack` is an operator's attestation: root on the
+host can write either, and nothing on the host can prove that a copy of
+the dump left it or where its sha256 was computed
+([control-center-deployment.md §2.2](control-center-deployment.md#22-trust-boundary)).
+The gates stop mistakes — a missing, stale, corrupted or mismatched
+backup — not a root operator who decides to bypass them. Done when the
+off-host side produces something the host can check but not forge: for
+example the receiving machine signs `<sha256> <dump name> <time>` with a
+key the host does not hold, and `migrate upgrade` verifies that
+signature against a public key recorded in the deployment record; or the
+copy goes to storage the host can read back but not write.

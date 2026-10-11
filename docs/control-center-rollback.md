@@ -44,6 +44,9 @@ The baseline every rollback returns to: `ai-smm-worker` identical to
 
 ### Stop the Control Center (used by every scenario below)
 
+`down`, `ps` and `logs` pass no gate: they work while the database is
+unreachable. `up` and `restart` pass the identity gate.
+
 > **NOT EXECUTED — REQUIRES OWNER APPROVAL**
 
 ```bash
@@ -146,10 +149,17 @@ ro "SELECT pid, application_name, state FROM pg_stat_activity
 docker inspect ai-smm-worker --format '{{.State.Health.Status}}'
 ```
 
-Then: no downgrade, no restore. Either retry once after re-running the
-deployment's step 3 checks (lock timeout in a busy moment), or stop and
-analyse `$EV/migrate.log` locally. The worker is unaffected: its schema
-never changed.
+Then: no downgrade, no restore. Either retry once after
+`./cc-compose.sh preflight` passes again (deployment step 5c; lock timeout
+in a busy moment), or stop and analyse `$EV/migrate.log` locally. The
+worker is unaffected: its schema never changed.
+
+A refusal with `GATE CLOSED` (exit 2) is **not** a failed upgrade:
+Compose was never called. The identity gate closed → stop, the database
+is not the recorded one or the record is stale; resolve it in a separate
+read-only check, never by editing `control-center.identity`. The queue
+gate closed → wait for the queue to be quiet, or agree another window
+([deployment §2.1](control-center-deployment.md#21-deployment-gates)).
 
 If `current` unexpectedly shows `2964ac9ceea7` (only possible if someone
 ran the revisions separately), the schema is consistent and the worker is
@@ -181,12 +191,22 @@ Not touched: `publications`, `publication_attempts`, `content_series`,
 `alembic_version` moves back to `79731eadacd7`. The downgrade runs in one
 transaction with the same `lock_timeout` as the upgrade, and needs short
 exclusive locks on `projects` and locks on `publications` and `users` to
-drop the foreign keys — the same quiet-window rules apply.
+drop the foreign keys — the same quiet-window rules apply, and are
+enforced: `migrate downgrade` passes the identity and queue gates first,
+so `control-center.window` must hold the window approved for the
+downgrade. It does **not** need the upgrade's backup evidence — a stale
+or missing one never blocks a rollback — and it invalidates it
+(`control-center.backup-evidence` → `…invalidated-<stamp>`): a later
+upgrade needs a new dump, restore check and off-host copy.
 
 > **NOT EXECUTED — REQUIRES OWNER APPROVAL** (destructive schema change)
 
 ```bash
 ./cc-compose.sh down                                         # §1 first
+# The window approved for this downgrade (UTC), then both gates
+printf 'SMM_CC_WINDOW_START=%s\nSMM_CC_WINDOW_END=%s\n' \
+    '<approved start, YYYY-MM-DDTHH:MM:SSZ>' '<approved end, YYYY-MM-DDTHH:MM:SSZ>' > control-center.window
+./cc-compose.sh preflight | tee "$EV/preflight-before-downgrade.txt"   # exit 2 = STOP
 
 # What would be lost -- must match the table above
 ro "SELECT 'users', count(*) FROM users UNION ALL

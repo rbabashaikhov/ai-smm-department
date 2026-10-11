@@ -1,0 +1,15 @@
+# Control Center -- the agreed migration window, read by the queue gate
+# (cc-gate.sh) in `preflight`, `cc-db-backup.sh dump` and `migrate
+# upgrade|downgrade`. Not secret; never commit the filled copy.
+#
+# UTC only, YYYY-MM-DDTHH:MM:SSZ (a local time or an offset is refused).
+# The gate is closed outside [start, end], for a window longer than 12 h,
+# and while anything is publishing, leased, due or retried within
+# [start - 60 min, end + 60 min], or was published or attempted in the
+# 60 minutes before start. Write the window the owner approved; never
+# move it to make a closed gate pass.
+#
+# Exactly these two keys. KEY=value, no quotes, no `export`.
+
+SMM_CC_WINDOW_START=2026-01-01T10:00:00Z
+SMM_CC_WINDOW_END=2026-01-01T12:00:00Z

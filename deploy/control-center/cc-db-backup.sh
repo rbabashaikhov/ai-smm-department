@@ -1,13 +1,29 @@
 #!/usr/bin/env bash
 # Pre-migration backup of the ai_smm database, and proof that it restores.
 #
-#   cc-db-backup.sh dump   --container <postgres-container> --out-dir /root/backups/ai-smm
+#   cc-db-backup.sh dump   --container <postgres-container> --out-dir <dir outside any rotation>
 #   cc-db-backup.sh verify --container <postgres-container> --dump <file> [--expect-revision REV]
 #
 # Runs against the daemon pinned in $SMM_CC_DIR/control-center.target (see
 # cc-common.sh). Every failure stops the script with a non-zero exit and
 # says what was and was not left behind. What it guarantees:
 #
+#   * the database is the recorded one (cc-gate.sh, identity gate) before
+#     anything is read or created: --container must be the recorded
+#     container, and the worker, control-center.env and Docker DNS must
+#     all lead to it. `dump` also passes the queue gate (nothing
+#     publishing, leased or due around control-center.window) immediately
+#     before pg_dump. A closed gate exits 2 and nothing was run;
+#   * the dump is kept out of automatic rotation: its name does not match
+#     the nightly backup's ai_smm-*.dump, and a directory holding such
+#     files (one that rotation prunes) is refused;
+#   * backup evidence (cc-gate.sh): `dump` writes <dump>.source -- its
+#     sha256, the recorded instance and database, the live alembic
+#     revision, the time. `verify` first DELETES any earlier
+#     control-center.backup-evidence, and writes a new one only when the
+#     checksum, the test restore and the source record all hold and the
+#     source revision is still the live one. `migrate upgrade` refuses to
+#     run without it;
 #   * the live database `ai_smm` is only ever READ: pg_dump, and read-only
 #     queries (default_transaction_read_only=on). CREATE, DROP and
 #     pg_restore only ever name a scratch database whose name matches
@@ -30,11 +46,15 @@ CC_SELF=cc-db-backup
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/control-center/cc-common.sh
 source "$here/cc-common.sh"
+# shellcheck source=deploy/control-center/cc-gate.sh
+source "$here/cc-gate.sh"
 
-readonly SOURCE_DB=ai_smm
+readonly SOURCE_DB="$CC_APP_DB"
 readonly SCRATCH_PREFIX=ai_smm_restore_check_
 readonly SCRATCH_PATTERN='^ai_smm_restore_check_[0-9]{14}$'
-readonly READ_ONLY='-c default_transaction_read_only=on'
+# Not ai_smm-*.dump: the nightly backup's rotation deletes those after 14
+# days (docs/operations.md), and this one must outlive it.
+readonly DUMP_PREFIX=cc-premigration-ai_smm-
 
 usage() {
     cat <<'EOF'
@@ -67,20 +87,29 @@ done
     || cc_die "--expect-revision takes a 12-hex alembic id"
 
 cc_load_dir "$here"
+
+# Whatever happens next, an earlier verify's evidence no longer stands:
+# only the outcome of THIS run may authorise an upgrade.
+if [[ "$command" == verify ]]; then
+    rm -f "$CC_DIR/$CC_EVIDENCE_FILE_NAME"
+fi
+
 cc_load_target
 cc_verify_engine
+cc_load_compose_env
+cc_load_secret
 
-[[ "$(cc_docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" == true ]] \
-    || cc_die "container $container is not running on this daemon"
-
-pg_user="$(cc_docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container" \
-    | sed -n 's/^POSTGRES_USER=//p')"
-[[ -n "$pg_user" ]] || cc_die "cannot read POSTGRES_USER of $container"
+# The identity gate, before anything touches the instance. Every docker
+# exec below goes to the recorded container, as its POSTGRES_USER.
+cc_load_identity
+[[ "$container" == "$CC_PG_CONTAINER" ]] \
+    || cc_gate_die "--container $container is not the recorded database container $CC_PG_CONTAINER ($CC_IDENTITY_FILE_NAME)"
+cc_gate_identity "$CC_NETWORK"
+pg_user="$CC_PG_USER"
 
 # Read-only query; prints rows unaligned, no header.
 pg_read() {
-    cc_docker exec -i -e PGOPTIONS="$READ_ONLY" "$container" \
-        psql -X -v ON_ERROR_STOP=1 -U "$pg_user" -d "$1" -tA -c "$2"
+    cc_pg_read "$1" "$2"
 }
 
 # CREATE / DROP of the scratch database only.
@@ -124,14 +153,30 @@ do_dump() {
     (( (8#$dir_mode & 8#077) == 0 )) \
         || cc_die "dump: $out_dir is mode $dir_mode; backups hold credential hashes, use a 700 directory"
 
+    # A directory the nightly rotation prunes would delete this dump too.
+    if compgen -G "$out_dir/ai_smm-*.dump" >/dev/null; then
+        cc_die "dump: $out_dir holds ai_smm-*.dump files, so an automatic rotation prunes it; use a directory of its own"
+    fi
+
     size="$(pg_read "$SOURCE_DB" "SELECT pg_database_size(current_database())")"
+    [[ "$size" =~ ^[0-9]+$ ]] || cc_die "dump: cannot read the size of $SOURCE_DB"
     free="$(df --output=avail -B1 "$out_dir" | tail -n 1 | tr -d ' ')"
     (( free > 2 * size )) || cc_die "dump: $free bytes free in $out_dir, need more than twice the database size ($size)"
 
-    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    final="$out_dir/ai_smm-pre-control-center-$stamp.dump"
+    # The queue gate, immediately before pg_dump: closed -> exit 2, nothing written.
+    cc_gate_queue
+
+    # The schema the dump is taken at, for its source record.
+    local revision epoch taken
+    revision="$(cc_live_revision)"
+
+    epoch="$(date -u +%s)"
+    stamp="$(date -u -d "@$epoch" +%Y%m%dT%H%M%SZ)"
+    taken="$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ)"
+    final="$out_dir/$DUMP_PREFIX$stamp.dump"
     partial="$final.partial"
-    [[ ! -e "$final" && ! -e "$partial" && ! -e "$final.sha256" ]] || cc_die "dump: $final already exists"
+    [[ ! -e "$final" && ! -e "$partial" && ! -e "$final.sha256" && ! -e "$final.source" ]] \
+        || cc_die "dump: $final already exists"
 
     umask 077
     trap 'rm -f "$partial"' EXIT
@@ -147,14 +192,83 @@ do_dump() {
 
     mv "$partial" "$final"
     (cd "$out_dir" && sha256sum "$(basename "$final")" > "$(basename "$final").sha256")
-    chmod 600 "$final" "$final.sha256"
+    printf '%s\n' \
+        "SMM_CC_SOURCE_DUMP=$(basename "$final")" \
+        "SMM_CC_SOURCE_SHA256=$(cut -d' ' -f1 "$final.sha256")" \
+        "SMM_CC_SOURCE_PG_CONTAINER_ID=$CC_PG_CONTAINER_ID" \
+        "SMM_CC_SOURCE_SYSTEM_IDENTIFIER=$CC_PG_SYSTEM_ID" \
+        "SMM_CC_SOURCE_DATABASE_OID=$CC_PG_DB_OID" \
+        "SMM_CC_SOURCE_REVISION=$revision" \
+        "SMM_CC_SOURCE_TAKEN_AT=$taken" > "$final.source"
+    chmod 600 "$final" "$final.sha256" "$final.source"
     trap - EXIT INT TERM
 
     echo "dump:   $final"
     echo "sha256: $(cut -d' ' -f1 "$final.sha256")"
+    echo "source: $final.source (revision $revision, taken $taken)"
 }
 
 # -- verify --------------------------------------------------------------------
+
+# Sets src_sha, src_taken; dies unless <dump>.source describes exactly this
+# archive, taken from the recorded instance and database, at the restored
+# revision, and the live database is still at that revision.
+check_source() {
+    local restored="$1" source="$dump.source" name sha cid sysid oid rev live
+
+    [[ -f "$source" && ! -L "$source" ]] \
+        || cc_die "verify: $source is missing; only a dump taken by this script can become backup evidence"
+    cc_check_keys "$source" "${CC_SOURCE_KEYS[@]}"
+
+    name="$(cc_value_of "$source" SMM_CC_SOURCE_DUMP)"
+    src_sha="$(cc_value_of "$source" SMM_CC_SOURCE_SHA256)"
+    cid="$(cc_value_of "$source" SMM_CC_SOURCE_PG_CONTAINER_ID)"
+    sysid="$(cc_value_of "$source" SMM_CC_SOURCE_SYSTEM_IDENTIFIER)"
+    oid="$(cc_value_of "$source" SMM_CC_SOURCE_DATABASE_OID)"
+    rev="$(cc_value_of "$source" SMM_CC_SOURCE_REVISION)"
+    src_taken="$(cc_value_of "$source" SMM_CC_SOURCE_TAKEN_AT)"
+
+    sha="$(cc_sha256_of "$dump")" || cc_die "verify: cannot read $dump"
+    [[ "$name" == "$(basename "$dump")" && "$src_sha" == "$sha" ]] \
+        || cc_die "verify: $source describes another archive"
+    [[ "$src_taken" =~ $CC_UTC_RE && "$rev" =~ $CC_REVISION_RE ]] \
+        || cc_die "verify: $source is malformed"
+    [[ "$cid" == "$CC_PG_CONTAINER_ID" && "$sysid" == "$CC_PG_SYSTEM_ID" && "$oid" == "$CC_PG_DB_OID" ]] \
+        || cc_die "verify: the dump was taken from another instance, container or database than the recorded one"
+    [[ "$rev" == "$restored" ]] \
+        || cc_die "verify: the archive restores at $restored, its source record says $rev"
+
+    live="$(cc_live_revision)"
+    [[ "$live" == "$rev" ]] \
+        || cc_die "verify: $SOURCE_DB is now at $live, the dump was taken at $rev: stale, take a new dump"
+}
+
+# Written last, atomically, only after a passed restore check.
+write_evidence() {
+    local file="$CC_DIR/$CC_EVIDENCE_FILE_NAME" path body
+
+    path="$(cd "$(dirname "$dump")" && pwd -P)/$(basename "$dump")"
+    [[ "$path" =~ $CC_PATH_RE && "$path" != *..* ]] \
+        || cc_die "verify: the dump path cannot be recorded as evidence: $path"
+
+    body="$(printf '%s\n' \
+        "SMM_CC_EVIDENCE_DUMP=$path" \
+        "SMM_CC_EVIDENCE_DUMP_SHA256=$src_sha" \
+        "SMM_CC_EVIDENCE_PG_CONTAINER_ID=$CC_PG_CONTAINER_ID" \
+        "SMM_CC_EVIDENCE_SYSTEM_IDENTIFIER=$CC_PG_SYSTEM_ID" \
+        "SMM_CC_EVIDENCE_DATABASE_OID=$CC_PG_DB_OID" \
+        "SMM_CC_EVIDENCE_REVISION=$1" \
+        "SMM_CC_EVIDENCE_TAKEN_AT=$src_taken" \
+        "SMM_CC_EVIDENCE_VERIFIED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+
+    ( umask 077
+      { printf '%s\n' "$body"
+        printf 'SMM_CC_EVIDENCE_CHECKSUM=%s\n' "$(printf '%s\n' "$body" | sha256sum | cut -d' ' -f1)"
+      } > "$file.partial" ) || cc_die "verify: cannot write $file"
+    mv -f "$file.partial" "$file"
+
+    echo "evidence: $file (dump sha256 ${src_sha:0:12}, revision $1)"
+}
 
 scratch=""
 created=false
@@ -222,12 +336,17 @@ do_verify() {
 
     [[ -z "$expect_revision" || "$revision" == "$expect_revision" ]] \
         || cc_die "verify: restored revision $revision, expected $expect_revision"
+    [[ "$revision" =~ $CC_REVISION_RE ]] || cc_die "verify: cannot read the restored revision"
+
+    local src_sha src_taken
+    check_source "$revision"
 
     created=false
     drop_scratch || { created=true; exit 3; }
     trap - EXIT INT TERM
 
     echo "restore check passed; scratch database $scratch dropped"
+    write_evidence "$revision"
 }
 
 case "$command" in

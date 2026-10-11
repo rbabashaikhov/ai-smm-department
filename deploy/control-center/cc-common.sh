@@ -77,6 +77,38 @@ cc_load_dir() {
     done
 }
 
+# Sets CC_VERSION and CC_NETWORK from control-center.compose.env.
+cc_load_compose_env() {
+    local file="$CC_DIR/$CC_INTERP_FILE_NAME"
+
+    cc_require_file "$file"
+    cc_check_keys "$file" SMM_CC_SHARED_NETWORK SMM_CC_VERSION
+
+    CC_VERSION="$(cc_value_of "$file" SMM_CC_VERSION)"
+    [[ "$CC_VERSION" =~ ^[0-9a-f]{40}$ ]] \
+        || cc_die "SMM_CC_VERSION must be the full 40-hex commit id the images were built from, got '$CC_VERSION'"
+
+    CC_NETWORK="$(cc_value_of "$file" SMM_CC_SHARED_NETWORK)"
+    [[ -n "$CC_NETWORK" ]] || cc_die "SMM_CC_SHARED_NETWORK is empty"
+    [[ "$CC_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+        || cc_die "SMM_CC_SHARED_NETWORK is not a network name: '$CC_NETWORK'"
+}
+
+# Sets CC_DSN from control-center.env: exactly one key, mode 600. The
+# value is a secret: it is compared, never printed.
+cc_load_secret() {
+    local file="$CC_DIR/$CC_SECRET_FILE_NAME" mode
+
+    cc_require_file "$file"
+    cc_check_keys "$file" AI_SMM_DATABASE_URL
+
+    mode="$(stat -c '%a' "$file")"
+    (( (8#$mode & 8#077) == 0 )) \
+        || cc_die "$file is mode $mode; it holds the database password and must be 600"
+
+    CC_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
+}
+
 # Sets CC_DOCKER_HOST and CC_ENGINE_ID; refuses an ambiguous caller.
 cc_load_target() {
     local target="$CC_DIR/$CC_TARGET_FILE_NAME" socket
