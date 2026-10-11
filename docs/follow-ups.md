@@ -152,3 +152,33 @@ only transport is an SSH tunnel to plain-HTTP loopback. If the Control
 Center is ever served over HTTPS (still private), switch it to `true` in
 the same change and run the smoke test with `--expect-secure-cookie`.
 
+
+### FU-024B3-4 — Atomic finalisation of dump and checksum
+
+**Status:** open. **Found in:** review of the SMM-024B.3 fixes.
+
+`cc-db-backup.sh dump` renames `<name>.dump.partial` to `<name>.dump` and
+only then writes `<name>.dump.sha256`. A crash or kill between the two
+leaves a final-looking dump without a checksum. `verify` refuses it
+(".sha256 is missing"), so it cannot be trusted by mistake, but the dump
+is then unusable until re-taken. Done when the checksum is written first
+(to a `.partial`) and both files are published so that a final `.dump`
+never exists without a valid `.sha256` (for example checksum computed on
+the `.partial`, `.sha256` renamed first, then `.dump`, with `verify`
+treating a lone `.sha256` as incomplete), with a test that kills the
+script between the steps.
+
+### FU-024B3-5 — Verify the PostgreSQL identity before the production run
+
+**Status:** open. **Found in:** review of the SMM-024B.3 fixes.
+
+`cc-db-backup.sh` checks the Docker engine and that the named container
+is running, but not that the container is the intended PostgreSQL
+instance: a mistyped `--container` naming another database container on
+the shared host would be dumped and restored into, and the scratch
+database created there. Only `ai_smm` is read and only a uniquely named
+scratch database is written, but it would be the wrong instance. Done
+when the deployment step records the expected container id (or image
+and `ai_smm` system identifier) alongside the engine id, the script
+refuses a mismatch, and the runbook captures it in the evidence
+directory in step 3.

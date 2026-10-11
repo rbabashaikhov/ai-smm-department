@@ -530,7 +530,7 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-771 тест на стороне Python (и 98 тестов web), все внешние API замоканы. Набор покрывает миграции,
+1010 тестов на стороне Python (и 98 тестов web), все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:
@@ -541,7 +541,9 @@ endpoint, а также read API существующей очереди, паг
 безопасные команды, отказ от запрещённых переходов и реальную
 конкуренцию с worker'ом за строку в PostgreSQL. Упаковка Control Center
 проверяется отдельно: контракт `compose.control-center.yml` и обёртки
-(`tests/test_control_center_packaging.py`), откат миграции по
+(`tests/test_control_center_packaging.py`), allowlist обёртки и попытки
+её обойти (`tests/test_control_center_wrapper.py`), сбои backup/restore
+(`tests/test_control_center_backup.py`), откат миграции по
 `lock_timeout`, набор тестов развёрнутого worker'а на схеме head
 (`scripts/check_worker_schema_compat.sh`) и полный прогон runbook на
 одноразовых заменителях (`scripts/control_center_rehearsal.sh`).

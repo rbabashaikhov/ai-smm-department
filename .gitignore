@@ -16,6 +16,8 @@ wheels/
 .env.*
 *.env
 !.env.example
+# Host-specific Docker target of the Control Center (engine id).
+control-center.target
 
 # Tool caches
 .ruff_cache/

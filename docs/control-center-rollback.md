@@ -6,8 +6,9 @@ the deployed Control Center has to be taken back.
 
 > **Status: nothing here has been run against production.** Every block
 > that touches the VPS is **NOT EXECUTED — REQUIRES OWNER APPROVAL**.
-> Variables (`CC`, `EV`, `PGC`, `PGU`, `ro`) are those of the deployment
-> runbook, §5.
+> Variables (`CC`, `EV`, `BK`, `PGC`, `PGU`, `ro`) and the session's
+> `export DOCKER_HOST=unix:///var/run/docker.sock` are those of the
+> deployment runbook, §5.
 
 ---
 
@@ -18,10 +19,13 @@ the deployed Control Center has to be taken back.
    anything in `/root/ai-smm`. If publishing itself must stop, that is the
    worker's own lever ([operations.md §7](operations.md#7-restart-recovery-rollback))
    and a separate decision.
-2. **Only through `cc-compose.sh`.** It pins project
-   `ai-smm-control-center`; `down` there removes its two containers and its
-   two networks (`ai-smm-cc-internal`, `ai-smm-cc-edge`) and nothing else.
-   The shared network is external: Compose never removes it.
+2. **Only through `cc-compose.sh`.** It accepts only its own verbs, pins
+   project `ai-smm-control-center` and the Docker daemon
+   (`control-center.target`); `down` there removes its two containers and
+   its two networks (`ai-smm-cc-internal`, `ai-smm-cc-edge`) and nothing
+   else — never volumes or images. The shared network is external:
+   Compose never removes it. If the wrapper refuses during a rollback,
+   fix what it names; do not fall back to a bare `docker compose`.
 3. **Prefer leaving the schema in place.** Both migrations are additive
    and the deployed worker's own suite passes on the head schema
    ([deployment §4.2](control-center-deployment.md#42-compatibility-with-the-running-worker)).
@@ -88,8 +92,9 @@ Data impact: none. The API wrote at most session and audit rows.
 ## 3. Incorrect image version
 
 The wrapper refuses an image whose `org.opencontainers.image.revision`
-label does not match `SMM_CC_VERSION`, and any version that is not a
-commit id, so "the wrong bytes under the right tag" and `latest` are
+label is not **exactly** `SMM_CC_VERSION` (a prefix does not match), an
+image built for another architecture, and any version that is not a full
+40-hex commit — so "the wrong bytes under the right tag" and `latest` are
 excluded. What remains is a correctly labelled image of the wrong commit.
 
 Rules for the version to go back to:
@@ -109,8 +114,8 @@ Rules for the version to go back to:
 ```bash
 cd /root/ai-smm-control-center
 ./cc-compose.sh down
-sed -i 's/^SMM_CC_VERSION=.*/SMM_CC_VERSION=<previous-verified-commit>/' control-center.compose.env
-./cc-compose.sh up -d --wait        # the wrapper re-checks the labels
+sed -i 's/^SMM_CC_VERSION=.*/SMM_CC_VERSION=<previous-verified-full-commit>/' control-center.compose.env
+./cc-compose.sh up                  # the wrapper re-checks engine, labels, architecture
 # then deployment steps 9, 11, 12
 ```
 
@@ -132,7 +137,7 @@ Verify, do not assume:
 > **NOT EXECUTED — REQUIRES OWNER APPROVAL** (read-only)
 
 ```bash
-./cc-compose.sh --profile cc-migrate run --rm -T migrate current </dev/null    # 79731eadacd7
+./cc-compose.sh migrate current </dev/null                   # 79731eadacd7
 ro "SELECT to_regclass('public.users'), to_regclass('public.content_items')"  # both empty
 ro "SELECT count(*) FROM information_schema.columns
     WHERE table_name = 'projects' AND column_name IN ('description','version')"  # 0
@@ -192,21 +197,25 @@ ro "SELECT 'users', count(*) FROM users UNION ALL
   | tee "$EV/pre-downgrade-counts.txt"
 
 # Keep it anyway: data-only export of the Control Center's tables
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-docker exec "$PGC" pg_dump -U "$PGU" -d ai_smm -Fc --data-only \
-    -t users -t user_sessions -t project_memberships -t project_settings \
-    -t content_items -t content_revisions -t content_approvals -t content_publication_links \
-  > "/root/backups/ai-smm/ai_smm-cc-tables-$STAMP.dump"
-chmod 600 "/root/backups/ai-smm/ai_smm-cc-tables-$STAMP.dump"
+# (written to .partial; kept only if pg_dump succeeded -- otherwise STOP)
+STAMP=$(date -u +%Y%m%dT%H%M%SZ); OUT="$BK/ai_smm-cc-tables-$STAMP.dump"
+( umask 077
+  docker exec "$PGC" pg_dump -U "$PGU" -d ai_smm -Fc --data-only \
+      -t users -t user_sessions -t project_memberships -t project_settings \
+      -t content_items -t content_revisions -t content_approvals -t content_publication_links \
+    > "$OUT.partial" \
+  && test -s "$OUT.partial" && mv "$OUT.partial" "$OUT" && sha256sum "$OUT" > "$OUT.sha256" ) \
+  || { rm -f "$OUT.partial"; echo "EXPORT FAILED -- do not downgrade"; }
+ls -l "$OUT"
 
-./cc-compose.sh --profile cc-migrate run --rm -T migrate downgrade 79731eadacd7 </dev/null
-./cc-compose.sh --profile cc-migrate run --rm -T migrate current </dev/null      # 79731eadacd7
+./cc-compose.sh migrate downgrade 79731eadacd7 </dev/null
+./cc-compose.sh migrate current </dev/null                   # 79731eadacd7
 ro "SELECT status, count(*) FROM publications GROUP BY 1 ORDER BY 1"
 docker inspect ai-smm-worker --format '{{.State.Health.Status}}'
 ```
 
-Stop before the downgrade if any content table has rows or
-`project_settings` is not empty: that is data the table above says
+Stop before the downgrade if the export failed (no `$OUT`), or if any
+content table has rows or `project_settings` is not empty: that is data the table above says
 cannot exist in read-only mode, and it needs its own decision.
 
 The Control Center must stay down afterwards: its images need the head

@@ -15,8 +15,10 @@
 # bare `docker compose`. Compose lets a .env file in the working
 # directory, or COMPOSE_* variables in the shell, override this file's
 # project name: run from the worker's directory, `down` here would act on
-# project "ai-smm". The wrapper pins the project name, the env files and
-# a clean environment, and refuses a directory that holds a .env.
+# project "ai-smm". The wrapper accepts only a fixed set of verbs and
+# builds the Compose command line itself (project name, files, profiles,
+# service names), pins the Docker daemon, checks the image revision
+# labels, and refuses a directory that holds a .env.
 #
 # Deliberately absent:
 #   * the worker, a scheduler, PostgreSQL -- the existing database is
@@ -93,7 +95,7 @@ x-hardening: &hardening
 services:
   smm-api:
     <<: *hardening
-    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the full git commit the images were built from}
     user: "10001:10001"
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -123,7 +125,7 @@ services:
 
   smm-web:
     <<: *hardening
-    image: ai-smm-web:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    image: ai-smm-web:${SMM_CC_VERSION:?set SMM_CC_VERSION to the full git commit the images were built from}
     # nginx-unprivileged's own uid, spelled out so a base-image change
     # cannot silently make it root.
     user: "101:101"
@@ -157,11 +159,11 @@ services:
 
   # One-shot, never started by `up`, and no default command: nothing
   # migrates unless an operator types the revision.
-  #   cc-compose.sh --profile cc-migrate run --rm migrate current
-  #   cc-compose.sh --profile cc-migrate run --rm migrate upgrade 3d4ac1986f07
+  #   cc-compose.sh migrate current
+  #   cc-compose.sh migrate upgrade 3d4ac1986f07
   migrate:
     <<: *hardening
-    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the full git commit the images were built from}
     user: "10001:10001"
     tmpfs:
       - /tmp:size=16m,mode=1777
@@ -190,10 +192,10 @@ services:
   # Administrative bootstrap only. The entrypoint is pinned to the `user`
   # command group, so this service cannot schedule, approve, publish or
   # touch the queue; it creates the first owner and nothing else:
-  #   cc-compose.sh --profile cc-admin run --rm cli create-owner --email ... --display-name ... --project ...
+  #   cc-compose.sh create-owner --email ... --display-name ... --project ...
   cli:
     <<: *hardening
-    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the git commit the images were built from}
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the full git commit the images were built from}
     user: "10001:10001"
     tmpfs:
       - /tmp:size=16m,mode=1777

@@ -26,6 +26,15 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.cc_stub import (
+    FIXTURE_DSN,
+    FIXTURE_NETWORK,
+    FIXTURE_VERSION,
+    docker_socket,
+    run_script,
+    write_deploy_dir,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE_PATH = ROOT / "compose.control-center.yml"
@@ -34,6 +43,9 @@ DEPLOY_DIR = ROOT / "deploy" / "control-center"
 WRAPPER = DEPLOY_DIR / "cc-compose.sh"
 SECRET_EXAMPLE = DEPLOY_DIR / "control-center.env.example"
 INTERP_EXAMPLE = DEPLOY_DIR / "control-center.compose.env.example"
+TARGET_EXAMPLE = DEPLOY_DIR / "control-center.target.example"
+BACKUP = DEPLOY_DIR / "cc-db-backup.sh"
+COMMON = DEPLOY_DIR / "cc-common.sh"
 ALEMBIC_ENV = ROOT / "alembic" / "env.py"
 
 PROJECT = "ai-smm-control-center"
@@ -42,9 +54,6 @@ TOOL_SERVICES = ("migrate", "cli")
 PYTHON_SERVICES = ("smm-api", "migrate", "cli")
 ALL_SERVICES = (*HTTP_SERVICES, *TOOL_SERVICES)
 
-FIXTURE_VERSION = "abc1234"
-FIXTURE_NETWORK = "cc-fixture-shared"
-FIXTURE_DSN = "postgresql+psycopg://fixture:fixture@fixture-db:5432/fixture"
 
 
 @pytest.fixture(scope="module")
@@ -266,6 +275,16 @@ def test_interpolation_example_holds_only_its_two_keys() -> None:
     ]
 
 
+def test_target_example_holds_only_its_two_keys() -> None:
+    assert sorted(_env_keys(TARGET_EXAMPLE)) == [
+        "SMM_CC_DOCKER_ENGINE_ID",
+        "SMM_CC_DOCKER_HOST",
+    ]
+    assert "SMM_CC_DOCKER_HOST=unix:///var/run/docker.sock" in (
+        TARGET_EXAMPLE.read_text(encoding="utf-8")
+    )
+
+
 def test_filled_env_files_are_ignored_by_git() -> None:
     if shutil.which("git") is None or not (ROOT / ".git").exists():
         pytest.skip("not a git checkout")
@@ -273,8 +292,10 @@ def test_filled_env_files_are_ignored_by_git() -> None:
     for path in (
         "deploy/control-center/control-center.env",
         "deploy/control-center/control-center.compose.env",
+        "deploy/control-center/control-center.target",
         "control-center.env",
         "control-center.compose.env",
+        "control-center.target",
     ):
         result = subprocess.run(
             ["git", "check-ignore", "--quiet", path], cwd=ROOT, check=False
@@ -282,7 +303,7 @@ def test_filled_env_files_are_ignored_by_git() -> None:
 
         assert result.returncode == 0, f"{path} would be committable"
 
-    for path in (SECRET_EXAMPLE, INTERP_EXAMPLE):
+    for path in (SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE):
         result = subprocess.run(
             ["git", "check-ignore", "--quiet", str(path.relative_to(ROOT))],
             cwd=ROOT,
@@ -302,7 +323,11 @@ def test_env_files_never_enter_an_image() -> None:
 
 
 @pytest.mark.parametrize(
-    "path", [COMPOSE_PATH, WRAPPER, SECRET_EXAMPLE, INTERP_EXAMPLE]
+    "path",
+    [
+        COMPOSE_PATH, WRAPPER, BACKUP, COMMON,
+        SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE,
+    ],
 )
 def test_packaging_files_hold_no_secret_looking_values(path: Path) -> None:
     text = path.read_text(encoding="utf-8")
@@ -440,7 +465,10 @@ def test_worker_compose_is_untouched_by_this_packaging() -> None:
     assert "smm-api" not in WORKER_COMPOSE_PATH.read_text(encoding="utf-8")
 
 
-# -- wrapper and rendered configuration --------------------------------------
+# -- rendered configuration ---------------------------------------------------
+#
+# Through the wrapper's `config` verb with the real Docker Compose CLI.
+# `config` does not contact a daemon; the pinned socket only has to exist.
 
 
 def _docker_compose_available() -> bool:
@@ -462,53 +490,38 @@ needs_compose = pytest.mark.skipif(
 
 
 @pytest.fixture
-def deploy_dir(tmp_path: Path) -> Path:
-    """A Control Center directory as on the host, with fixture values."""
-
-    directory = tmp_path / "ai-smm-control-center"
-    directory.mkdir()
-
-    shutil.copy(COMPOSE_PATH, directory / COMPOSE_PATH.name)
-
-    (directory / "control-center.compose.env").write_text(
-        f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
-        f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n",
-        encoding="utf-8",
-    )
-
-    secret = directory / "control-center.env"
-    secret.write_text(f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n", encoding="utf-8")
-    secret.chmod(0o600)
-
-    return directory
+def deploy_dir(tmp_path: Path) -> Any:
+    with docker_socket() as docker_host:
+        yield write_deploy_dir(
+            tmp_path / "ai-smm-control-center", docker_host=docker_host
+        )
 
 
-def _wrapper(
+def _render(
     deploy_dir: Path, *args: str, extra_env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess[str]:
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": os.environ.get("HOME", "/tmp"),
-        "SMM_CC_DIR": str(deploy_dir),
-        **(extra_env or {}),
-    }
-
-    return subprocess.run(
-        ["bash", str(WRAPPER), *args],
-        capture_output=True,
-        text=True,
-        env=env,
-        cwd=deploy_dir,
-        check=False,
+) -> dict[str, Any]:
+    result = run_script(
+        WRAPPER, deploy_dir, "config", "--json", *args, extra_env=extra_env
     )
-
-
-def _render(deploy_dir: Path, *args: str, **kwargs: Any) -> dict[str, Any]:
-    result = _wrapper(deploy_dir, *args, "config", "--format", "json", **kwargs)
 
     assert result.returncode == 0, result.stderr
 
     return json.loads(result.stdout)
+
+
+def _compose_direct(
+    directory: Path, *args: str, home: Path
+) -> subprocess.CompletedProcess[str]:
+    """Bypasses the wrapper on purpose: what Compose itself does."""
+
+    return subprocess.run(
+        ["docker", "compose", *args],
+        capture_output=True,
+        text=True,
+        cwd=directory,
+        env={"PATH": os.environ.get("PATH", ""), "HOME": str(home)},
+        check=False,
+    )
 
 
 @needs_compose
@@ -521,9 +534,7 @@ def test_rendered_default_up_starts_web_and_api_only(deploy_dir: Path) -> None:
 
 @needs_compose
 def test_rendered_ports_and_networks(deploy_dir: Path) -> None:
-    rendered = _render(
-        deploy_dir, "--profile", "cc-migrate", "--profile", "cc-admin"
-    )
+    rendered = _render(deploy_dir, "--with-tools")
     services = rendered["services"]
 
     assert set(services) == set(ALL_SERVICES)
@@ -550,10 +561,35 @@ def test_rendered_ports_and_networks(deploy_dir: Path) -> None:
 
 
 @needs_compose
+def test_wrapper_config_never_prints_the_database_url(deploy_dir: Path) -> None:
+    password = FIXTURE_DSN.split(":")[2].split("@")[0]
+
+    for args in ((), ("--json",), ("--json", "--with-tools"), ("--services",)):
+        result = run_script(WRAPPER, deploy_dir, "config", *args)
+
+        assert result.returncode == 0, (args, result.stderr)
+        assert password not in result.stdout, args
+        assert password not in result.stderr, args
+
+
+@needs_compose
 def test_rendered_env_holds_only_the_fixture_database_url(
-    deploy_dir: Path,
+    deploy_dir: Path, tmp_path: Path
 ) -> None:
-    services = _render(deploy_dir, "--profile", "cc-migrate")["services"]
+    """Resolving env_file is Compose's job; checked without the wrapper,
+    which never prints the resolved URL."""
+
+    result = _compose_direct(
+        deploy_dir,
+        "-p", PROJECT, "-f", COMPOSE_PATH.name,
+        "--env-file", "control-center.compose.env",
+        "--profile", "cc-migrate", "config", "--format", "json",
+        home=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+    services = json.loads(result.stdout)["services"]
 
     for name in ("smm-api", "migrate"):
         env = services[name]["environment"]
@@ -577,6 +613,7 @@ def test_the_operator_shell_cannot_redirect_the_project(
             "COMPOSE_PROJECT_NAME": "ai-smm",
             "COMPOSE_FILE": str(WORKER_COMPOSE_PATH),
             "COMPOSE_PROFILES": "cc-migrate,cc-admin,tools,cli",
+            "COMPOSE_ENV_FILES": "/root/ai-smm/.env",
             "SMM_CC_VERSION": "latest",
             "SMM_CC_SHARED_NETWORK": "host",
         },
@@ -607,13 +644,9 @@ def test_bare_compose_would_be_renamed_by_a_dotenv(tmp_path: Path) -> None:
         f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n", encoding="utf-8"
     )
 
-    result = subprocess.run(
-        ["docker", "compose", "-f", COMPOSE_PATH.name, "config", "--format", "json"],
-        capture_output=True,
-        text=True,
-        cwd=directory,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
-        check=False,
+    result = _compose_direct(
+        directory, "-f", COMPOSE_PATH.name, "config", "--format", "json",
+        home=tmp_path,
     )
 
     assert result.returncode == 0, result.stderr
@@ -643,16 +676,11 @@ def test_env_file_cannot_override_the_literals(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    result = subprocess.run(
-        [
-            "docker", "compose", "-p", PROJECT, "-f", COMPOSE_PATH.name,
-            "--env-file", "interp.env", "config", "--format", "json",
-        ],
-        capture_output=True,
-        text=True,
-        cwd=directory,
-        env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
-        check=False,
+    result = _compose_direct(
+        directory,
+        "-p", PROJECT, "-f", COMPOSE_PATH.name,
+        "--env-file", "interp.env", "config", "--format", "json",
+        home=tmp_path,
     )
 
     assert result.returncode == 0, result.stderr
@@ -682,129 +710,34 @@ def test_missing_version_or_network_fails_to_render(tmp_path: Path) -> None:
     ):
         (directory / "interp.env").write_text(interp, encoding="utf-8")
 
-        result = subprocess.run(
-            [
-                "docker", "compose", "-p", PROJECT, "-f", COMPOSE_PATH.name,
-                "--env-file", "interp.env", "config",
-            ],
-            capture_output=True,
-            text=True,
-            cwd=directory,
-            env={"PATH": os.environ.get("PATH", ""), "HOME": str(tmp_path)},
-            check=False,
+        result = _compose_direct(
+            directory,
+            "-p", PROJECT, "-f", COMPOSE_PATH.name,
+            "--env-file", "interp.env", "config",
+            home=tmp_path,
         )
 
         assert result.returncode != 0, missing
         assert missing in result.stderr, result.stderr
 
 
-# Each case breaks one rule; the wrapper must refuse before Compose runs.
-REFUSALS = {
-    "dotenv-in-dir": (lambda d: (d / ".env").write_text("X=1\n"), ".env"),
-    "worker-compose-in-dir": (
-        lambda d: (d / "compose.yaml").write_text("name: ai-smm\n"),
-        "compose.yaml",
-    ),
-    "worker-env-in-dir": (
-        lambda d: (d / "ai-smm.env").write_text("X=1\n"),
-        "ai-smm.env",
-    ),
-    "secret-world-readable": (
-        lambda d: (d / "control-center.env").chmod(0o644),
-        "must be 600",
-    ),
-    "secret-extra-key": (
-        lambda d: (d / "control-center.env").write_text(
-            f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n"
-            "THREADS_ACCESS_TOKEN=fixture\n"
-        ),
-        "must define exactly",
-    ),
-    "secret-mutations-on": (
-        lambda d: (d / "control-center.env").write_text(
-            f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n"
-            "AI_SMM_API_MUTATIONS_ENABLED=true\n"
-        ),
-        "must define exactly",
-    ),
-    "secret-missing": (
-        lambda d: (d / "control-center.env").unlink(),
-        "missing",
-    ),
-    "interp-project-name": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
-            f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
-            "COMPOSE_PROJECT_NAME=ai-smm\n"
-        ),
-        "must define exactly",
-    ),
-    "interp-export-syntax": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"export SMM_CC_VERSION={FIXTURE_VERSION}\n"
-            f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
-        ),
-        "not a KEY=value line",
-    ),
-    "version-latest": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            "SMM_CC_VERSION=latest\n"
-            f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
-        ),
-        "git commit id",
-    ),
-    "network-empty": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
-            "SMM_CC_SHARED_NETWORK=\n"
-        ),
-        "SMM_CC_SHARED_NETWORK is empty",
-    ),
-}
+def test_scripts_are_executable_and_strict() -> None:
+    for script in (WRAPPER, BACKUP):
+        mode = script.stat().st_mode
+        text = script.read_text(encoding="utf-8")
 
+        assert mode & stat.S_IXUSR, script
+        assert text.startswith("#!/usr/bin/env bash\n"), script
+        assert "set -euo pipefail" in text, script
+        assert 'source "$here/cc-common.sh"' in text, script
 
-@pytest.mark.parametrize("case", sorted(REFUSALS))
-def test_wrapper_refuses(deploy_dir: Path, case: str) -> None:
-    if shutil.which("bash") is None:
-        pytest.skip("bash not available")
+    # Sourced, never executed.
+    assert not COMMON.stat().st_mode & stat.S_IXUSR
 
-    break_rule, message = REFUSALS[case]
-    break_rule(deploy_dir)
+    wrapper = WRAPPER.read_text(encoding="utf-8")
 
-    result = _wrapper(deploy_dir, "config")
-
-    assert result.returncode == 2, (result.stdout, result.stderr)
-    assert message in result.stderr
-    assert result.stdout == ""
-
-
-@needs_compose
-def test_wrapper_refuses_to_start_images_it_cannot_verify(
-    deploy_dir: Path,
-) -> None:
-    """`up` / `run` check the OCI revision label before Compose runs."""
-
-    (deploy_dir / "control-center.compose.env").write_text(
-        "SMM_CC_VERSION=fffffffffffffffffff0\n"
-        f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n",
-        encoding="utf-8",
-    )
-
-    for args in (("up", "-d"), ("--profile", "cc-migrate", "run", "--rm", "migrate")):
-        result = _wrapper(deploy_dir, *args)
-
-        assert result.returncode == 2, args
-        assert "is not loaded on this host" in result.stderr, result.stderr
-
-
-def test_wrapper_is_executable_and_strict() -> None:
-    mode = WRAPPER.stat().st_mode
-
-    assert mode & stat.S_IXUSR
-    text = WRAPPER.read_text(encoding="utf-8")
-
-    assert text.startswith("#!/usr/bin/env bash\n")
-    assert "set -euo pipefail" in text
-    assert '--project-name "$PROJECT"' in text
-    assert '--env-file "$interp_file"' in text
-    assert "exec env -i" in text
+    assert '--project-name "$CC_PROJECT"' in wrapper
+    assert '--env-file "$interp_file"' in wrapper
+    assert "exec env -i" in wrapper
+    # The operator's arguments never reach Compose unvetted.
+    assert '"$@"' not in wrapper.split("# -- run")[1]

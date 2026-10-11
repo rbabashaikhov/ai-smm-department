@@ -1,141 +1,357 @@
 #!/usr/bin/env bash
 # The only supported way to run compose.control-center.yml.
 #
-#   SMM_CC_DIR=/root/ai-smm-control-center cc-compose.sh <compose args...>
+#   cc-compose.sh <verb> [options]          (run with no arguments for the list)
 #
-# SMM_CC_DIR defaults to the directory this script is in, and must hold:
+# This is NOT a pass-through to `docker compose`. It accepts a fixed set of
+# verbs, each with a fixed set of options and validated values, and builds
+# the whole Compose command line itself. Nothing an operator types can add
+# a Compose file, an env file, a project name or directory, a profile, an
+# environment variable, a volume, a user, an entrypoint, or a command for
+# the `migrate` and `cli` containers other than the ones listed below.
+#
+# SMM_CC_DIR (default: this script's directory) must hold:
 #
 #   compose.control-center.yml    the compose file, copied unchanged
-#   control-center.compose.env    interpolation: SMM_CC_VERSION, SMM_CC_SHARED_NETWORK
-#   control-center.env            container env: AI_SMM_DATABASE_URL only, mode 600
+#   control-center.compose.env    exactly SMM_CC_VERSION (full 40-hex commit)
+#                                 and SMM_CC_SHARED_NETWORK
+#   control-center.env            exactly AI_SMM_DATABASE_URL, mode 600
+#   control-center.target         exactly SMM_CC_DOCKER_HOST (unix:// socket)
+#                                 and SMM_CC_DOCKER_ENGINE_ID
 #
-# Why a wrapper: Compose takes its project name from COMPOSE_PROJECT_NAME
-# -- in the shell or in a .env file in the working directory -- before
-# the file's own `name:`. Run from the worker's directory, a bare
-# `docker compose -f compose.control-center.yml down` would act on the
-# worker's project. This script:
+# and must not hold .env, compose.yaml or ai-smm.env (the worker's files).
 #
-#   * refuses a directory that holds a .env, compose.yaml or ai-smm.env
-#     (the worker's files);
-#   * refuses env files with any key outside their allowlist, and a
-#     secret file readable by group or others;
-#   * refuses a version that is not a git commit (no "latest");
-#   * pins the project name, the compose file and the interpolation file,
-#     and runs Compose with a clean environment, so nothing exported in
-#     the operator's shell reaches interpolation;
-#   * before anything that creates a container, checks that the loaded
-#     images were built from that commit (OCI revision label).
+# Before anything that talks to the daemon, the daemon at the pinned
+# socket must report the pinned engine id. Before anything that creates a
+# container, both images must exist on that daemon with an OCI revision
+# label EQUAL to SMM_CC_VERSION and the daemon's architecture.
 #
-# It changes nothing itself: every check is a read.
+# Why: Compose takes its project name from a .env file or COMPOSE_* in the
+# shell before the file's own `name:`, and the Docker CLI picks its daemon
+# from a context stored in ~/.docker/config.json. Either could point a
+# bare `docker compose down` at the worker's project or another host.
 
 set -euo pipefail
 
-readonly PROJECT=ai-smm-control-center
-readonly COMPOSE_FILE_NAME=compose.control-center.yml
-readonly INTERP_FILE_NAME=control-center.compose.env
-readonly SECRET_FILE_NAME=control-center.env
-readonly REVISION_LABEL=org.opencontainers.image.revision
+CC_SELF=cc-compose
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=deploy/control-center/cc-common.sh
+source "$here/cc-common.sh"
 
-die() {
-    echo "cc-compose: $*" >&2
-    exit 2
+readonly HTTP_SERVICES="smm-api smm-web"
+readonly ALL_SERVICES="smm-api smm-web migrate cli"
+
+usage() {
+    cat <<'EOF'
+usage: cc-compose.sh <verb> [options]
+
+  config [--quiet | --json | --services | --profiles] [--with-tools]
+                                  render the configuration; never prints the
+                                  database URL (env files are not resolved)
+  up                              start smm-api and smm-web, wait until healthy
+  down [--remove-orphans]         stop and remove this project's containers
+                                  and networks (never volumes or images)
+  ps [-a] [-q] [--services] [SERVICE...]
+  logs [--since N{s|m|h}] [--tail N] [--timestamps] [smm-api|smm-web...]
+  restart smm-api|smm-web...
+  migrate current | heads         alembic, read-only
+  migrate upgrade REVISION        REVISION: a 12-hex alembic id, never head/+N
+  migrate downgrade REVISION      REVISION: a 12-hex alembic id, never base/-N
+  create-owner --email E --display-name NAME --project ID
+                                  ai-smm user create-owner; prompts for the
+                                  password (reads it from stdin without a TTY)
+EOF
 }
 
-dir="${SMM_CC_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-[[ -d "$dir" ]] || die "SMM_CC_DIR is not a directory: $dir"
-dir="$(cd "$dir" && pwd)"
+in_list() {
+    local needle="$1" item
+    shift
 
-compose_file="$dir/$COMPOSE_FILE_NAME"
-interp_file="$dir/$INTERP_FILE_NAME"
-secret_file="$dir/$SECRET_FILE_NAME"
+    for item in "$@"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
 
-for foreign in .env compose.yaml compose.yml docker-compose.yml ai-smm.env; do
-    [[ ! -e "$dir/$foreign" ]] \
-        || die "$dir holds $foreign; the Control Center must live in a directory of its own"
-done
+    return 1
+}
+
+# -- the command line ------------------------------------------------------
+
+[[ $# -gt 0 ]] || { usage >&2; exit 2; }
+
+verb="$1"
+shift
+
+compose_args=()
+needs_daemon=true
+needs_images=false
+
+case "$verb" in
+    help|-h|--help)
+        usage
+        exit 0
+        ;;
+
+    config)
+        needs_daemon=false
+        mode=""
+        with_tools=false
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --quiet|--json|--services|--profiles)
+                    [[ -z "$mode" ]] || cc_die "config: one of --quiet, --json, --services, --profiles"
+                    mode="$1"
+                    ;;
+                --with-tools)
+                    with_tools=true
+                    ;;
+                *)
+                    cc_die "config: unsupported argument '$1'"
+                    ;;
+            esac
+            shift
+        done
+
+        [[ "$with_tools" == true ]] && compose_args+=(--profile cc-migrate --profile cc-admin)
+        compose_args+=(config)
+
+        case "$mode" in
+            --quiet)    compose_args+=(--quiet) ;;
+            --json)     compose_args+=(--format json --no-env-resolution) ;;
+            --services) compose_args+=(--services) ;;
+            --profiles) compose_args+=(--profiles) ;;
+            "")         compose_args+=(--no-env-resolution) ;;
+        esac
+        ;;
+
+    up)
+        [[ $# -eq 0 ]] || cc_die "up takes no arguments; it starts smm-api and smm-web only"
+        needs_images=true
+        compose_args=(up --detach --wait --wait-timeout 180 --no-build --pull never smm-api smm-web)
+        ;;
+
+    down)
+        compose_args=(down)
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --remove-orphans)
+                    in_list --remove-orphans "${compose_args[@]}" && cc_die "down: --remove-orphans given twice"
+                    compose_args+=(--remove-orphans)
+                    ;;
+                *)
+                    cc_die "down: unsupported argument '$1' (volumes and images are never removed here)"
+                    ;;
+            esac
+            shift
+        done
+        ;;
+
+    ps)
+        compose_args=(ps)
+        services=()
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                -a|--all)   compose_args+=(--all) ;;
+                -q|--quiet) compose_args+=(--quiet) ;;
+                --services) compose_args+=(--services) ;;
+                -*)         cc_die "ps: unsupported option '$1'" ;;
+                *)
+                    in_list "$1" $ALL_SERVICES || cc_die "ps: unknown service '$1'"
+                    services+=("$1")
+                    ;;
+            esac
+            shift
+        done
+
+        compose_args+=("${services[@]}")
+        ;;
+
+    logs)
+        compose_args=(logs --no-color)
+        services=()
+
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --since)
+                    [[ $# -ge 2 && "$2" =~ ^[0-9]{1,5}[smh]$ ]] \
+                        || cc_die "logs: --since takes a duration such as 15m"
+                    compose_args+=(--since "$2")
+                    shift
+                    ;;
+                --tail)
+                    [[ $# -ge 2 && "$2" =~ ^[0-9]{1,6}$ ]] \
+                        || cc_die "logs: --tail takes a number of lines"
+                    compose_args+=(--tail "$2")
+                    shift
+                    ;;
+                --timestamps)
+                    compose_args+=(--timestamps)
+                    ;;
+                -*)
+                    cc_die "logs: unsupported option '$1'"
+                    ;;
+                *)
+                    in_list "$1" $HTTP_SERVICES || cc_die "logs: unknown service '$1'"
+                    services+=("$1")
+                    ;;
+            esac
+            shift
+        done
+
+        compose_args+=("${services[@]}")
+        ;;
+
+    restart)
+        [[ $# -gt 0 ]] || cc_die "restart: name smm-api and/or smm-web"
+        needs_images=true
+
+        for service in "$@"; do
+            in_list "$service" $HTTP_SERVICES || cc_die "restart: only smm-api or smm-web, not '$service'"
+        done
+
+        compose_args=(restart "$@")
+        ;;
+
+    migrate)
+        [[ $# -ge 1 ]] || cc_die "migrate: current | heads | upgrade REVISION | downgrade REVISION"
+        needs_images=true
+        sub="$1"
+        shift
+
+        case "$sub" in
+            current|heads)
+                [[ $# -eq 0 ]] || cc_die "migrate $sub takes no arguments"
+                alembic_args=("$sub")
+                ;;
+            upgrade|downgrade)
+                # An explicit revision id only: no head, base, +N, -N,
+                # branch@rev, ranges or --sql.
+                [[ $# -eq 1 && "$1" =~ ^[0-9a-f]{12}$ ]] \
+                    || cc_die "migrate $sub takes exactly one 12-hex revision id"
+                alembic_args=("$sub" "$1")
+                ;;
+            *)
+                cc_die "migrate: unsupported subcommand '$sub'"
+                ;;
+        esac
+
+        compose_args=(--profile cc-migrate run --rm --no-deps -T migrate "${alembic_args[@]}")
+        ;;
+
+    create-owner)
+        needs_images=true
+        email="" display_name="" project=""
+
+        while [[ $# -gt 0 ]]; do
+            [[ $# -ge 2 ]] || cc_die "create-owner: $1 needs a value"
+
+            case "$1" in
+                --email)
+                    [[ -z "$email" ]] || cc_die "create-owner: --email given twice"
+                    [[ "$2" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] \
+                        || cc_die "create-owner: not an e-mail address: '$2'"
+                    email="$2"
+                    ;;
+                --display-name)
+                    [[ -z "$display_name" ]] || cc_die "create-owner: --display-name given twice"
+                    [[ "$2" =~ ^[^[:cntrl:]]{1,255}$ ]] \
+                        || cc_die "create-owner: --display-name must be 1-255 printable characters"
+                    display_name="$2"
+                    ;;
+                --project)
+                    [[ -z "$project" ]] || cc_die "create-owner: --project given twice"
+                    [[ "$2" =~ ^[a-z0-9][a-z0-9_-]{0,119}$ ]] \
+                        || cc_die "create-owner: not a project id: '$2'"
+                    project="$2"
+                    ;;
+                *)
+                    cc_die "create-owner: unsupported argument '$1'"
+                    ;;
+            esac
+            shift 2
+        done
+
+        [[ -n "$email" && -n "$display_name" && -n "$project" ]] \
+            || cc_die "create-owner: --email, --display-name and --project are all required"
+
+        compose_args=(--profile cc-admin run --rm --no-deps)
+        # getpass needs a terminal; without one it reads stdin.
+        [[ -t 0 && -t 1 ]] || compose_args+=(-T)
+        # --opt=value: a value can never be read as another option.
+        compose_args+=(cli create-owner
+            "--email=$email" "--display-name=$display_name" "--project=$project")
+        ;;
+
+    *)
+        cc_die "unsupported verb '$verb' (run without arguments for the list)"
+        ;;
+esac
+
+# -- the deployment directory ------------------------------------------------
+
+cc_load_dir "$here"
+
+compose_file="$CC_DIR/$CC_COMPOSE_FILE_NAME"
+interp_file="$CC_DIR/$CC_INTERP_FILE_NAME"
+secret_file="$CC_DIR/$CC_SECRET_FILE_NAME"
 
 for required in "$compose_file" "$interp_file" "$secret_file"; do
-    [[ -f "$required" ]] || die "missing $required"
+    cc_require_file "$required"
 done
 
-# Prints the keys of a dotenv file; fails on a line that is not KEY=value.
-env_keys() {
-    local file="$1" line
+cc_check_keys "$interp_file" SMM_CC_SHARED_NETWORK SMM_CC_VERSION
+cc_check_keys "$secret_file" AI_SMM_DATABASE_URL
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*(#.*)?$ ]] && continue
+secret_mode="$(stat -c '%a' "$secret_file")"
+(( (8#$secret_mode & 8#077) == 0 )) \
+    || cc_die "$secret_file is mode $secret_mode; it holds the database password and must be 600"
 
-        if [[ "$line" =~ ^([A-Z][A-Z0-9_]*)= ]]; then
-            echo "${BASH_REMATCH[1]}"
-        else
-            die "$file: not a KEY=value line (no 'export', no spaces around '=')"
-        fi
-    done < "$file"
-}
+version="$(cc_value_of "$interp_file" SMM_CC_VERSION)"
+[[ "$version" =~ ^[0-9a-f]{40}$ ]] \
+    || cc_die "SMM_CC_VERSION must be the full 40-hex commit id the images were built from, got '$version'"
 
-# Exactly the listed keys, each once.
-check_keys() {
-    local file="$1"
-    shift
-    local expected actual
+network="$(cc_value_of "$interp_file" SMM_CC_SHARED_NETWORK)"
+[[ -n "$network" ]] || cc_die "SMM_CC_SHARED_NETWORK is empty"
+[[ "$network" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
+    || cc_die "SMM_CC_SHARED_NETWORK is not a network name: '$network'"
 
-    expected="$(printf '%s\n' "$@" | sort)"
-    actual="$(env_keys "$file" | sort)"
+cc_load_target
 
-    [[ "$actual" == "$expected" ]] \
-        || die "$file must define exactly: $* (found: $(echo $actual))"
-}
+# -- the daemon and the images -----------------------------------------------
 
-check_keys "$interp_file" SMM_CC_SHARED_NETWORK SMM_CC_VERSION
-check_keys "$secret_file" AI_SMM_DATABASE_URL
+if [[ "$needs_daemon" == true ]]; then
+    cc_verify_engine
+fi
 
-mode="$(stat -c '%a' "$secret_file")"
-(( (8#$mode & 8#077) == 0 )) \
-    || die "$secret_file is mode $mode; it holds the database password and must be 600"
+if [[ "$needs_images" == true ]]; then
+    arch="$(cc_docker version --format '{{.Server.Arch}}')" \
+        || cc_die "cannot read the daemon's architecture"
 
-value_of() {
-    sed -n "s/^$2=//p" "$1" | tail -n 1
-}
-
-version="$(value_of "$interp_file" SMM_CC_VERSION)"
-[[ "$version" =~ ^[0-9a-f]{7,40}$ ]] \
-    || die "SMM_CC_VERSION must be a git commit id (7-40 lowercase hex), got '$version'"
-
-[[ -n "$(value_of "$interp_file" SMM_CC_SHARED_NETWORK)" ]] \
-    || die "SMM_CC_SHARED_NETWORK is empty"
-
-# Subcommands that create or start containers from the images.
-creates_containers=false
-for arg in "$@"; do
-    case "$arg" in
-        up|run|create|start|restart)
-            creates_containers=true
-            break
-            ;;
-    esac
-done
-
-if [[ "$creates_containers" == true ]]; then
     for image in "ai-smm-api:$version" "ai-smm-web:$version"; do
-        revision="$(docker image inspect --format "{{ index .Config.Labels \"$REVISION_LABEL\" }}" "$image" 2>/dev/null)" \
-            || die "image $image is not loaded on this host"
+        facts="$(cc_docker image inspect --format \
+            "{{.Architecture}} {{index .Config.Labels \"$CC_REVISION_LABEL\"}}" "$image" 2>/dev/null)" \
+            || cc_die "image $image is not loaded on this daemon"
 
-        [[ -n "$revision" && "$revision" == "$version"* ]] \
-            || die "image $image carries $REVISION_LABEL='$revision', expected commit $version"
+        image_arch="${facts%% *}"
+        revision="${facts#* }"
+
+        # Equality with the full commit: a matching prefix is not enough.
+        [[ "$revision" == "$version" ]] \
+            || cc_die "image $image carries $CC_REVISION_LABEL='$revision', expected exactly $version"
+        [[ "$image_arch" == "$arch" ]] \
+            || cc_die "image $image is $image_arch, the daemon is $arch"
     done
 fi
 
-# A clean environment: nothing exported in this shell -- COMPOSE_*, a
-# stray SMM_CC_*, DOCKER_DEFAULT_PLATFORM -- reaches Compose. HOME is
-# needed for the Docker CLI config, TERM for an interactive `run`.
-clean_env=(PATH="$PATH" HOME="${HOME:-/root}" TERM="${TERM:-dumb}")
-[[ -n "${DOCKER_HOST:-}" ]] && clean_env+=(DOCKER_HOST="$DOCKER_HOST")
-[[ -n "${DOCKER_CONTEXT:-}" ]] && clean_env+=(DOCKER_CONTEXT="$DOCKER_CONTEXT")
+# -- run ------------------------------------------------------------------------
 
-exec env -i "${clean_env[@]}" \
+exec env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="$CC_DOCKER_HOST" \
+    ${TERM:+"TERM=$TERM"} \
     docker compose \
-        --project-name "$PROJECT" \
-        --project-directory "$dir" \
+        --project-name "$CC_PROJECT" \
+        --project-directory "$CC_DIR" \
         --file "$compose_file" \
         --env-file "$interp_file" \
-        "$@"
+        "${compose_args[@]}"

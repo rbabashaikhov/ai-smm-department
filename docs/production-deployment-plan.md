@@ -1148,8 +1148,9 @@ worker'ом в своё время.
 | Артефакт | Назначение |
 |---|---|
 | `compose.control-center.yml` | проект `ai-smm-control-center`: `smm-api`, `smm-web`, одноразовые `migrate` (профиль `cc-migrate`) и `cli` (профиль `cc-admin`, только `ai-smm user`); без worker, scheduler и PostgreSQL |
-| `deploy/control-center/cc-compose.sh` | единственный способ запуска: фиксирует имя проекта и env-файлы, чистое окружение, проверка меток образов |
-| `deploy/control-center/*.env.example` | контракт окружения |
+| `deploy/control-center/cc-compose.sh` | единственный способ запуска: только фиксированный набор команд (allowlist), сама строит командную строку Compose, закрепляет Docker daemon (`control-center.target`: unix-сокет + engine id), сверяет OCI-метку ревизии образов с полным SHA |
+| `deploy/control-center/cc-db-backup.sh` | dump перед миграцией и проверка восстановления во временную БД; при любой ошибке безопасная остановка, `ai_smm` только читается |
+| `deploy/control-center/*.example` | контракт окружения и Docker target |
 | [control-center-deployment.md](control-center-deployment.md) | runbook из 12 шагов; все production-команды помечены NOT EXECUTED |
 | [control-center-rollback.md](control-center-rollback.md) | откат по сценариям |
 
