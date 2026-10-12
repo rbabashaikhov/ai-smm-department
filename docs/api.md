@@ -20,12 +20,22 @@ Status:
   `AI_SMM_DRY_RUN` from the worker's execution mode, which the API reports
   as `unknown` until a verifiable source exists. Decision record:
   [adr/automation-and-publication-safety.md](adr/automation-and-publication-safety.md).
+- SMM-024B.3 / B.4A-FIX add the production packaging and its deployment
+  gates; SMM-024B.4B deployed them.
 
-The API and the Control Center are **not deployed** to production or a
-VPS, and no migration has been applied to the production database. The
-production worker itself was reported running **live** (not dry-run) by
-the 2026-10-10 discovery; see
-[production-deployment-plan.md §17](production-deployment-plan.md).
+**Production (since 2026-10-11).** The API and the Control Center run in
+production, **read-only for business operations**: release `8ccccda`,
+Alembic `3d4ac1986f07`, `AI_SMM_API_MUTATIONS_ENABLED=false`, API docs
+off, reachable only through an SSH tunnel to the host's loopback. Login,
+logout and session maintenance still write (see
+[Read-only mode](#read-only-mode)). The production worker runs **live**
+(not dry-run) and was not changed by the deployment. Record:
+[production-acceptance-smm-024b.md](production-acceptance-smm-024b.md);
+runbook: [control-center-deployment.md](control-center-deployment.md).
+
+*Historical:* until 2026-10-11 the API was not deployed and the
+production database was at `79731eadacd7`
+([production-deployment-plan.md §17](production-deployment-plan.md#17-обновление-по-результатам-discovery-2026-10-10-smm-024b1)).
 SMM-022B needed no migration at all: it reads and moves rows in the
 schema the worker already had. `compose.runtime.yml` deliberately has no
 worker: the API never publishes, and nothing in that runtime can claim or
@@ -591,7 +601,9 @@ is derived: the subjects belonging to the project are selected in SQL
 from `publications` and `content_series`, and an entry matches when its
 subject is one of them or `project:{id}` itself. An entry about a user (a
 login, the owner bootstrap) belongs to no project and is therefore not
-listed — a user is not owned by one.
+listed — a user is not owned by one. On a fresh deployment the Audit page
+can therefore look empty although login, logout and the owner bootstrap
+were recorded (FU-024C1-4).
 
 ---
 

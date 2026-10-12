@@ -4,8 +4,19 @@ SMM-024B.3. What to do when a step of
 [control-center-deployment.md](control-center-deployment.md) fails, or
 the deployed Control Center has to be taken back.
 
-> **Status: nothing here has been run against production.** Every block
-> that touches the VPS is **NOT EXECUTED — REQUIRES OWNER APPROVAL**.
+> **Status (2026-10-12): no rollback has been needed or run.** The
+> Control Center was deployed on 2026-10-11 (release `8ccccda`, schema
+> `3d4ac1986f07`, mutations off) and accepted
+> ([production-acceptance-smm-024b.md](production-acceptance-smm-024b.md)).
+> Every block that touches the VPS is **NOT EXECUTED — REQUIRES OWNER
+> APPROVAL**.
+>
+> Applied to the current production: §1 (stop) is the default rollback;
+> §3 does not apply — there is no earlier production Control Center
+> image; §4.1 belongs to the migration that already succeeded; for §4.3
+> a downgrade needs a newly approved window, and `$EV/worker-before.txt`
+> is the 2026-10-11 baseline — take a fresh one before acting. The
+> pre-migration dump of 2026-10-11 is kept at least until 2026-11-10.
 > Variables (`CC`, `EV`, `BK`, `PGC`, `PGU`, `ro`) and the session's
 > `export DOCKER_HOST=unix:///var/run/docker.sock` are those of the
 > deployment runbook, §5.
@@ -145,9 +156,12 @@ ro "SELECT to_regclass('public.users'), to_regclass('public.content_items')"  # 
 ro "SELECT count(*) FROM information_schema.columns
     WHERE table_name = 'projects' AND column_name IN ('description','version')"  # 0
 ro "SELECT pid, application_name, state FROM pg_stat_activity
-    WHERE application_name LIKE 'ai-smm-control-center%'"                      # none left
+    WHERE application_name LIKE 'ai-smm-control-center%'"                      # none left (migrate)
 docker inspect ai-smm-worker --format '{{.State.Health.Status}}'
 ```
+
+The filter above finds `migrate`'s connection only: the API and `cli`
+appear as `ai-smm/worker-1` (FU-024C1-1).
 
 Then: no downgrade, no restore. Either retry once after
 `./cc-compose.sh preflight` passes again (deployment step 5c; lock timeout

@@ -9,12 +9,15 @@ as root and no other privileges.
 > Substitute the real values from `docker ps` and `/root/ai-smm/.env`
 > before running any command below.
 
-**Current worker mode: LIVE** (reported by the SMM-024B.1 read-only
-discovery, 2026-10-10). The worker runs with `AI_SMM_DRY_RUN=false` and
-Threads credentials, and publishes due, human-reviewed records itself —
-the third post went out through it at 2026-10-10 06:00 UTC. This is the
-state that discovery reported, not one re-checked since; re-check it
-read-only on the host before relying on it. Anything below that assumes a dry-run worker is
+**Current worker mode: LIVE.** The worker runs with
+`AI_SMM_DRY_RUN=false` and Threads credentials, and publishes due,
+human-reviewed records itself — the third post went out through it at
+2026-10-10 06:00 UTC. Reported by the SMM-024B.1 read-only discovery
+(2026-10-10), re-confirmed read-only by the SMM-024B.4A gate
+(2026-10-11), and the worker container stayed identical through the
+Control Center deployment that evening. Nothing records the mode
+continuously (FU-024B2-2): re-check it read-only on the host before
+relying on it. Anything below that assumes a dry-run worker is
 historical.
 
 *Historical, 2026-10-09:* the worker was first deployed in dry run, with
@@ -26,19 +29,31 @@ architecture and the reasoning behind it, and
 [adr/automation-and-publication-safety.md](adr/automation-and-publication-safety.md)
 for the publication-safety rules.
 
-> The Control Center (API + web) is **not deployed**. When it is, it is
-> read-only by default (`AI_SMM_API_MUTATIONS_ENABLED=false`). That switch
-> belongs to the API: it does not stop, start or slow the worker. To stop
-> publishing, use the worker's own levers in §7.
+> **The Control Center (API + web) is deployed** since 2026-10-11
+> (release `8ccccda`, schema `3d4ac1986f07`;
+> [acceptance record](production-acceptance-smm-024b.md)). It is
+> **read-only for business operations**
+> (`AI_SMM_API_MUTATIONS_ENABLED=false`): no content, approval, project
+> setting or queue change is accepted, for any role. Authentication still
+> writes — sessions, `users.last_login_at`, `auth.*` audit rows
+> ([api.md, Read-only mode](api.md#read-only-mode)). It is reachable only
+> through an SSH tunnel to `127.0.0.1:8088` on the host; there is no
+> public route. That switch belongs to the API: it does not stop, start
+> or slow the worker. To stop publishing, use the worker's own levers in
+> §7.
 >
-> Its production packaging is a separate compose project,
-> `ai-smm-control-center`, in its own directory
-> `/root/ai-smm-control-center/`, run only through `cc-compose.sh`:
+> It is a separate compose project, `ai-smm-control-center`, in its own
+> directory `/root/ai-smm-control-center/`, run only through
+> `cc-compose.sh`:
 > [control-center-deployment.md](control-center-deployment.md),
 > [control-center-rollback.md](control-center-rollback.md). Nothing in
 > this runbook applies to it, and nothing in its rollback touches the
 > worker. Never run its compose file from `/root/ai-smm`: the `.env` there
 > would be read by Compose.
+>
+> Since the deployment the `ai_smm` database is at `3d4ac1986f07`, and
+> `pg_stat_activity` shows a second connection named `ai-smm/worker-1`:
+> that is the API, not a second worker (FU-024C1-1).
 
 ---
 
@@ -54,6 +69,8 @@ for the publication-safety rules.
 | `/srv/ai-smm/data/` | JSON queues staged for import | 755 |
 | `/srv/file-storage/ai-smm/threads` | published media, the only path the worker may write | 2775 root:aismm |
 | `/root/backups/ai-smm/` | database dumps and the pre-deployment role snapshot | 700 |
+| `/root/ai-smm-control-center/` | the Control Center's compose project — see [control-center-deployment.md](control-center-deployment.md), not this runbook | 700 |
+| `/root/backups/ai-smm-control-center/` | the Control Center's pre-migration dump, outside the nightly rotation | 700 |
 
 The database lives in the existing `<postgres-container>` container, in its
 own database `ai_smm` owned by the non-superuser role `ai_smm`.
@@ -292,6 +309,13 @@ docker exec <postgres-container> psql -U "$PGU" -d ai_smm_restore_test \
 docker exec <postgres-container> psql -U "$PGU" -d postgres \
   -c "DROP DATABASE ai_smm_restore_test WITH (FORCE);"
 ```
+
+The nightly dumps have no checksum and no off-host copy (FU-024C1-3).
+The pre-migration dump of the Control Center deployment (2026-10-11) is
+kept separately in `/root/backups/ai-smm-control-center/`, outside this
+rotation, with a verified off-host copy whose encryption at rest is not
+confirmed; it is not deleted before 2026-11-10 and only by an owner
+decision ([control-center-deployment.md, Keeping the pre-migration dump](control-center-deployment.md#keeping-the-pre-migration-dump)).
 
 `/root/backups/ai-smm/roles-before-ai-smm-*.sql` is the snapshot of the
 instance's roles taken before `ai_smm` was created. Keep it: it is the

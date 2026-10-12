@@ -2,8 +2,19 @@
 
 Audience: whoever runs the operator UI locally or changes it.
 
-Status: SMM-023, private-first MVP. Runs locally against the FastAPI
-control plane. **Not deployed**, no public domain.
+Status: SMM-023, private-first MVP, packaged in SMM-024B.3.
+
+**Production (since 2026-10-11):** deployed privately as part of the
+Control Center v1 (release `8ccccda`), reachable only through an SSH
+tunnel to the host's loopback; no public domain, no public route. It runs
+with `AI_SMM_API_MUTATIONS_ENABLED=false`: the editing and queue
+features described below — new content and revisions, submit / approve /
+reject, materialise, schedule / reschedule / cancel, project settings —
+exist in the code but are **refused by the server** for every role, owner
+included, and the UI hides them behind the "Только чтение" notice. Sign
+in and sign out still write session and audit rows
+([api.md, Read-only mode](../docs/api.md#read-only-mode)). Record:
+[production-acceptance-smm-024b.md](../docs/production-acceptance-smm-024b.md).
 
 The UI is a client of the existing `/api/v1` and nothing else. It cannot
 publish: there is no publish, publish-now or retry-publish control or
@@ -27,11 +38,18 @@ No Redux, no SSR, no UI framework.
 
 ## Running it
 
+> **Warning.** `AI_SMM_API_MUTATIONS_ENABLED=true` below is for a
+> **local, disposable test database only — never production**, and never
+> a database a live worker reads: with it, an admin can schedule a
+> publication, and a live worker would send it. Production keeps it
+> `false`; changing that is a reviewed compose-file change with separate
+> owner approval ([follow-ups.md](../docs/follow-ups.md), FU-024C1-5).
+
 ```bash
-# 1. The API, against a local database (never production):
+# 1. The API, against a local test database (NEVER production):
 export AI_SMM_DATABASE_URL=postgresql+psycopg://...@127.0.0.1:5432/ai_smm_dev
 export AI_SMM_API_COOKIE_SECURE=false      # plain http only
-export AI_SMM_API_MUTATIONS_ENABLED=true   # local DB only; default is read-only
+export AI_SMM_API_MUTATIONS_ENABLED=true   # LOCAL TEST DB ONLY, never production; default is read-only
 uvicorn ai_smm.api.app:create_app --factory --host 127.0.0.1 --port 8000
 
 # 2. The UI:
