@@ -6,6 +6,7 @@
 | Project | PRJ-013 AI SMM Department 2.0 |
 | Baseline | `main` at `46dbe854d969f1ed1c5aeb7ae5edea027c82db9d` |
 | Implemented by | SMM-024B.2 (read-only control plane, worker-mode reporting) |
+| Deployed | 2026-10-11, SMM-024B.4B: release `8ccccda`, read-only for business operations, worker unchanged ([acceptance record](../production-acceptance-smm-024b.md)) |
 
 ## Context: verified deployment finding
 
@@ -14,8 +15,9 @@ runs with `AI_SMM_DRY_RUN=false`, holds live Threads credentials, and
 published the third post at 2026-10-10 06:00 UTC. Historical documents
 stating that the worker runs in dry-run mode are stale.
 
-This is the state reported by that discovery, not a snapshot re-checked
-independently since.
+This is the state reported by that discovery. It was re-confirmed
+read-only by the SMM-024B.4A gate on 2026-10-11, and the worker was left
+unchanged by the Control Center deployment that evening.
 
 Two consequences shaped this decision:
 
@@ -63,8 +65,9 @@ agent or a background job.
 
 ### Control plane safety
 
-The initial deployment of the new Control Center is **read-only, even for
-owner and admin users**.
+The initial deployment of the new Control Center is **read-only for
+business operations, even for owner and admin users**. Authentication and
+session maintenance still write session and audit rows (see below).
 
 `AI_SMM_DRY_RUN` on the API is only a process-local configuration and
 report field. It does not gate API commands and does not reflect the live

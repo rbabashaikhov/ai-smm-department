@@ -4,10 +4,20 @@ SMM-024B.3. How the private Control Center (`smm-api` + `smm-web`) is
 added to the production host next to the live worker, read-only, reachable
 only through an SSH tunnel.
 
-> **Status: packaging only. Nothing in this document has been run against
-> production.** Every block that touches the VPS is marked
-> **NOT EXECUTED — REQUIRES OWNER APPROVAL**. Approval of one step does
-> not extend to the next.
+> **Status (2026-10-12): executed once in production.** This runbook was
+> run step by step on **2026-10-11** for release
+> `8ccccda161c3a0b4bc3fd4a90d86dfd19dabd665` (SMM-024B.4B-2 … B.4B-5,
+> each step separately approved). Production is now at Alembic
+> `3d4ac1986f07` with the Control Center running read-only; the record of
+> that run, with its deviations, is
+> [production-acceptance-smm-024b.md](production-acceptance-smm-024b.md).
+>
+> The blocks below are kept as the **template for any future run**
+> (another release, a re-deployment): the marker
+> **NOT EXECUTED — REQUIRES OWNER APPROVAL** now means "requires a new
+> owner approval for that run", not "has never run". Expected values such
+> as `79731eadacd7` are those of the 2026-10-11 run; a later run starts
+> from `3d4ac1986f07`. Approval of one step does not extend to the next.
 >
 > Names in angle brackets — `<shared-network>`, `<postgres-container>`,
 > `<vps>`, `<project-id>`, `<owner-email>` — stand for resources and values
@@ -126,7 +136,7 @@ Everything except the database URL is a **literal** in
 | `AI_SMM_DRY_RUN` | `true` | the **API process's** flag (`api_dry_run`); not the worker's mode |
 | `OPENAI_API_KEY`, `THREADS_ACCESS_TOKEN`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `STORAGE_SSH_PASSWORD`, `STORAGE_SSH_KEY_PATH` | empty | no credential reaches the API; also masks anything `python-dotenv` could find (the images contain no `.env`, verified) |
 | `THREADS_API_BASE_URL` | `http://127.0.0.1:9` | unroutable |
-| `PGAPPNAME` | `ai-smm-control-center-{api,migrate,cli}` | the Control Center's connections are visible in `pg_stat_activity` |
+| `PGAPPNAME` | `ai-smm-control-center-{api,migrate,cli}` | meant to make the Control Center's connections visible in `pg_stat_activity`. **Effective for `migrate` only:** the API and `cli` engine (`src/ai_smm/db/session.py`) sets `application_name=ai-smm/<worker id>`, which overrides it, so in production the API appears as `ai-smm/worker-1` (FU-024C1-1) |
 | `PGOPTIONS` (`migrate` only) | `-c lock_timeout=5s -c statement_timeout=120s` | §4.3 |
 | `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `UTC`, `INFO`, `json` | |
 
@@ -417,9 +427,11 @@ file on the host can prevent (§8).
 
 ## 4. Database migration: compatibility assessment
 
-Production is at `79731eadacd7`; the images carry head `3d4ac1986f07`.
-Two revisions are pending: `2964ac9ceea7` (control plane) and
-`3d4ac1986f07` (content revisions, approval).
+*Assessment written before the 2026-10-11 run.* At that time production
+was at `79731eadacd7` and the images carried head `3d4ac1986f07`, with two
+revisions pending: `2964ac9ceea7` (control plane) and `3d4ac1986f07`
+(content revisions, approval). Both were applied on 2026-10-11 in one
+transaction (9 s); production is now at `3d4ac1986f07`.
 
 ### 4.1 What the SQL does
 
@@ -935,6 +947,11 @@ docker logs --since 30m ai-smm-worker 2>&1 | tail -n 20
 Done when: the worker line is identical (same container id, image,
 start time, restart count, healthy), the worker keeps cycling, and the
 Control Center is reachable only through the tunnel.
+
+In the `pg_stat_activity` query above the API's connection shows up as
+`ai-smm/worker-1`, not `ai-smm-control-center-api` (FU-024C1-1): count it
+as the API's, not as a second worker. On 2026-10-11 all of this step
+passed (worker identical; publications, attempts and series unchanged).
 
 ---
 

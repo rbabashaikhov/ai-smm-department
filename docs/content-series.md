@@ -240,7 +240,11 @@ The image stays `telegram-04-tradeoff.jpg`, unchanged.
 
 ## 8. Deployment — done 2026-10-09
 
-Production runs `ai-smm:706b383` at schema `79731eadacd7`. The series is
+Production ran `ai-smm:706b383` at schema `79731eadacd7` after this
+deployment (the worker image is unchanged since; the schema moved to
+`3d4ac1986f07` with the Control Center on 2026-10-11, without touching
+`content_series` or `publications` —
+[production-acceptance-smm-024b.md](production-acceptance-smm-024b.md)). The series is
 registered as id 1; publication 3 is attached but unscheduled and
 unreviewed, so nothing can publish it.
 

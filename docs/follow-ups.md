@@ -2,7 +2,47 @@
 
 Open items accepted for later work. Each one names where it came from,
 what is wrong or missing, and what "done" means. None of them blocks the
-release it came from.
+release it came from. Some of them block a **later** step — above all,
+switching on business mutations in the production Control Center; the
+register below says which.
+
+---
+
+## Register (as of 2026-10-12, SMM-024C-1)
+
+Production state these priorities refer to: Control Center v1 deployed
+read-only on 2026-10-11 (release `8ccccda`, schema `3d4ac1986f07`), live
+worker unchanged — see
+[production-acceptance-smm-024b.md](production-acceptance-smm-024b.md).
+
+Priorities as agreed in the SMM-024C-1 review (2026-10-12):
+**P1** — must be closed before business (publication) mutations are
+switched on; **P2** — should be closed soon, does not gate mutations;
+**P3** — UX, localisation, hygiene or accepted limitation. A
+**migration gate** item is not a priority of the read-only UI but a
+mandatory condition for a later step, named in its row.
+
+| FU | Title | Status | Priority | Blocks business mutations? |
+|---|---|---|---|---|
+| [FU-024B3-1](#fu-024b3-1--a-least-privilege-database-role-for-the-api) | Least-privilege PostgreSQL role for the API | open | **P1** | **Yes** — today the read-only guarantee rests on application code only; with mutations on, the API would hold owner (DDL) rights |
+| [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open | **P1** | **Yes** — this is the check that precedes the switch |
+| [FU-024B4A-1](#fu-024b4a-1--the-gap-between-the-queue-gate-and-the-first-ddl-statement) | Queue gate → DDL gap (TOCTOU) | open | **migration gate** | No for the current read-only UI. **Mandatory before any further migration while the queue can be written** (mutations on, or any other writer active) |
+| [FU-024B2-2](#fu-024b2-2--validate-worker_mode_source-when-a-worker-heartbeat-is-introduced) | Source and reliability of the worker mode | open | P2 | No — the UI shows `UNKNOWN` with a warning; still wanted soon, as the worker is LIVE |
+| [FU-024C1-1](#fu-024c1-1--the-api-connects-to-postgresql-as-ai-smmworker-1) | API's `application_name` in PostgreSQL | open | P2 | No — observability only |
+| [FU-024C1-3](#fu-024c1-3--off-host-backup-encryption-and-off-host-copies-of-nightly-dumps) | Off-host backup encryption; nightly dumps off the host | open | P2 | No |
+| [FU-024C1-2](#fu-024c1-2--historical-approval-provenance-of-publication-1) | Approval provenance of publication 1 | open, NOT VERIFIED | P2 | No — historical record only |
+| [FU-024B2-1](#fu-024b2-1--flaky-vitest-tests) | Flaky Vitest tests | open | P2 | No — but fix before UI work for mutations, so regressions are not masked |
+| [FU-024B3-4](#fu-024b3-4--atomic-finalisation-of-dump-and-checksum) | Atomic finalisation of dump and checksum | open | P2 | No (before the next migration preferably) |
+| [FU-024B3-2](#fu-024b3-2--take-the-api-off-the-shared-network) | Take the API off the shared network | open | P2 | No (session + CSRF still required) |
+| [FU-024C1-4](#fu-024c1-4--ux-and-localisation-defects-in-audit-and-preview) | UX and localisation defects in Audit / Preview | open, needs triage | P3 | No |
+| [FU-024B3-3](#fu-024b3-3--secure-session-cookie) | `Secure` session cookie | open, depends on HTTPS | P3 | No (SSH tunnel only) |
+| [FU-024B4A-2](#fu-024b4a-2--the-trust-model-of-backup-evidence-and-the-off-host-acknowledgement) | Trust model of backup evidence / off-host ack | accepted limitation | P3 | No |
+| [FU-024B2-3](#fu-024b2-3--documentation-read-only-means-business-operations-authentication-still-writes-session-state) | Read-only wording: auth still writes | docs and `web/README.md` aligned in SMM-024C-1 | P3 | No |
+| [FU-024B3-5](#fu-024b3-5--verify-the-postgresql-identity-before-the-production-run) | PostgreSQL identity before the production run | **done** (SMM-024B.4A-FIX; used in production 2026-10-11) | — | — |
+
+Switching on business mutations is in any case a reviewed change to
+`compose.control-center.yml` (the value is a literal there), a new task
+and a separate owner approval — none of the items above authorises it.
 
 ---
 
@@ -73,9 +113,34 @@ Requirements for that change:
   above, and that the UI shows `LIVE` / `DRY RUN` with the source and
   `UNKNOWN` otherwise.
 
+**Production note (SMM-024C-1, 2026-10-12).** This item also covers the
+question "where does the worker mode come from, and how reliable is it".
+In production today the only source is a human reading the worker's
+container configuration: LIVE (`AI_SMM_DRY_RUN=false`) was reported by the
+SMM-024B.1 discovery (2026-10-10), re-confirmed read-only by the
+SMM-024B.4A gate (2026-10-11), and the worker container stayed identical
+through the SMM-024B.4B-5 deployment. Nothing records it continuously, so
+the deployed Control Center correctly reports `unknown`. The misleading
+`application_name` of the API (FU-024C1-1) must be fixed first or with
+this change: a heartbeat attributed by `worker_id` must not be confusable
+with the API's own connection, which today also identifies itself as
+`worker-1`. **Priority P2; does not block business mutations** (the UI
+keeps showing `UNKNOWN` with its warning).
+
 ### FU-024B2-3 — Documentation: read-only means business operations; authentication still writes session state
 
-**Status:** open.
+**Status:** documentation aligned in SMM-024C-1 (2026-10-12, pending
+review): `README.md`, `docs/runtime-packaging.md` §7, the ADR,
+`docs/operations.md` and `docs/production-deployment-plan.md` now say
+"read-only for business operations" and name the session and audit
+writes. The UI notice in `web/src/layouts/AppLayout.tsx` says the
+Control Center "does not accept changes", which is about business
+changes and claims no "writes nothing" — left as is. `web/README.md`
+(documentation only) was brought into scope by the SMM-024C-1 review and
+now states the production status and the same session/audit writes.
+Production confirmed the table below: the
+deployment's owner bootstrap, two logins and two logouts added exactly
+five `audit_log` rows (SMM-024B.4B-5).
 
 Several places say the read-only Control Center "only reads" or "writes
 nothing". That is true of **business state** — content, approvals,
@@ -131,6 +196,14 @@ tables and only the writes authentication needs (`INSERT`/`UPDATE` on
 a second env file. Done when the read-only smoke test passes with the
 restricted role and a direct `UPDATE publications` from the API's
 connection is refused by PostgreSQL.
+
+**Production note (SMM-024C-1, 2026-10-12).** Since 2026-10-11 the
+deployed API connects as the owner role. With mutations on, the role
+needs more than the read-only grants above (content tables, the queue
+columns the three commands move), so the design must be redone for the
+editable control plane — still without DDL, ownership or access to
+`alembic_version`. **Priority P1; blocks business mutations.** Verifying
+the role together with the other safety gates is FU-024C1-5.
 
 ### FU-024B3-2 — Take the API off the shared network
 
@@ -205,6 +278,13 @@ pre-step that takes `LOCK TABLE publications IN SHARE MODE`, re-runs the
 same queue query and aborts the transaction on any row), with a test that
 inserts a due publication between the gate and the DDL.
 
+**Note (SMM-024C-1).** One of the mitigations above — "the Control Center
+cannot schedule" — holds only while mutations are off. This item is
+therefore a **mandatory condition before any further production
+migration while the queue can be written** (mutations on, or another
+writer active). It does not block the current read-only UI. The
+2026-10-11 migration ran with mutations off and an empty queue.
+
 ### FU-024B4A-2 — The trust model of backup evidence and the off-host acknowledgement
 
 **Status:** open (accepted limitation). **Found in:** review v2 of SMM-024B.4A-FIX.
@@ -221,3 +301,171 @@ example the receiving machine signs `<sha256> <dump name> <time>` with a
 key the host does not hold, and `migrate upgrade` verifies that
 signature against a public key recorded in the deployment record; or the
 copy goes to storage the host can read back but not write.
+
+---
+
+## From the SMM-024B.4B production deployment (recorded in SMM-024C-1)
+
+Recorded on 2026-10-12 while aligning the documentation with the
+2026-10-11 deployment
+([production-acceptance-smm-024b.md](production-acceptance-smm-024b.md)).
+None of them affected the read-only deployment. Facts the available
+deployment records do not contain are marked **NOT VERIFIED**.
+
+### FU-024C1-1 — The API connects to PostgreSQL as `ai-smm/worker-1`
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no.
+**Found in:** SMM-024B.4B-5 post-deployment checks (2026-10-11).
+
+`compose.control-center.yml` sets `PGAPPNAME=ai-smm-control-center-api`
+(and `-cli`, `-migrate`) so that the Control Center's connections are
+recognisable in `pg_stat_activity`. For `smm-api` and `cli` this has no
+effect: `src/ai_smm/db/session.py` passes
+`application_name=f"ai-smm/{settings.worker_id}"` in `connect_args`, which
+libpq prefers over `PGAPPNAME`, and `AI_SMM_WORKER_ID` defaults to
+`worker-1`. In production the API's connection therefore looks exactly
+like the live worker's. `migrate` is not affected: `alembic/env.py`
+builds its own engine without `application_name`.
+
+Consequences:
+
+- an operator reading `pg_stat_activity` sees two "workers" and could
+  terminate the wrong backend during an incident;
+- the runbook queries that filter on `application_name LIKE
+  'ai-smm-control-center%'` (deployment step 12, rollback §4.1) miss the
+  API's sessions — the documents now say so;
+- a future worker heartbeat attributed by `worker_id` (FU-024B2-2) could
+  be confused with the API.
+
+Done when the API and the operator CLI identify themselves distinctly
+(for example: `connect_args` omits `application_name` when `PGAPPNAME` is
+set, or the API factory passes its own name), a test asserts the
+`application_name` each entry point sends, and the two runbook queries
+match the API again. A worker image change is **not** needed if the fix
+keeps the worker's current name; the worker is not to be redeployed for
+this item alone.
+
+### FU-024C1-2 — Historical approval provenance of publication 1
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no.
+
+Publication 1 (the carousel posted on 2026-10-08) was published from the
+local JSON queue by `scripts/publish_saved.py` (whose live path requires
+`--confirm-reviewed`), before the PostgreSQL queue existed. It entered the database later
+through `ai-smm import-json` as `published`, with its `threads_post_id`.
+The importer sets `human_reviewed` once, from the document-level
+`approval` block of the JSON file: `approved is True and not
+human_review_required` (`src/ai_smm/importer.py`). The API returns the
+stored column unchanged (`src/ai_smm/application/publications.py`) and
+the publication detail page renders it as `yes` / `no`.
+
+What the available records show about publication 1:
+
+| Evidence | Value |
+|---|---|
+| Control Center, publication detail, owner's read-only browser check after SMM-024B.4B-5 | `Human reviewed: no` |
+| Local copy of the JSON queue (last modified 2026-10-08): `approval.approved = true`, `approval.human_review_required = true`; no per-publication review field | the importer yields `human_reviewed = false` |
+| [production-deployment-plan.md §16](production-deployment-plan.md#16-stop-point-2026-10-09-исторический) (2026-10-09, after the import) | `human_reviewed=false` for every record |
+| §15.6 (2026-10-09) | publication 1 has `attempts=0` |
+
+So publication 1 is stored as **`published` with `human_reviewed =
+false`**: it was published outside the PostgreSQL queue, and the database
+has never recorded a review of it. That the file imported on the host was
+identical to the local copy is **NOT VERIFIED**, and the current
+production value was not re-read in SMM-024C-1 (no production access);
+the Control Center observation above is the latest evidence. It has no
+`content_publication_links` row (that table was created on 2026-10-11 and
+cannot be written with mutations off).
+
+Who approved the text before the 2026-10-08 post, and how, is **NOT
+VERIFIED**: the only trace is `publish_saved.py` requiring
+`--confirm-reviewed` for a live run, which is not stored anywhere. Unlike
+publication 2, whose approval is an `audit_log` row
+([production-deployment-plan.md §15.4](production-deployment-plan.md#154-что-осталось-до-первой-реальной-публикации)),
+no approval record for publication 1 is known.
+
+Done when the owner has decided how the gap is represented to readers —
+for example a note in the operator documentation, or a UI hint that
+`human_reviewed = no` on a row that arrived already `published` means
+"published before the queue existed", not "published without review".
+Not acceptable: setting `human_reviewed` now, rewriting the historical
+row, or an audit entry that presents itself as the 2026-10-08 approval.
+Any new record must carry its real date and actor and say that it is a
+later annotation.
+
+### FU-024C1-3 — Off-host backup encryption, and off-host copies of nightly dumps
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no.
+
+- The pre-migration dump of 2026-10-11 has a verified off-host copy on
+  the owner's workstation (owner-only permissions). Runbook step 5b asks
+  for an **encrypted** location; the SMM-024B.4B-4B record states that the
+  storage holding the copy is **not encrypted at rest**. Encryption of the
+  off-host copy is therefore **NOT CONFIRMED**. The dump holds publication
+  texts and the audit log.
+- The nightly `backup.sh` dumps have no `.sha256` and no off-host copy at
+  all (SMM-024B.4B-3); the host disk remains a single point of failure
+  for everything after 2026-10-11.
+
+Done when the off-host copy lives on encrypted storage (or is replaced by
+an encrypted archive whose sha256 is re-checked against the deployment
+record) and the unencrypted copy is securely deleted; the nightly dumps
+get a checksum and a scheduled encrypted off-host copy with a documented,
+tested restore. Once mutations are on, Control Center tables also hold
+password and session hashes, editorial history and approvals — data with
+no other copy.
+
+### FU-024C1-4 — UX and localisation defects in Audit and Preview
+
+**Status:** open, needs triage. **Priority:** P3. **Blocks mutations:** no.
+**Found in:** the owner's browser acceptance after SMM-024B.4B-5 (Audit,
+and the Preview of publication 3).
+
+The owner reported UX defects on the Audit and Preview screens, and
+localisation issues, during the manual acceptance. The available
+deployment records do not describe them: the exact screens, strings,
+steps, expected and actual behaviour are **NOT VERIFIED** and must be
+written down here first.
+
+One documented behaviour that may be part of it: the project audit view
+lists only entries whose subject belongs to the project
+([api.md §6, Audit](api.md#audit)). Login, logout and the owner bootstrap
+are user-scoped, so the five audit rows the deployment wrote are by
+design **not** shown on the Audit page, which can look like a broken or
+empty audit trail.
+
+Done when each defect is reproduced with steps, classified (display only,
+or misleading for an approval or audit decision), fixed or explicitly
+accepted, and — for Preview — it is shown that an approver sees exactly
+the revision and content that would be published. A defect classified as
+misleading for an approval decision is moved to FU-024C1-5's checklist.
+
+### FU-024C1-5 — Verify the safety gates before publication mutations are switched on
+
+**Status:** open. **Priority:** P1. **Blocks mutations:** yes.
+**Recorded in:** the SMM-024C-1 review (2026-10-12).
+
+Switching `AI_SMM_API_MUTATIONS_ENABLED` to `true` in production lets an
+admin schedule, and the LIVE worker then publishes. The safety gates were
+proven on the read-only deployment (refusal of every mutation), not on an
+editable one in production. Before the switch, on the exact release that
+will run with mutations on:
+
+- the human-approval invariant: no route, agent or job can approve a
+  revision or set `human_reviewed`; only an approved, materialised
+  snapshot can be scheduled (ADR, *Production invariant*);
+- the central mutation gate and the service-boundary guard still refuse
+  when the flag is off, and the flag is still a literal in
+  `compose.control-center.yml` (no environment override);
+- RBAC (editor vs admin/owner), CSRF and the project-scoping of every
+  command;
+- the command ↔ worker concurrency guarantees (row lock, `SKIP LOCKED`,
+  lease) and the duplicate-publication barriers;
+- the database role of FU-024B3-1 in place and its grants checked;
+- a rehearsal of the enable / disable switch on a production-like copy,
+  including the rollback (flag back to `false`) and what the worker does
+  with anything scheduled meanwhile.
+
+Done when the checklist above is executed and recorded for that release,
+the result is reviewed, and the owner approves the compose change
+separately.

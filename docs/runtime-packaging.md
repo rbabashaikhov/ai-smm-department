@@ -7,8 +7,10 @@ nothing here deploys to a server.
 
 The **production** packaging of the same images is a separate file,
 `compose.control-center.yml` (SMM-024B.3), described in
-[control-center-deployment.md](control-center-deployment.md). It differs
-from this runtime where production requires it:
+[control-center-deployment.md](control-center-deployment.md). It has been
+running in production since 2026-10-11, read-only for business
+operations ([acceptance record](production-acceptance-smm-024b.md)). It
+differs from this runtime where production requires it:
 
 | | `compose.runtime.yml` (local) | `compose.control-center.yml` (production) |
 |---|---|---|
@@ -231,13 +233,18 @@ covers the gate itself.
 
 ## 7. Read-only Control Center and worker mode
 
-The packaged Control Center is **read-only** (SMM-024B.2,
-[ADR](adr/automation-and-publication-safety.md)). With
-`AI_SMM_API_MUTATIONS_ENABLED=false`:
+The packaged Control Center is **read-only for business operations**
+(SMM-024B.2, [ADR](adr/automation-and-publication-safety.md)):
+authentication and session maintenance still write session and audit
+rows. With `AI_SMM_API_MUTATIONS_ENABLED=false`:
 
 - every unsafe `/api/v1` request is refused with 403 `MUTATIONS_DISABLED`
   for every role, owner included, and the database is left unchanged;
-- login and logout still work: they are the gate's only allowlist;
+- login and logout still work: they are the gate's only allowlist, and
+  they write a `user_sessions` row (or its revocation),
+  `users.last_login_at` and an `auth.*` audit row;
+- every authenticated request, `GET` included, moves
+  `user_sessions.last_seen_at` (the idle deadline);
 - reading — projects, queue, content, attempts, audit — works as before;
 - the UI offers no write control and shows a read-only notice. It reads
   the mode from `GET /api/v1/auth/me` (`control_plane.mutations_enabled`);
