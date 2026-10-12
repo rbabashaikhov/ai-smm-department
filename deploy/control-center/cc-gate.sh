@@ -37,6 +37,13 @@
 #     it is SMM_CC_PG_CONTAINER_ID -- as is the container of that name;
 #   * inside it: system identifier, database oid and port as recorded.
 #
+# API role (SMM-024C-2), before anything starts smm-api: its URL, in
+# control-center.api.env, names the API's own role ai_smm_cc on the same
+# host, port and database as the owner URL -- never the owner; and inside
+# the recorded instance, ai_smm_cc.verify.sql (next to the compose file)
+# reports no FAIL: the role has exactly the designed privileges, a SCRAM
+# password, no membership and owns nothing.
+#
 # Queue: nothing may be publishing, hold a lease, or become due -- first
 # attempt or retry -- from CC_QUEUE_MARGIN_MINUTES before the window
 # starts until CC_QUEUE_MARGIN_MINUTES after it ends; nothing may have
@@ -52,6 +59,18 @@ readonly CC_APP_DB=ai_smm
 readonly CC_QUEUE_MARGIN_MINUTES=60
 readonly CC_WINDOW_MAX_HOURS=12
 readonly CC_READ_ONLY='-c default_transaction_read_only=on'
+readonly CC_API_VERIFY_FILE_NAME=ai_smm_cc.verify.sql
+# The verify file checks every column of every table; far fewer lines means
+# it is not the file from Git, or the schema is not the one it was run on.
+readonly CC_API_VERIFY_MIN_CHECKS=200
+# The two files the API role gate relies on, pinned to the release these
+# scripts belong to (tests/test_control_center_packaging.py keeps the pins
+# equal to the files in Git). A verify file that was edited or swapped
+# could print a passing answer; a compose file from another release -- the
+# 2026-10-11 one gives smm-api control-center.env -- would start the API
+# on the owner URL whatever control-center.api.env says.
+readonly CC_PINNED_COMPOSE_SHA256=f894a9be7e00e020b677adaf1d16af26ad63fa9d5b0086e2663f05bee5c82ac6
+readonly CC_PINNED_VERIFY_SHA256=26a65b4b9b68520ff984dc63b5a2992fde9cdf76416ae8a1d539373c6071336c
 
 readonly CC_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
 readonly CC_UTC_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
@@ -255,6 +274,99 @@ cc_gate_identity() {
         || cc_gate_die "the instance listens on $port, the database URL uses $CC_DSN_PORT"
 
     echo "gate identity: PASS -- $CC_APP_DB (oid $oid) in $CC_PG_CONTAINER (${CC_PG_CONTAINER_ID:0:12}, system $sysid); worker $CC_WORKER_CONTAINER and $CC_SECRET_FILE_NAME use the same URL; '$CC_DSN_HOST' unique on $network"
+}
+
+# $1 is a regular file whose sha256 is exactly $2.
+cc_require_pinned() {
+    local actual
+
+    cc_require_file "$1"
+    actual="$(sha256sum "$1" | cut -d' ' -f1)"
+    [[ "$actual" == "$2" ]] \
+        || cc_gate_die "${1##*/} is not the file this release ships (sha256 ${actual:0:12}, expected ${2:0:12}); copy it unchanged from the same commit as the scripts"
+}
+
+# The user name of a database URL, or nothing. Never prints the URL.
+cc_dsn_user() {
+    [[ "$1" =~ ^postgresql(\+[a-z0-9]+)?://([^:@/?#]+)(:[^@/?#]*)?@ ]] && echo "${BASH_REMATCH[2]}"
+}
+
+# Requires cc_gate_identity to have passed in this process (CC_DSN_*,
+# CC_PG_CONTAINER, CC_PG_USER), and CC_API_DSN (cc_load_api_secret).
+cc_gate_api_role() {
+    local owner_host="$CC_DSN_HOST" owner_port="$CC_DSN_PORT" owner_db="$CC_DSN_DB"
+    local owner_user api_user verify answer line last="" count=0 fails=() info=()
+    local re='^(PASS|FAIL|INFO)\|[a-z0-9_.]+\|[^|]*$' required
+
+    cc_require_pinned "$CC_DIR/$CC_COMPOSE_FILE_NAME" "$CC_PINNED_COMPOSE_SHA256"
+    cc_require_pinned "$CC_DIR/$CC_API_VERIFY_FILE_NAME" "$CC_PINNED_VERIFY_SHA256"
+
+    owner_user="$(cc_dsn_user "$CC_DSN")" \
+        || cc_gate_die "$CC_SECRET_FILE_NAME: no user name in the database URL; it is not printed"
+    cc_parse_dsn "$CC_API_DSN" "$CC_API_SECRET_FILE_NAME"
+    api_user="$(cc_dsn_user "$CC_API_DSN")" \
+        || cc_gate_die "$CC_API_SECRET_FILE_NAME: no user name in the database URL; it is not printed"
+
+    [[ "$CC_API_DSN" =~ ^postgresql(\+[a-z0-9]+)?://[^:@/?#]+:[^@/?#]+@ ]] \
+        || cc_gate_die "$CC_API_SECRET_FILE_NAME: the database URL carries no password; it is not printed"
+    [[ "$api_user" == "$CC_API_ROLE" ]] \
+        || cc_gate_die "$CC_API_SECRET_FILE_NAME connects as '$api_user', not the API role $CC_API_ROLE"
+    [[ "$owner_user" != "$CC_API_ROLE" ]] \
+        || cc_gate_die "$CC_SECRET_FILE_NAME connects as $CC_API_ROLE; it must keep the owner role (migrate, cli)"
+    [[ "$CC_API_DSN" != "$CC_DSN" ]] \
+        || cc_gate_die "$CC_API_SECRET_FILE_NAME and $CC_SECRET_FILE_NAME hold the same URL (neither is printed)"
+    [[ "${CC_DSN_HOST,,}" == "${owner_host,,}" && "$CC_DSN_PORT" == "$owner_port" && "$CC_DSN_DB" == "$owner_db" ]] \
+        || cc_gate_die "$CC_API_SECRET_FILE_NAME points at $CC_DSN_HOST:$CC_DSN_PORT/$CC_DSN_DB, not the recorded $owner_host:$owner_port/$owner_db"
+
+    # Restore the owner's values for anything that runs after this gate.
+    cc_parse_dsn "$CC_DSN" "$CC_SECRET_FILE_NAME"
+
+    verify="$CC_DIR/$CC_API_VERIFY_FILE_NAME"
+    cc_require_file "$verify"
+
+    # Read-only, as the instance's superuser over the local socket (the
+    # file reads pg_authid): the API's password is never handled here.
+    answer="$(cc_pg_read "$CC_APP_DB" "$(cat "$verify")" 2>/dev/null)" \
+        || cc_gate_die "cannot run $CC_API_VERIFY_FILE_NAME in $CC_APP_DB (database unreachable, or the query failed)"
+
+    while IFS= read -r line; do
+        [[ -z "$last" ]] || cc_gate_die "$CC_API_VERIFY_FILE_NAME: output continues after the END line"
+
+        if [[ "$line" =~ ^END\|checks\|([0-9]+)$ ]]; then
+            last="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        [[ "$line" =~ $re ]] || cc_gate_die "$CC_API_VERIFY_FILE_NAME: unexpected output line"
+        count=$((count + 1))
+
+        case "$line" in
+            FAIL\|*) fails+=("${line#FAIL|}") ;;
+            INFO\|*) info+=("${line#INFO|}") ;;
+        esac
+    done <<<"$answer"
+
+    [[ -n "$last" && "$last" == "$count" ]] \
+        || cc_gate_die "$CC_API_VERIFY_FILE_NAME: incomplete output ($count checks, END reports '${last:-none}')"
+    (( count >= CC_API_VERIFY_MIN_CHECKS )) \
+        || cc_gate_die "$CC_API_VERIFY_FILE_NAME ran only $count checks; expected at least $CC_API_VERIFY_MIN_CHECKS"
+    (( ${#fails[@]} == 0 )) \
+        || cc_gate_die "$CC_API_ROLE is not as designed: ${fails[*]}"
+
+    for required in \
+        'PASS|role.exists|' 'PASS|role.attributes|' 'PASS|role.password|set, SCRAM-SHA-256' \
+        'PASS|role.member_of|none' 'PASS|role.owns_nothing|0 owned objects' \
+        'PASS|schema.public.create|' 'PASS|table.publications.update|denied'; do
+        # At the start of a line: the check ran, and passed.
+        [[ $'\n'"$answer" == *$'\n'"$required"* ]] \
+            || cc_gate_die "$CC_API_VERIFY_FILE_NAME did not report '$required'"
+    done
+
+    for line in "${info[@]}"; do
+        echo "gate api-role: INFO $line"
+    done
+
+    echo "gate api-role: PASS -- smm-api connects as $CC_API_ROLE to $owner_host:$owner_port/$owner_db; $count checks, no FAIL"
 }
 
 # Requires cc_gate_identity to have passed in this process.

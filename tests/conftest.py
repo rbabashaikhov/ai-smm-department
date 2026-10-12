@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import Engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from ai_smm.config import Settings, load_settings
@@ -32,9 +33,14 @@ from ai_smm.db.models import (
 )
 from ai_smm.db.session import create_db_engine
 from ai_smm.queue import ensure_project
+from tests import pg_roles
 
 
 TEST_DB_ENV = "AI_SMM_TEST_DATABASE_URL"
+#: A superuser URL to the same test database: creates ai_smm_cc.
+ADMIN_DB_ENV = "AI_SMM_TEST_ADMIN_DATABASE_URL"
+#: owner (default) | restricted: the role the API under test connects as.
+API_ROLE_ENV = "AI_SMM_TEST_API_ROLE"
 
 
 def _test_database_url() -> str | None:
@@ -89,6 +95,109 @@ def engine(database_url: str) -> Iterator[Engine]:
 
 def _base_settings() -> Settings:
     return load_settings()
+
+
+def drop_scratch_database(connection, name: str, *, attempts: int = 20) -> None:
+    """DROP DATABASE IF EXISTS ... WITH (FORCE), as the owner, race-free.
+
+    FORCE terminates the other sessions in the database, but a
+    non-superuser may not terminate an autovacuum worker (it runs as no
+    role): PostgreSQL then refuses with insufficient_privilege. A freshly
+    created and migrated scratch database attracts autovacuum within
+    seconds, which made this fail intermittently. The worker finishes or
+    moves on quickly, so only that refusal is retried, briefly; anything
+    else, or a refusal that persists, fails the test as before.
+    """
+
+    import time
+
+    from sqlalchemy.exc import DBAPIError
+
+    for attempt in range(1, attempts + 1):
+        try:
+            connection.execute(
+                text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+            )
+
+            return
+        except DBAPIError as exc:
+            sqlstate = getattr(exc.orig, "sqlstate", None)
+
+            if sqlstate != "42501" or attempt == attempts:
+                raise
+
+            time.sleep(0.25)
+
+
+# --- the API's least-privilege role (SMM-024C-2) ---------------------------
+# Creating a role needs more than the owner role the suite runs as, so the
+# tests that need ai_smm_cc take a second URL to the SAME test database, as
+# a superuser of that (disposable) cluster. Without it they are skipped.
+
+
+@pytest.fixture(scope="session")
+def admin_database_url(database_url: str) -> str:
+    url = os.getenv(ADMIN_DB_ENV)
+
+    if not url:
+        pytest.skip(
+            f"{ADMIN_DB_ENV} is not set; the least-privilege tests create "
+            "a role and need a superuser of the disposable test cluster."
+        )
+
+    admin, suite = make_url(url), make_url(database_url)
+
+    if (admin.host, admin.port, admin.database) != (
+        suite.host,
+        suite.port,
+        suite.database,
+    ):
+        pytest.fail(
+            f"{ADMIN_DB_ENV} must point at the same server and database as "
+            f"{TEST_DB_ENV} ({suite.database!r}).",
+            pytrace=False,
+        )
+
+    return url
+
+
+@pytest.fixture(scope="session")
+def api_role(
+    engine: Engine, admin_database_url: str, database_url: str
+) -> Iterator[pg_roles.ApiRole]:
+    """ai_smm_cc, provisioned by the operator's grants file.
+
+    After `engine`: the grants are taken on the tables create_all made.
+    Retired by the operator's revoke file at the end of the session, which
+    also proves that file works -- it refuses while a session is open.
+    """
+
+    role = pg_roles.provision(admin_database_url, database_url)
+
+    yield role
+
+    pg_roles.retire(admin_database_url)
+
+    # Rollback stage 2 leaves every other role exactly as it found it.
+    assert pg_roles.snapshot_others(admin_database_url) == role.others_before
+
+
+@pytest.fixture(scope="session")
+def restricted_engine(api_role: pg_roles.ApiRole) -> Iterator[Engine]:
+    engine = create_db_engine(api_role.url, settings=_base_settings())
+
+    yield engine
+
+    engine.dispose()
+
+
+@pytest.fixture
+def restricted_session_factory(
+    restricted_engine: Engine,
+) -> sessionmaker[Session]:
+    return sessionmaker(
+        bind=restricted_engine, expire_on_commit=False, future=True
+    )
 
 
 @pytest.fixture
@@ -312,13 +421,37 @@ def api_settings(settings: Settings) -> Settings:
 
 
 @pytest.fixture
+def api_session_factory(
+    request: pytest.FixtureRequest, session_factory: sessionmaker[Session]
+) -> sessionmaker[Session]:
+    """The database identity the API under test connects with.
+
+    The owner role by default, like every other fixture. With
+    AI_SMM_TEST_API_ROLE=restricted, the API -- and only the API --
+    connects as ai_smm_cc, while fixtures keep seeding data as the owner:
+    that runs whole suites against the production privilege model.
+    tests/least_privilege/ does the same for the suites that apply.
+    """
+
+    mode = os.getenv(API_ROLE_ENV, "owner")
+
+    if mode == "restricted":
+        return request.getfixturevalue("restricted_session_factory")
+
+    if mode != "owner":
+        pytest.fail(f"{API_ROLE_ENV} must be 'owner' or 'restricted'")
+
+    return session_factory
+
+
+@pytest.fixture
 def api_app(
-    api_settings: Settings, session_factory: sessionmaker[Session]
+    api_settings: Settings, api_session_factory: sessionmaker[Session]
 ):
     from ai_smm.api.app import create_app
 
     return create_app(
-        api_settings, session_factory=session_factory, access_log=False
+        api_settings, session_factory=api_session_factory, access_log=False
     )
 
 

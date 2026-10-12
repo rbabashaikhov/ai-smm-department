@@ -27,6 +27,7 @@ import pytest
 import yaml
 
 from tests.cc_stub import (
+    FIXTURE_API_DSN,
     FIXTURE_DSN,
     FIXTURE_NETWORK,
     FIXTURE_VERSION,
@@ -42,6 +43,8 @@ WORKER_COMPOSE_PATH = ROOT / "compose.yaml"
 DEPLOY_DIR = ROOT / "deploy" / "control-center"
 WRAPPER = DEPLOY_DIR / "cc-compose.sh"
 SECRET_EXAMPLE = DEPLOY_DIR / "control-center.env.example"
+API_SECRET_EXAMPLE = DEPLOY_DIR / "control-center.api.env.example"
+VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_cc.verify.sql"
 INTERP_EXAMPLE = DEPLOY_DIR / "control-center.compose.env.example"
 TARGET_EXAMPLE = DEPLOY_DIR / "control-center.target.example"
 BACKUP = DEPLOY_DIR / "cc-db-backup.sh"
@@ -202,7 +205,11 @@ def test_startup_order(services: dict[str, Any]) -> None:
 
 
 def test_only_the_dedicated_env_file_is_read(services: dict[str, Any]) -> None:
-    for name in PYTHON_SERVICES:
+    # The API connects as its own restricted role (SMM-024C-2); only the
+    # one-shot tools that migrate and bootstrap keep the owner URL.
+    assert services["smm-api"]["env_file"] == ["control-center.api.env"]
+
+    for name in TOOL_SERVICES:
         assert services[name]["env_file"] == ["control-center.env"], name
 
     assert "env_file" not in services["smm-web"]
@@ -211,7 +218,44 @@ def test_only_the_dedicated_env_file_is_read(services: dict[str, Any]) -> None:
     uncommented = re.sub(r"#[^\n]*", "", text)
 
     assert "ai-smm.env" not in uncommented
-    assert ".env\n" not in uncommented.replace("control-center.env\n", "")
+    assert ".env\n" not in uncommented.replace(
+        "control-center.api.env\n", ""
+    ).replace("control-center.env\n", "")
+
+
+def test_the_gate_pins_the_files_of_this_release() -> None:
+    """cc-gate.sh pins compose and the verify file: keep the pins current.
+
+    Changing either file without updating its pin makes the API role gate
+    refuse `up` -- which is the point on a host, and this test says so in
+    the repository first.
+    """
+
+    import hashlib
+
+    gate = (DEPLOY_DIR / "cc-gate.sh").read_text(encoding="utf-8")
+
+    for name, path in (
+        ("CC_PINNED_COMPOSE_SHA256", COMPOSE_PATH),
+        ("CC_PINNED_VERIFY_SHA256", VERIFY_SQL),
+    ):
+        pinned = re.search(rf"^readonly {name}=([0-9a-f]{{64}})$", gate, re.M)
+
+        assert pinned, name
+        assert pinned.group(1) == hashlib.sha256(path.read_bytes()).hexdigest(), (
+            f"{name} is stale: update it to the sha256 of {path.name}"
+        )
+
+
+def test_api_secret_example_names_the_api_role() -> None:
+    assert _env_keys(API_SECRET_EXAMPLE) == ["AI_SMM_DATABASE_URL"]
+
+    text = API_SECRET_EXAMPLE.read_text(encoding="utf-8")
+
+    assert (
+        "AI_SMM_DATABASE_URL=postgresql+psycopg://ai_smm_cc:CHANGE_ME@"
+        "<postgres-container>:5432/ai_smm"
+    ) in text
 
 
 def test_safety_settings_are_literals(services: dict[str, Any]) -> None:
@@ -291,9 +335,11 @@ def test_filled_env_files_are_ignored_by_git() -> None:
 
     for path in (
         "deploy/control-center/control-center.env",
+        "deploy/control-center/control-center.api.env",
         "deploy/control-center/control-center.compose.env",
         "deploy/control-center/control-center.target",
         "control-center.env",
+        "control-center.api.env",
         "control-center.compose.env",
         "control-center.target",
     ):
@@ -303,7 +349,7 @@ def test_filled_env_files_are_ignored_by_git() -> None:
 
         assert result.returncode == 0, f"{path} would be committable"
 
-    for path in (SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE):
+    for path in (SECRET_EXAMPLE, API_SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE):
         result = subprocess.run(
             ["git", "check-ignore", "--quiet", str(path.relative_to(ROOT))],
             cwd=ROOT,
@@ -326,7 +372,8 @@ def test_env_files_never_enter_an_image() -> None:
     "path",
     [
         COMPOSE_PATH, WRAPPER, BACKUP, COMMON,
-        SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE,
+        SECRET_EXAMPLE, API_SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE,
+        *sorted((DEPLOY_DIR / "db").glob("*.sql")),
     ],
 )
 def test_packaging_files_hold_no_secret_looking_values(path: Path) -> None:
@@ -562,14 +609,18 @@ def test_rendered_ports_and_networks(deploy_dir: Path) -> None:
 
 @needs_compose
 def test_wrapper_config_never_prints_the_database_url(deploy_dir: Path) -> None:
-    password = FIXTURE_DSN.split(":")[2].split("@")[0]
+    passwords = [
+        dsn.split(":")[2].split("@")[0] for dsn in (FIXTURE_DSN, FIXTURE_API_DSN)
+    ]
 
     for args in ((), ("--json",), ("--json", "--with-tools"), ("--services",)):
         result = run_script(WRAPPER, deploy_dir, "config", *args)
 
         assert result.returncode == 0, (args, result.stderr)
-        assert password not in result.stdout, args
-        assert password not in result.stderr, args
+
+        for password in passwords:
+            assert password not in result.stdout, args
+            assert password not in result.stderr, args
 
 
 @needs_compose
@@ -591,10 +642,11 @@ def test_rendered_env_holds_only_the_fixture_database_url(
 
     services = json.loads(result.stdout)["services"]
 
-    for name in ("smm-api", "migrate"):
+    # The API as ai_smm_cc; migrate as the owner, the worker's URL.
+    for name, dsn in (("smm-api", FIXTURE_API_DSN), ("migrate", FIXTURE_DSN)):
         env = services[name]["environment"]
 
-        assert env["AI_SMM_DATABASE_URL"] == FIXTURE_DSN, name
+        assert env["AI_SMM_DATABASE_URL"] == dsn, name
         assert env["AI_SMM_API_MUTATIONS_ENABLED"] == "false", name
         assert env["THREADS_ACCESS_TOKEN"] == "", name
 
@@ -643,6 +695,9 @@ def test_bare_compose_would_be_renamed_by_a_dotenv(tmp_path: Path) -> None:
     (directory / "control-center.env").write_text(
         f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n", encoding="utf-8"
     )
+    (directory / "control-center.api.env").write_text(
+        f"AI_SMM_DATABASE_URL={FIXTURE_API_DSN}\n", encoding="utf-8"
+    )
 
     result = _compose_direct(
         directory, "-f", COMPOSE_PATH.name, "config", "--format", "json",
@@ -665,34 +720,42 @@ def test_env_file_cannot_override_the_literals(tmp_path: Path) -> None:
         f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n",
         encoding="utf-8",
     )
-    (directory / "control-center.env").write_text(
-        f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n"
+    overrides = (
         "AI_SMM_API_MUTATIONS_ENABLED=true\n"
         "AI_SMM_API_DOCS_ENABLED=true\n"
         "AI_SMM_DRY_RUN=false\n"
         "THREADS_ACCESS_TOKEN=fixture-not-a-token\n"
         "OPENAI_API_KEY=fixture-not-a-key\n"
-        "THREADS_API_BASE_URL=https://graph.threads.net\n",
-        encoding="utf-8",
+        "THREADS_API_BASE_URL=https://graph.threads.net\n"
     )
+
+    for name, dsn in (
+        ("control-center.env", FIXTURE_DSN),
+        ("control-center.api.env", FIXTURE_API_DSN),
+    ):
+        (directory / name).write_text(
+            f"AI_SMM_DATABASE_URL={dsn}\n" + overrides, encoding="utf-8"
+        )
 
     result = _compose_direct(
         directory,
         "-p", PROJECT, "-f", COMPOSE_PATH.name,
-        "--env-file", "interp.env", "config", "--format", "json",
+        "--env-file", "interp.env", "--profile", "cc-migrate",
+        "config", "--format", "json",
         home=tmp_path,
     )
 
     assert result.returncode == 0, result.stderr
 
-    env = json.loads(result.stdout)["services"]["smm-api"]["environment"]
+    for service in ("smm-api", "migrate"):
+        env = json.loads(result.stdout)["services"][service]["environment"]
 
-    assert env["AI_SMM_API_MUTATIONS_ENABLED"] == "false"
-    assert env["AI_SMM_API_DOCS_ENABLED"] == "false"
-    assert env["AI_SMM_DRY_RUN"] == "true"
-    assert env["THREADS_ACCESS_TOKEN"] == ""
-    assert env["OPENAI_API_KEY"] == ""
-    assert env["THREADS_API_BASE_URL"] == "http://127.0.0.1:9"
+        assert env["AI_SMM_API_MUTATIONS_ENABLED"] == "false", service
+        assert env["AI_SMM_API_DOCS_ENABLED"] == "false", service
+        assert env["AI_SMM_DRY_RUN"] == "true", service
+        assert env["THREADS_ACCESS_TOKEN"] == "", service
+        assert env["OPENAI_API_KEY"] == "", service
+        assert env["THREADS_API_BASE_URL"] == "http://127.0.0.1:9", service
 
 
 @needs_compose

@@ -107,7 +107,9 @@ Everything lives in `/root/ai-smm-control-center/`:
 | `cc-common.sh` | `deploy/control-center/cc-common.sh` | shared checks, sourced by both | 644 |
 | `cc-gate.sh` | `deploy/control-center/cc-gate.sh` | the PostgreSQL identity and queue gates (§2.1), sourced by both | 644 |
 | `control-center.compose.env` | `deploy/control-center/control-center.compose.env.example` | **exactly** `SMM_CC_VERSION` (the full 40-hex commit) and `SMM_CC_SHARED_NETWORK` — not secret | 644 |
-| `control-center.env` | `deploy/control-center/control-center.env.example` | **exactly** `AI_SMM_DATABASE_URL` — secret | **600** |
+| `control-center.env` | `deploy/control-center/control-center.env.example` | **exactly** `AI_SMM_DATABASE_URL` — secret. The owner role, byte-identical to the worker's URL; `migrate` and `cli` | **600** |
+| `control-center.api.env` | `deploy/control-center/control-center.api.env.example` | **exactly** `AI_SMM_DATABASE_URL` as `ai_smm_cc` — secret; `smm-api` only. **From SMM-024C-2 on, not yet in production** ([least-privilege-role.md](least-privilege-role.md)) | **600** |
+| `ai_smm_cc.verify.sql` | `deploy/control-center/db/ai_smm_cc.verify.sql` | the read-only check the API role gate runs before `up`/`restart`. From SMM-024C-2 on | 644 |
 | `control-center.target` | `deploy/control-center/control-center.target.example` | **exactly** `SMM_CC_DOCKER_HOST` (a `unix://` socket) and `SMM_CC_DOCKER_ENGINE_ID` — host-specific | 644 |
 | `control-center.identity` | `deploy/control-center/control-center.identity.example` | **exactly** the five confirmed PostgreSQL identifiers (§2.1), copied from the deployment record — host-specific | 644 |
 | `control-center.window` | `deploy/control-center/control-center.window.example` | **exactly** `SMM_CC_WINDOW_START` and `SMM_CC_WINDOW_END`, UTC `YYYY-MM-DDTHH:MM:SSZ` — the agreed migration window | 644 |
@@ -129,7 +131,7 @@ Everything except the database URL is a **literal** in
 
 | Variable | Value | Why |
 |---|---|---|
-| `AI_SMM_DATABASE_URL` | from `control-center.env` | the existing `ai_smm` database |
+| `AI_SMM_DATABASE_URL` | `smm-api`: from `control-center.api.env` (role `ai_smm_cc`, from SMM-024C-2 on); `migrate`, `cli`: from `control-center.env` (owner) | the existing `ai_smm` database |
 | `AI_SMM_API_MUTATIONS_ENABLED` | `false` | read-only for business operations, every role |
 | `AI_SMM_API_DOCS_ENABLED` | `false` | no `/docs`, `/redoc`, `/openapi.json` |
 | `AI_SMM_API_COOKIE_SECURE` | `false` | the transport is an SSH tunnel to plain-HTTP loopback; not every browser returns a `Secure` cookie there. The tunnel encrypts the session on the wire |
@@ -366,14 +368,22 @@ defend against a root operator who decides to bypass them.
 
 ### Database role
 
-The API connects as the existing role `ai_smm` — the database owner, the
-same role the worker uses. This is what SMM-024B.2 decided (§17.3 of the
-plan): it creates nothing on the shared instance. Its cost: the API's
-database credentials could do anything the worker's can, and the
-read-only guarantee rests on the application (the central mutation gate
-plus the service-level checks), not on database privileges. A dedicated
-least-privilege role is follow-up FU-024B3-1
-([follow-ups.md](follow-ups.md)).
+**As deployed on 2026-10-11:** the API connects as the existing role
+`ai_smm` — the database owner, the same role the worker uses. This is what
+SMM-024B.2 decided (§17.3 of the plan): it creates nothing on the shared
+instance. Its cost: the API's database credentials could do anything the
+worker's can, and the read-only guarantee rests on the application (the
+central mutation gate plus the service-level checks), not on database
+privileges.
+
+**From SMM-024C-2 on (designed and validated locally, not applied in
+production):** `smm-api` connects as `ai_smm_cc`, a role that can read
+and write only the session and audit rows of login/logout; PostgreSQL
+refuses every business change from it. `migrate` and `cli` keep the
+owner. The compose file and scripts of that release require
+`control-center.api.env` and run the API role gate before `up` and
+`restart`. Design, permission matrix, rollout and rollback:
+[least-privilege-role.md](least-privilege-role.md) (FU-024B3-1).
 
 ---
 

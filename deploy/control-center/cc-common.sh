@@ -17,6 +17,9 @@ readonly CC_PROJECT=ai-smm-control-center
 readonly CC_COMPOSE_FILE_NAME=compose.control-center.yml
 readonly CC_INTERP_FILE_NAME=control-center.compose.env
 readonly CC_SECRET_FILE_NAME=control-center.env
+# smm-api only: the least-privilege role's URL (SMM-024C-2).
+readonly CC_API_SECRET_FILE_NAME=control-center.api.env
+readonly CC_API_ROLE=ai_smm_cc
 readonly CC_TARGET_FILE_NAME=control-center.target
 readonly CC_REVISION_LABEL=org.opencontainers.image.revision
 
@@ -107,6 +110,22 @@ cc_load_secret() {
         || cc_die "$file is mode $mode; it holds the database password and must be 600"
 
     CC_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
+}
+
+# Sets CC_API_DSN from control-center.api.env, smm-api's file: exactly one
+# key, mode 600. Its role and its relation to the owner URL are checked by
+# the API role gate (cc_gate_api_role) before anything starts the API.
+cc_load_api_secret() {
+    local file="$CC_DIR/$CC_API_SECRET_FILE_NAME" mode
+
+    cc_require_file "$file"
+    cc_check_keys "$file" AI_SMM_DATABASE_URL
+
+    mode="$(stat -c '%a' "$file")"
+    (( (8#$mode & 8#077) == 0 )) \
+        || cc_die "$file is mode $mode; it holds the API's database password and must be 600"
+
+    CC_API_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
 }
 
 # Sets CC_DOCKER_HOST and CC_ENGINE_ID; refuses an ambiguous caller.

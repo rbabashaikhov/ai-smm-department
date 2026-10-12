@@ -50,6 +50,11 @@ FIXTURE_DB_OID = "16384"
 FIXTURE_DSN = (
     f"postgresql+psycopg://fixture:fixture-pw@{FIXTURE_PG_CONTAINER}:5432/ai_smm"
 )
+#: smm-api's URL: the API role, same container, port and database.
+FIXTURE_API_DSN = (
+    f"postgresql+psycopg://ai_smm_cc:fixture-api-pw@{FIXTURE_PG_CONTAINER}:5432/ai_smm"
+)
+VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_cc.verify.sql"
 FIXTURE_WINDOW = ("2026-10-11T10:00:00Z", "2026-10-11T12:00:00Z")
 FIXTURE_REVISION = "79731eadacd7"
 #: dump taken, restore-checked, off-host copy confirmed -- inside the window
@@ -61,6 +66,35 @@ IDENTITY_ANSWER = f"identity|{FIXTURE_SYSTEM_ID}|{FIXTURE_DB_OID}|5432|ai_smm"
 #: queue | in window | window length ok | publishing | lease | due | retry
 #: | published in margin | attempts | needs review | now
 QUEUE_QUIET = "queue|1|1|0|0|0|0|0|0|0|2026-10-11T10:30:00Z"
+
+
+
+def api_role_answer(*lines: str, checks: int = 240) -> str:
+    """ai_smm_cc.verify.sql output as psql -tA prints it: a passing role.
+
+    `lines` are added (a FAIL, an INFO); the END line counts them all.
+    """
+
+    body = [
+        "INFO|database.temporary|may create temporary tables (PUBLIC default)",
+        "PASS|role.attributes|super=false createrole=false createdb=false",
+        "PASS|role.exists|ai_smm_cc",
+        "PASS|role.member_of|none",
+        "PASS|role.owns_nothing|0 owned objects",
+        "PASS|role.password|set, SCRAM-SHA-256",
+        "PASS|schema.public.create|",
+        "PASS|table.publications.update|denied",
+        *lines,
+    ]
+    body += [
+        f"PASS|column.fixture.c{n}.update|denied"
+        for n in range(checks - len(body))
+    ]
+
+    return "\n".join([*body, f"END|checks|{len(body)}"])
+
+
+API_ROLE_PASS = api_role_answer()
 
 #: A minimal "custom format" archive as far as the scripts can tell.
 STUB_DUMP = b"PGDMP" + b"\x00stub-archive\x00" * 8
@@ -150,6 +184,20 @@ if argv[:1] == ["exec"]:
 
     if tool == "psql":
         sql = command[command.index("-c") + 1]
+        if "'checks'" in sql and "ai_smm_cc" in sql:
+            # ai_smm_cc.verify.sql. With role_sql_url: the file itself, run
+            # read-only against a real test database as its superuser.
+            if state.get("api_role_rc"):
+                fail("psql: error: connection to server failed", state["api_role_rc"])
+            if state.get("role_sql_url"):
+                import psycopg
+                options = " ".join(
+                    a.split("=", 1)[1] for a in argv if a.startswith("PGOPTIONS=")
+                )
+                with psycopg.connect(state["role_sql_url"], options=options) as conn:
+                    rows = conn.execute(sql).fetchall()
+                out("".join(row[0] + "\n" for row in rows))
+            out(state.get("api_role_answer", "") + "\n")
         queue_sql = "'queue'," in sql or (
             "ORDER BY id" in sql and "lease_expires_at" in sql
         )
@@ -284,6 +332,7 @@ class DockerStub:
             },
             "identity_answer": IDENTITY_ANSWER,
             "queue_answer": QUEUE_QUIET,
+            "api_role_answer": API_ROLE_PASS,
         }
         self.save()
 
@@ -341,6 +390,7 @@ def write_deploy_dir(
     version: str = FIXTURE_VERSION,
     network: str = FIXTURE_NETWORK,
     dsn: str = FIXTURE_DSN,
+    api_dsn: str = FIXTURE_API_DSN,
     identity: dict[str, str] | None = None,
     window: tuple[str, str] = FIXTURE_WINDOW,
     evidence: bool = True,
@@ -358,6 +408,12 @@ def write_deploy_dir(
     secret = directory / "control-center.env"
     secret.write_text(f"AI_SMM_DATABASE_URL={dsn}\n", encoding="utf-8")
     secret.chmod(0o600)
+
+    api_secret = directory / "control-center.api.env"
+    api_secret.write_text(f"AI_SMM_DATABASE_URL={api_dsn}\n", encoding="utf-8")
+    api_secret.chmod(0o600)
+
+    shutil.copy(VERIFY_SQL, directory / VERIFY_SQL.name)
 
     (directory / "control-center.target").write_text(
         f"SMM_CC_DOCKER_HOST={docker_host}\n"
