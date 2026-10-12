@@ -15,7 +15,12 @@
 #   compose.control-center.yml    the compose file, copied unchanged
 #   control-center.compose.env    exactly SMM_CC_VERSION (full 40-hex commit)
 #                                 and SMM_CC_SHARED_NETWORK
-#   control-center.env            exactly AI_SMM_DATABASE_URL, mode 600
+#   control-center.env            exactly AI_SMM_DATABASE_URL, mode 600: the
+#                                 owner role, the worker's URL (migrate, cli)
+#   control-center.api.env        exactly AI_SMM_DATABASE_URL, mode 600: the
+#                                 API's role ai_smm_cc (smm-api only)
+#   ai_smm_cc.verify.sql          deploy/control-center/db/, copied unchanged;
+#                                 run by the API role gate (cc-gate.sh)
 #   control-center.target         exactly SMM_CC_DOCKER_HOST (unix:// socket)
 #                                 and SMM_CC_DOCKER_ENGINE_ID
 #   control-center.identity       the recorded PostgreSQL identity (cc-gate.sh);
@@ -35,10 +40,12 @@
 # label EQUAL to SMM_CC_VERSION and the daemon's architecture. Before
 # anything that starts the API or the one-shot tools against the database
 # (up, restart, migrate upgrade|downgrade, create-owner) the deployment
-# gates (cc-gate.sh) must pass: the database is the recorded one; for a
-# schema change, the publication queue is quiet around the window; for an
-# upgrade, a verified dump of this database at this revision exists and a
-# copy of it was confirmed off the host. Fail closed, exit 2.
+# gates (cc-gate.sh) must pass: the database is the recorded one; before
+# the API starts (up, restart), its role is ai_smm_cc with exactly the
+# designed privileges; for a schema change, the publication queue is quiet
+# around the window; for an upgrade, a verified dump of this database at
+# this revision exists and a copy of it was confirmed off the host. Fail
+# closed, exit 2.
 #
 # Why: Compose takes its project name from a .env file or COMPOSE_* in the
 # shell before the file's own `name:`, and the Docker CLI picks its daemon
@@ -65,14 +72,15 @@ usage: cc-compose.sh <verb> [options]
                                   render the configuration; never prints the
                                   database URL (env files are not resolved)
   up                              start smm-api and smm-web, wait until healthy;
-                                  runs the identity gate first
+                                  runs the identity and API role gates first
   down [--remove-orphans]         stop and remove this project's containers
                                   and networks (never volumes or images)
   ps [-a] [-q] [--services] [SERVICE...]
   logs [--since N{s|m|h}] [--tail N] [--timestamps] [smm-api|smm-web...]
-  restart smm-api|smm-web...      runs the identity gate first
-  preflight                       the PostgreSQL identity and publication-queue
-                                  gates only, read-only; exit 2 if either fails
+  restart smm-api|smm-web...      runs the identity and API role gates first
+  preflight                       the PostgreSQL identity, API role and
+                                  publication-queue gates only, read-only;
+                                  exit 2 if any fails
   migrate current | heads         alembic, read-only
   migrate upgrade REVISION        REVISION: a 12-hex alembic id, never head/+N;
                                   runs both gates and the backup evidence gate
@@ -109,6 +117,7 @@ needs_daemon=true
 needs_images=false
 # cc-gate.sh: identity of the database; the queue as well before a schema change
 gate_identity=false
+gate_api_role=false
 gate_queue=false
 gate_backup=false
 invalidate_evidence=false
@@ -155,6 +164,7 @@ case "$verb" in
     preflight)
         [[ $# -eq 0 ]] || cc_die "preflight takes no arguments; the window is in $CC_WINDOW_FILE_NAME"
         gate_identity=true
+        gate_api_role=true
         gate_queue=true
         ;;
 
@@ -162,6 +172,7 @@ case "$verb" in
         [[ $# -eq 0 ]] || cc_die "up takes no arguments; it starts smm-api and smm-web only"
         needs_images=true
         gate_identity=true
+        gate_api_role=true
         compose_args=(up --detach --wait --wait-timeout 180 --no-build --pull never smm-api smm-web)
         ;;
 
@@ -242,6 +253,7 @@ case "$verb" in
         [[ $# -gt 0 ]] || cc_die "restart: name smm-api and/or smm-web"
         needs_images=true
         gate_identity=true
+        gate_api_role=true
 
         for service in "$@"; do
             in_list "$service" $HTTP_SERVICES || cc_die "restart: only smm-api or smm-web, not '$service'"
@@ -342,13 +354,16 @@ cc_load_dir "$here"
 compose_file="$CC_DIR/$CC_COMPOSE_FILE_NAME"
 interp_file="$CC_DIR/$CC_INTERP_FILE_NAME"
 secret_file="$CC_DIR/$CC_SECRET_FILE_NAME"
+api_secret_file="$CC_DIR/$CC_API_SECRET_FILE_NAME"
 
-for required in "$compose_file" "$interp_file" "$secret_file"; do
+# Every verb: Compose cannot load the project without smm-api's env file.
+for required in "$compose_file" "$interp_file" "$secret_file" "$api_secret_file"; do
     cc_require_file "$required"
 done
 
 cc_load_compose_env
 cc_load_secret
+cc_load_api_secret
 
 version="$CC_VERSION"
 network="$CC_NETWORK"
@@ -390,6 +405,10 @@ fi
 
 if [[ "$gate_identity" == true ]]; then
     cc_gate_identity "$network"
+fi
+
+if [[ "$gate_api_role" == true ]]; then
+    cc_gate_api_role
 fi
 
 if [[ "$gate_queue" == true ]]; then

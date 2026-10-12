@@ -25,10 +25,12 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from ai_smm.config import Settings
 from ai_smm.db.models import User, UserSession
+from ai_smm.logging_setup import get_logger
 from ai_smm.security.passwords import (
     hash_password,
     password_needs_rehash,
@@ -41,6 +43,13 @@ from ai_smm.security.tokens import (
     tokens_equal,
 )
 
+
+logger = get_logger(__name__)
+
+#: SQLSTATE insufficient_privilege: the one database error an optional hash
+#: upgrade may absorb. The Control Center API's role (ai_smm_cc) is denied
+#: UPDATE on users.password_hash on purpose (docs/least-privilege-role.md).
+INSUFFICIENT_PRIVILEGE = "42501"
 
 #: The only cookie the API sets. HttpOnly, SameSite=Lax, Path=/, and
 #: Secure unless AI_SMM_API_COOKIE_SECURE says otherwise.
@@ -96,9 +105,51 @@ def authenticate(
         return None
 
     if password_needs_rehash(user.password_hash):
-        user.password_hash = hash_password(password)
+        _upgrade_password_hash(db, user=user, password=password)
 
     return user
+
+
+def _upgrade_password_hash(db: Session, *, user: User, password: str) -> bool:
+    """Store a hash with the current Argon2 parameters, if this role may.
+
+    Optional, and never at the cost of the login: the old hash still
+    verifies. The write runs in a SAVEPOINT of the login transaction, so a
+    refusal rolls back the upgrade alone and the session and audit rows
+    that follow are written as usual. Only insufficient_privilege is
+    absorbed -- the expected answer to the API's least-privilege role; any
+    other database error propagates and fails the login as before.
+
+    The plaintext exists only here, at login, so the hash cannot be
+    upgraded anywhere else. Under a role that may not write it, it stays
+    as it is until the password is set again by an operator.
+    """
+
+    new_hash = hash_password(password)
+
+    try:
+        # Nothing else is pending at this point of a login, so the flush
+        # inside the savepoint writes the hash and nothing more.
+        with db.begin_nested():
+            user.password_hash = new_hash
+            db.flush()
+    except DBAPIError as exc:
+        if getattr(exc.orig, "sqlstate", None) != INSUFFICIENT_PRIVILEGE:
+            raise
+
+        logger.warning(
+            "Password hash upgrade skipped: not permitted for this role",
+            extra={
+                "context": {
+                    "user_id": str(user.id),
+                    "error_type": type(exc.orig).__name__,
+                }
+            },
+        )
+
+        return False
+
+    return True
 
 
 _DECOY_HASH: str | None = None

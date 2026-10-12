@@ -27,8 +27,10 @@
 #     loaded on the host; this file can only run what is already there,
 #     and pull_policy: never stops Compose from fetching a same-named
 #     image from a public registry;
-#   * the worker's ai-smm.env and .env -- the only env_file is
-#     control-center.env, which holds the database URL and nothing else;
+#   * the worker's ai-smm.env and .env -- the env files hold one database
+#     URL each and nothing else: control-center.api.env for smm-api (role
+#     ai_smm_cc, SMM-024C-2), control-center.env for migrate and cli (the
+#     owner role, the same URL as the worker);
 #   * migrations on start -- `migrate` is a one-shot operator command
 #     behind its own profile, with no default command;
 #   * Docker socket, bind mounts, volumes, public routes.
@@ -50,9 +52,9 @@ x-logging: &logging
 # Shared by the API and the one-shot tools that run its image.
 #
 # Every safety-relevant value is a LITERAL. `environment:` takes
-# precedence over `env_file:`, so even a control-center.env that wrongly
-# carried a Threads token or turned mutations on could not change any of
-# these. Only AI_SMM_DATABASE_URL comes from control-center.env.
+# precedence over `env_file:`, so even an env file that wrongly carried a
+# Threads token or turned mutations on could not change any of these.
+# Only AI_SMM_DATABASE_URL comes from the env files.
 x-app-env: &app-env
   TZ: UTC
   # Business mutations off for every role. Login/logout still write the
@@ -99,8 +101,14 @@ services:
     user: "10001:10001"
     tmpfs:
       - /tmp:size=64m,mode=1777
+    # The API's own least-privilege role, ai_smm_cc: reads, plus only the
+    # session and audit writes login/logout need. PostgreSQL refuses every
+    # business change from it, whatever the application does
+    # (docs/least-privilege-role.md). `up` and `restart` refuse unless the
+    # role checks out (cc-gate.sh, ai_smm_cc.verify.sql). Never the owner
+    # URL of control-center.env.
     env_file:
-      - control-center.env
+      - control-center.api.env
     environment:
       <<: *app-env
       # Visible in pg_stat_activity on the shared instance.

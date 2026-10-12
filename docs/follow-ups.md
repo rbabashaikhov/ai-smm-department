@@ -24,8 +24,12 @@ mandatory condition for a later step, named in its row.
 
 | FU | Title | Status | Priority | Blocks business mutations? |
 |---|---|---|---|---|
-| [FU-024B3-1](#fu-024b3-1--a-least-privilege-database-role-for-the-api) | Least-privilege PostgreSQL role for the API | open | **P1** | **Yes** — today the read-only guarantee rests on application code only; with mutations on, the API would hold owner (DDL) rights |
+| [FU-024B3-1](#fu-024b3-1--a-least-privilege-database-role-for-the-api) | Least-privilege PostgreSQL role for the API | designed and validated locally (SMM-024C-2A); production rollout pending owner approval | **P1** | **Yes** — today the read-only guarantee rests on application code only; with mutations on, the API would hold owner (DDL) rights |
 | [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open | **P1** | **Yes** — this is the check that precedes the switch |
+| [FU-024C2-1](#fu-024c2-1--session-forgery-through-the-apis-database-connection) | Session forgery through the API's database connection | open, accepted for read-only mode | **P1** | **Yes** — a forged owner session could schedule a post the LIVE worker sends |
+| [FU-024C2-2](#fu-024c2-2--authenticity-of-audit-actor-and-action) | Authenticity of audit actor/action | open, accepted for read-only mode | **P1** | **Yes** — business actions must be attributable |
+| [FU-024C2-3](#fu-024c2-3--a-privilege-model-for-business-mutations) | Privilege model for business mutations (SMM-025) | open | **P1** | **Yes** — with `ai_smm_cc`, enabling mutations fails closed until it exists |
+| [FU-024C2-4](#fu-024c2-4--flush-before-the-savepoint-of-the-optional-hash-upgrade) | Flush before the SAVEPOINT of the optional hash upgrade | open | P2 | No — fail-closed today; diagnostics and robustness |
 | [FU-024B4A-1](#fu-024b4a-1--the-gap-between-the-queue-gate-and-the-first-ddl-statement) | Queue gate → DDL gap (TOCTOU) | open | **migration gate** | No for the current read-only UI. **Mandatory before any further migration while the queue can be written** (mutations on, or any other writer active) |
 | [FU-024B2-2](#fu-024b2-2--validate-worker_mode_source-when-a-worker-heartbeat-is-introduced) | Source and reliability of the worker mode | open | P2 | No — the UI shows `UNKNOWN` with a warning; still wanted soon, as the worker is LIVE |
 | [FU-024C1-1](#fu-024c1-1--the-api-connects-to-postgresql-as-ai-smmworker-1) | API's `application_name` in PostgreSQL | open | P2 | No — observability only |
@@ -181,8 +185,19 @@ blocks the read-only deployment; each changes what a later step may do.
 
 ### FU-024B3-1 — A least-privilege database role for the API
 
-**Status:** open. **Needs:** a write to the shared PostgreSQL instance
-(creating a role), which requires separate approval.
+**Status:** designed and validated locally in SMM-024C-2A (2026-10-12):
+[least-privilege-role.md](least-privilege-role.md). **Still needs:** the
+production rollout there (§7) — a write to the shared PostgreSQL instance
+(creating a role), the credential, and the switch of `smm-api`, each
+requiring separate owner approval. The read-only grants below were
+refined: `users` and `user_sessions` writes are column-level, the
+`user_sessions` insert includes `revoked_at` (the ORM always sends it),
+and — after the SMM-024C-2A security review — **no** `UPDATE` on
+`users.password_hash`: the optional Argon2 upgrade at login now runs in a
+SAVEPOINT and is skipped for the role, which changes `auth.py` and
+therefore needs rebuilt images. Accepted residual risks (session creation
+for any user, unauthenticated audit actor/action) are listed in
+[least-privilege-role.md §4.1–4.2](least-privilege-role.md#41-sessions-what-is-and-is-not-guaranteed).
 
 The API connects as `ai_smm`, the database owner, the same role the
 worker and the migrations use. The read-only guarantee therefore rests on
@@ -462,6 +477,8 @@ will run with mutations on:
 - the command ↔ worker concurrency guarantees (row lock, `SKIP LOCKED`,
   lease) and the duplicate-publication barriers;
 - the database role of FU-024B3-1 in place and its grants checked;
+- FU-024C2-1 (session forgery), FU-024C2-2 (audit authenticity) and
+  FU-024C2-3 (the mutation privilege model) closed;
 - a rehearsal of the enable / disable switch on a production-like copy,
   including the rollback (flag back to `false`) and what the worker does
   with anything scheduled meanwhile.
@@ -469,3 +486,110 @@ will run with mutations on:
 Done when the checklist above is executed and recorded for that release,
 the result is reviewed, and the owner approves the compose change
 separately.
+
+---
+
+## From SMM-024C-2A (least-privilege role, 2026-10-12)
+
+Recorded when SMM-024C-2A-FIX was accepted with follow-ups. Background,
+tests and evidence: [least-privilege-role.md](least-privilege-role.md)
+§4.1–4.3 and §6. None of them blocks switching the **read-only** API to
+`ai_smm_cc`: each risk below exists today, in a larger form, while the
+API connects as the owner. The first three block business mutations.
+
+### FU-024C2-1 — Session forgery through the API's database connection
+
+**Status:** open, accepted for the read-only mode. **Priority:** P1.
+**Blocks mutations:** yes.
+
+Login needs `INSERT` on `user_sessions`, so whoever controls the API's
+database connection (code execution in the API, injected SQL) can create
+a session for **any** user, with a token it knows and any `expires_at`;
+the application then accepts it. `FOREIGN KEY (user_id)` only requires
+the user to exist and `UNIQUE (token_hash)` only a new token — neither
+prevents this. The role can also revoke or keep alive any session
+(`UPDATE (revoked_at, last_seen_at)` is not limited to one's own rows).
+Proved by `test_residual_risk_the_role_can_mint_a_session_for_any_user`
+and `test_residual_risk_the_role_can_revoke_or_refresh_any_session`.
+
+In place: detection only — `deploy/control-center/db/session-anomalies.sql`
+(lifetime, future timestamps, no matching `auth.login` audit row); it
+misses a forgery that also writes a consistent audit row.
+
+Options, smallest first: (a) application only, no migration — stop
+sending `created_at`/`last_seen_at` on insert (both have
+`server_default now()`) and take `INSERT` on them away, so a forged
+session cannot be backdated; reject implausible sessions in
+`resolve_session` (lifetime, future timestamps); (b) migration — create
+sessions through a `SECURITY DEFINER` function owned by the owner, or a
+`BEFORE INSERT` trigger enforcing server timestamps and the lifetime;
+(c) row-level restriction of the session `UPDATE`s (RLS or a function).
+None of them stops a compromised API from choosing *which* user: that is
+inherent while the API itself decides that a password was correct.
+
+Done when the chosen option is implemented and tested on the role, and
+the decision on the inherent remainder is recorded before mutations.
+
+### FU-024C2-2 — Authenticity of audit actor and action
+
+**Status:** open, accepted for the read-only mode. **Priority:** P1.
+**Blocks mutations:** yes.
+
+Guaranteed today towards `ai_smm_cc`: existing audit entries cannot be
+changed or removed (no `UPDATE`/`DELETE`/`TRUNCATE`), `at` is the
+server's `now()` and `id` comes from the sequence only. **Not**
+guaranteed: who wrote an entry. The role writes any `actor`, `action`,
+`subject`, `details` — e.g. `worker:worker-1` / `publication.published`
+(`test_residual_risk_the_role_can_write_any_actor_and_action`). Nothing
+in the database records or verifies the author, structurally or
+cryptographically; that the API writes only `auth.*` entries is a
+property of its code.
+
+Proposed (migration, separate decision): a column `written_by name NOT
+NULL DEFAULT current_user` without `INSERT` privilege for the role, plus
+`CHECK (written_by <> 'ai_smm_cc' OR (action LIKE 'auth.%' AND (actor =
+'anonymous' OR actor LIKE 'user:%')))`. Tamper evidence against the
+owner (hash chaining, off-host shipping) is a further, independent step.
+
+Done when API-written rows are structurally distinguishable and confined
+to their event types, tested on the role.
+
+### FU-024C2-3 — A privilege model for business mutations
+
+**Status:** open. **Priority:** P1. **Blocks mutations:** yes.
+
+`ai_smm_cc` is designed for the read-only business mode only: with it,
+`AI_SMM_API_MUTATIONS_ENABLED=true` makes every business command fail in
+PostgreSQL (`test_every_business_command_fails_in_the_database_without_the_gate`).
+Enabling mutations therefore needs a new, reviewed privilege model — a
+second role or a reviewed extension — with its own grants, verify matrix,
+gate and tests, built from the inventory of refused statements in
+least-privilege-role.md §6.2 and the constraints in §9: column-level
+`UPDATE` on `publications` limited to what the three commands write,
+`INSERT`-only on the append-only editorial tables, no `DELETE`/DDL, no
+access to `publication_attempts` writes or `alembic_version`, and the
+command ↔ worker locking re-verified under the new role. FU-024C2-1 and
+FU-024C2-2 are prerequisites.
+
+Done when that model is designed, validated locally like SMM-024C-2A,
+and part of FU-024C1-5's checklist for the release that enables
+mutations.
+
+### FU-024C2-4 — Flush before the SAVEPOINT of the optional hash upgrade
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no.
+
+`ai_smm.application.auth._upgrade_password_hash` absorbs only SQLSTATE
+42501, and inside its SAVEPOINT the only statement is the hash
+`UPDATE`. But `Session.begin_nested()` first flushes anything already
+pending, in the *outer* transaction; a 42501 there is caught by the same
+`except`. Measured: the outer transaction is already rolled back, the
+logging line's access to `user.id` raises `PendingRollbackError`, and
+the request fails with 500 — fail-closed, but with the wrong error, and
+without that attribute access it would log a false "upgrade skipped"
+before failing on the next statement. Unreachable in the current login
+(nothing is pending when `authenticate()` runs), but not enforced by the
+function.
+
+Fix: an explicit `db.flush()` before the `try`, the user id captured
+before it, and a test with a pending change the role may not make.

@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, inspect, text
 
 from ai_smm.db.models import Base
 from alembic import command
+from tests.conftest import drop_scratch_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,9 +38,7 @@ def migration_db(database_url: str):
     )
 
     with admin_engine.connect() as connection:
-        connection.execute(
-            text(f'DROP DATABASE IF EXISTS "{target_db}" WITH (FORCE)')
-        )
+        drop_scratch_database(connection, target_db)
         connection.execute(text(f'CREATE DATABASE "{target_db}"'))
 
     admin_engine.dispose()
@@ -53,9 +52,7 @@ def migration_db(database_url: str):
     )
 
     with admin_engine.connect() as connection:
-        connection.execute(
-            text(f'DROP DATABASE IF EXISTS "{target_db}" WITH (FORCE)')
-        )
+        drop_scratch_database(connection, target_db)
 
     admin_engine.dispose()
 

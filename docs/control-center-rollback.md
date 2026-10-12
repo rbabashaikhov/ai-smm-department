@@ -74,6 +74,14 @@ docker inspect ai-smm-worker --format \
 
 This leaves the database, its schema and the two images in place.
 
+### After SMM-024C-2 (the API's own database role)
+
+Once `smm-api` connects as `ai_smm_cc`, putting it back on the owner URL
+— and, separately, disabling or retiring the role — is
+[least-privilege-role.md §7.8](least-privilege-role.md#78-rollback)
+(RB-1 to RB-3). A readiness 503 or a `permission denied` in the API log
+right after that switch is RB-1's trigger, not §2 below.
+
 ---
 
 ## 2. Web or API failure

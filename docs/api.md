@@ -901,6 +901,27 @@ real application through its factory against a disposable database;
 nothing is mocked except, where a test needs an expired session, the
 stored timestamps.
 
+The API's least-privilege database role `ai_smm_cc`
+([least-privilege-role.md](least-privilege-role.md)) has its own suites:
+`tests/test_db_least_privilege.py` (the privilege matrix as effective
+privileges, each grant's necessity, every business change refused by
+PostgreSQL even with the gate off, the migration tooling),
+`tests/test_control_center_api_role_gate.py` (the deployment gate), and
+`tests/least_privilege/`, which re-runs the read, session and read-only
+suites with the API connected as the role. They create the role with the
+operator's own SQL files and need a superuser of the disposable test
+cluster:
+
+```bash
+AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:...@127.0.0.1:5432/ai_smm_test \
+AI_SMM_TEST_ADMIN_DATABASE_URL=postgresql+psycopg://postgres:...@127.0.0.1:5432/ai_smm_test \
+  pytest -q
+# Every suite, with only the API connected as ai_smm_cc. The suites that
+# send business commands with mutations ON fail by design (PostgreSQL
+# refuses them); everything else passes.
+AI_SMM_TEST_API_ROLE=restricted pytest -q
+```
+
 `tests/test_api_command_concurrency.py` runs real contention against
 PostgreSQL — the actual `queue.claim_due_publication` with its
 `FOR UPDATE SKIP LOCKED`, every participant on its own connection, and
