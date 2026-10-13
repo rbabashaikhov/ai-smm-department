@@ -25,7 +25,13 @@ from ai_smm.db.models import (
 )
 from ai_smm.db.session import session_scope
 from ai_smm.importer import import_json_queue
+from ai_smm.local_env import load_local_dotenv
 from ai_smm.logging_setup import setup_logging
+from ai_smm.publishing.routing import (
+    RouteUnavailable,
+    build_opener,
+    check_route_ready,
+)
 from ai_smm.publishing.service import (
     publish_claimed_publication,
     validate_ready_to_publish,
@@ -347,6 +353,17 @@ def cmd_schedule(args: argparse.Namespace, settings: Settings) -> int:
 
             return 1
 
+        try:
+            check_route_ready(session, publication, settings)
+        except RouteUnavailable as exc:
+            print(
+                f"ERROR: not scheduled -- no usable publishing route "
+                f"({exc.code}): {exc}",
+                file=sys.stderr,
+            )
+
+            return 1
+
         when = _parse_when(args.at, settings)
 
         try:
@@ -523,6 +540,17 @@ def cmd_publish_now(args: argparse.Namespace, settings: Settings) -> int:
 
             return 1
 
+        try:
+            check_route_ready(session, publication, run_settings)
+        except RouteUnavailable as exc:
+            print(
+                f"No usable publishing route ({exc.code}): {exc} "
+                "Nothing was sent.",
+                file=sys.stderr,
+            )
+
+            return 1
+
         publication.scheduled_at = min(
             publication.scheduled_at or utcnow(), utcnow()
         )
@@ -552,6 +580,7 @@ def cmd_publish_now(args: argparse.Namespace, settings: Settings) -> int:
             settings=run_settings,
             publisher_factory=_threads_factory,
             media_root=run_settings.media_root,
+            opener=build_opener(run_settings),
         )
 
         print(f"result : {outcome.status}")
@@ -883,13 +912,26 @@ def cmd_import(args: argparse.Namespace, settings: Settings) -> int:
 
         return 1
 
-    with session_scope(settings) as session:
-        report = import_json_queue(
-            session,
-            queue_path=queue_path,
-            actor=_actor(),
-            project_display_name=args.display_name,
+    from ai_smm.importer import UnknownProjectError
+
+    if args.display_name:
+        print(
+            "warning: --display-name is ignored; the importer no longer "
+            "renames projects (edit the project instead).",
+            file=sys.stderr,
         )
+
+    try:
+        with session_scope(settings) as session:
+            report = import_json_queue(
+                session,
+                queue_path=queue_path,
+                actor=_actor(),
+            )
+    except UnknownProjectError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+
+        return 1
 
     print(f"created: {report.created}")
     print(f"updated: {report.updated}")
@@ -955,6 +997,7 @@ def cmd_user_create_owner(
     from ai_smm.application.users import (
         DuplicateUserError,
         InvalidEmailError,
+        ProjectAlreadyExistsError,
         ProjectNotFoundError,
         create_owner,
         normalize_email,
@@ -996,16 +1039,25 @@ def cmd_user_create_owner(
                 display_name=display_name,
                 project_id=args.project,
                 password=password,
+                create_project_named=args.create_project,
             )
             user_id = str(user.id)
     except WeakPasswordError as exc:
         print(f"error: {exc}")
 
         return 2
-    except (DuplicateUserError, ProjectNotFoundError) as exc:
+    except (
+        DuplicateUserError,
+        ProjectNotFoundError,
+        ProjectAlreadyExistsError,
+    ) as exc:
         print(f"error: {exc}")
 
         return 1
+    except ValueError as exc:  # an invalid project id or name
+        print(f"error: {exc}")
+
+        return 2
     finally:
         # The plaintext is of no further use; drop the local reference
         # rather than leave it bound for the rest of the process.
@@ -1013,11 +1065,289 @@ def cmd_user_create_owner(
 
     print(f"owner created: {display_name} <{email}>")
     print(f"user id       : {user_id}")
-    print(f"project       : {args.project}")
+    print(
+        f"project       : {args.project}"
+        + (" (created)" if args.create_project else "")
+    )
     print("role          : owner")
     print("Audit entry written as actor system:bootstrap.")
 
     return 0
+
+
+def cmd_project_create(args: argparse.Namespace, settings: Settings) -> int:
+    """Create a project and make an existing user its owner.
+
+    The same service as POST /api/v1/projects, so the project, the owner
+    membership, the settings row and the audit entry land together or not
+    at all. The operator CLI may create the very first project (nobody
+    owns one yet), which the API may not.
+    """
+
+    from ai_smm.application.projects import (
+        ProjectAlreadyExists,
+        ProjectInput,
+        ProjectLimitReached,
+        ProjectNameTaken,
+        create_project,
+    )
+    from ai_smm.application.users import (
+        InvalidEmailError,
+        get_user_by_email,
+        normalize_email,
+    )
+
+    try:
+        email = normalize_email(args.owner_email)
+    except InvalidEmailError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+
+        return 2
+
+    try:
+        with session_scope(settings) as session:
+            owner = get_user_by_email(session, email)
+
+            if owner is None:
+                print(
+                    f"error: no user {email!r}. Create one with "
+                    "`ai-smm user create-owner` for an existing project, "
+                    "or create this project first with an existing user.",
+                    file=sys.stderr,
+                )
+
+                return 1
+
+            result = create_project(
+                session,
+                actor_user=owner,
+                actor=_actor(),
+                require_existing_ownership=False,
+                data=ProjectInput(
+                    id=args.id,
+                    display_name=args.display_name,
+                    description=args.description or "",
+                    default_timezone=args.timezone,
+                    default_language=args.language,
+                ),
+            )
+            project_id = result.project.id
+            created = result.created
+    except (ProjectAlreadyExists, ProjectNameTaken, ProjectLimitReached) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+
+        return 1
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+
+        return 2
+
+    print(
+        f"project {'created' if created else 'already exists (unchanged)'}: "
+        f"{project_id}"
+    )
+    print(f"owner  : {email}")
+    print(f"knowledge: knowledge/projects/{project_id}/")
+
+    if args.scaffold_knowledge:
+        _scaffold_knowledge(project_id, args.display_name, settings)
+
+    return 0
+
+
+def _scaffold_knowledge(
+    project_id: str, display_name: str, settings: Settings
+) -> None:
+    """An empty knowledge folder in the local checkout. Never overwrites."""
+
+    directory = settings.knowledge_root / "projects" / project_id
+
+    if directory.exists():
+        print(f"knowledge folder exists, left as is: {directory}")
+
+        return
+
+    (directory / "assets").mkdir(parents=True)
+    (directory / "README.md").write_text(
+        f"# {display_name}\n\nKnowledge base of project `{project_id}`. "
+        "Add Markdown, text or YAML files here; images go to assets/.\n",
+        encoding="utf-8",
+    )
+    (directory / "project.yaml").write_text(
+        f"name: {json.dumps(display_name, ensure_ascii=False)}\n"
+        f"created: '{utcnow().date().isoformat()}'\n",
+        encoding="utf-8",
+    )
+    print(f"knowledge folder created: {directory}")
+
+
+def cmd_credentials_keygen(args: argparse.Namespace, settings: Settings) -> int:
+    """Generate the credential key pair.
+
+    The private key file is created with mode 600 and O_EXCL (an existing
+    file is never overwritten). It belongs next to the worker and outside
+    the database and its backups. The public key is printed for the API's
+    AI_SMM_CREDENTIALS_PUBLIC_KEY; it is not secret.
+    """
+
+    from ai_smm.security.credentials import (
+        encode_public_key,
+        generate_key_pair,
+        key_id_for,
+        write_private_key_file,
+    )
+
+    path = Path(args.private_key_file).expanduser()
+    private, public = generate_key_pair()
+
+    try:
+        write_private_key_file(path, private)
+    except FileExistsError:
+        print(f"error: {path} exists; refusing to overwrite a key.", file=sys.stderr)
+
+        return 1
+
+    print(f"private key written (mode 600): {path}")
+    print(f"key id                          : {key_id_for(public)}")
+    print(f"AI_SMM_CREDENTIALS_PUBLIC_KEY={encode_public_key(public)}")
+
+    return 0
+
+
+def cmd_accounts_verify(args: argparse.Namespace, settings: Settings) -> int:
+    """Re-test the stored credential of one account (worker host only).
+
+    Decrypts with the worker's private key and asks the platform who the
+    token belongs to (GET /me, read-only). Prints the result; the token
+    itself is never printed. Nothing is published.
+    """
+
+    import uuid as uuid_module
+
+    from ai_smm.db.models import (
+        VERIFICATION_VERIFIED,
+        SocialAccount,
+    )
+    from ai_smm.publishing.routing import active_credential
+    from ai_smm.publishing.threads import (
+        CredentialRejected,
+        IdentityUnavailable,
+        fetch_identity,
+    )
+    from ai_smm.security.credentials import (
+        CredentialCryptoError,
+        SealedCredential,
+        associated_data,
+    )
+
+    try:
+        account_id = uuid_module.UUID(args.account)
+    except ValueError:
+        print("error: not an account id.", file=sys.stderr)
+
+        return 2
+
+    opener = build_opener(settings)
+
+    if opener is None:
+        print(
+            "error: AI_SMM_CREDENTIALS_PRIVATE_KEY_FILES is not configured.",
+            file=sys.stderr,
+        )
+
+        return 1
+
+    with session_scope(settings) as session:
+        account = session.get(SocialAccount, account_id)
+
+        if account is None:
+            print("error: no such account.", file=sys.stderr)
+
+            return 1
+
+        credential = active_credential(session, account.id)
+
+        if credential is None:
+            print("error: the account has no active credential.", file=sys.stderr)
+
+            return 1
+
+        try:
+            token = opener.open(
+                SealedCredential(
+                    scheme=credential.scheme,
+                    key_id=credential.key_id,
+                    ephemeral_public_key=bytes(credential.ephemeral_public_key),
+                    nonce=bytes(credential.nonce),
+                    ciphertext=bytes(credential.ciphertext),
+                ),
+                aad=associated_data(
+                    account_id=str(account.id),
+                    credential_id=str(credential.id),
+                ),
+            )
+            identity = fetch_identity(token)
+        except CredentialCryptoError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+
+            return 1
+        except (CredentialRejected, IdentityUnavailable) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+
+            return 1
+
+        matches = identity.account_id == account.external_account_id
+        print(f"account     : {account.display_name} ({account.id})")
+        print(f"fingerprint : {credential.fingerprint}")
+        print(f"identity    : {identity.account_id} @{identity.username or '-'}")
+        print(f"bound to    : {account.external_account_id or '-'}")
+        print(f"result      : {'OK' if matches else 'MISMATCH'}")
+
+        if matches:
+            credential.verification_status = VERIFICATION_VERIFIED
+            credential.verified_at = utcnow()
+            record_audit(
+                session,
+                actor=_actor(),
+                action="social_account.credential_verified",
+                subject=f"social_account:{account.id}",
+                details={
+                    "credential_id": str(credential.id),
+                    "fingerprint": credential.fingerprint,
+                },
+            )
+
+        return 0 if matches else 1
+
+
+def cmd_preflight_worker(args: argparse.Namespace, settings: Settings) -> int:
+    """The worker's start-up preflight, read-only, for an operator.
+
+    Run with the environment the new worker will get, before it is
+    switched on. Exit 0: the worker would start; exit 1: it would refuse
+    to (and nothing should be switched). Prints no secret.
+    """
+
+    from ai_smm.preflight import failures, worker_preflight
+
+    try:
+        opener = build_opener(settings)
+    except Exception as exc:  # a bad key file is itself the finding
+        print(f"FAIL|accounts.private_key_files|{exc}")
+
+        return 1
+
+    with session_scope(settings) as session:
+        checks = worker_preflight(session, settings, opener)
+
+    order = {"FAIL": 0, "INFO": 1, "PASS": 2}
+
+    for check in sorted(checks, key=lambda c: (order[c.status], c.name)):
+        print(check.line())
+
+    print(f"END|checks|{len(checks)}")
+
+    return 1 if failures(checks) else 0
 
 
 def cmd_stats(args: argparse.Namespace, settings: Settings) -> int:
@@ -1222,7 +1552,79 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Id of an existing project (see `ai-smm queue`)",
     )
+    p.add_argument(
+        "--create-project",
+        metavar="NAME",
+        help=(
+            "Bootstrap of an empty installation: create --project with this "
+            "name in the same transaction (refused if it exists)"
+        ),
+    )
     p.set_defaults(func=cmd_user_create_owner)
+
+    p = sub.add_parser(
+        "project", help="Manage projects (no publishing, no network access)"
+    )
+    project_sub = p.add_subparsers(dest="project_command", required=True)
+
+    p = project_sub.add_parser(
+        "create",
+        help=(
+            "Create a project with an existing user as its owner, in one "
+            "transaction"
+        ),
+    )
+    p.add_argument("--id", required=True, help="a-z, 0-9, hyphens; 3-64")
+    p.add_argument("--display-name", required=True)
+    p.add_argument("--owner-email", required=True)
+    p.add_argument("--description")
+    p.add_argument("--timezone")
+    p.add_argument("--language")
+    p.add_argument(
+        "--scaffold-knowledge",
+        action="store_true",
+        help="Create an empty knowledge/projects/<id>/ in this checkout",
+    )
+    p.set_defaults(func=cmd_project_create)
+
+    p = sub.add_parser(
+        "credentials", help="Credential encryption keys (no network access)"
+    )
+    credentials_sub = p.add_subparsers(dest="credentials_command", required=True)
+
+    p = credentials_sub.add_parser(
+        "keygen",
+        help="Generate the key pair; writes the private key file with mode 600",
+    )
+    p.add_argument("--private-key-file", required=True)
+    p.set_defaults(func=cmd_credentials_keygen)
+
+    p = sub.add_parser("accounts", help="Social accounts")
+    accounts_sub = p.add_subparsers(dest="accounts_command", required=True)
+
+    p = accounts_sub.add_parser(
+        "verify",
+        help=(
+            "Decrypt an account's credential and ask the platform whose it "
+            "is (GET /me; publishes nothing)"
+        ),
+    )
+    p.add_argument("account")
+    p.set_defaults(func=cmd_accounts_verify)
+
+    p = sub.add_parser(
+        "preflight", help="Read-only configuration checks (no publishing)"
+    )
+    preflight_sub = p.add_subparsers(dest="preflight_command", required=True)
+
+    p = preflight_sub.add_parser(
+        "worker",
+        help=(
+            "The checks the worker runs before it starts: exit 1 if it "
+            "would refuse to start"
+        ),
+    )
+    p.set_defaults(func=cmd_preflight_worker)
 
     p = sub.add_parser("stats", help="Queue counters")
     p.set_defaults(func=cmd_stats)
@@ -1234,6 +1636,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # The entry point, not an import, decides whether a local .env is read.
+    load_local_dotenv()
     settings = get_settings()
     setup_logging(settings)
 

@@ -21,6 +21,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -437,6 +438,16 @@ class Publication(Base):
             " OR previous_publication_id <> id",
             name="ck_publications_previous_not_self",
         ),
+        # MATCH SIMPLE: a legacy row (social_account_id NULL) is not
+        # checked; an account-bound row must name an account of its own
+        # project.
+        ForeignKeyConstraint(
+            ["project_id", "social_account_id"],
+            ["social_accounts.project_id", "social_accounts.id"],
+            name="fk_publications_social_account",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_publications_social_account", "social_account_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -503,6 +514,15 @@ class Publication(Base):
     )
 
     source_ref: Mapped[str | None] = mapped_column(Text)
+
+    #: The account this row is published as. NULL is a legacy row: the
+    #: deployment token, and only for an allow-listed project
+    #: (ai_smm.publishing.routing). Copied from the approved revision at
+    #: materialisation and never written afterwards. The composite foreign
+    #: key below keeps it inside the row's own project.
+    social_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True)
+    )
 
     # --- series membership (all optional) --------------------------------
     # A publication that belongs to no series behaves exactly as before.
@@ -820,6 +840,237 @@ class ProjectSettings(Base):
     project: Mapped[Project] = relationship(back_populates="settings")
 
 
+# --- social accounts ----------------------------------------------------
+# Which external identity a project publishes as, and the sealed token
+# that proves it. The worker reads both, through
+# ai_smm.publishing.routing only; the HTTP API reads metadata and writes
+# ciphertext it cannot open (ai_smm.security.credentials).
+
+#: Platforms an account may be created for: the ones the worker can
+#: deliver to. Widening this is a worker change, not a data change.
+SOCIAL_PLATFORMS = ("threads",)
+
+ACCOUNT_STATUS_ACTIVE = "active"
+ACCOUNT_STATUS_DISABLED = "disabled"
+
+CREDENTIAL_STATUS_ACTIVE = "active"
+CREDENTIAL_STATUS_SUPERSEDED = "superseded"
+CREDENTIAL_STATUS_REVOKED = "revoked"
+
+VERIFICATION_UNVERIFIED = "unverified"
+VERIFICATION_VERIFIED = "verified"
+
+#: The columns of social_account_credentials that are not key material.
+#: Everything the control plane reads; the API's database role can read
+#: these and nothing else (deploy/control-center/db/ai_smm_cc.grants.sql).
+CREDENTIAL_METADATA_COLUMNS = (
+    "id",
+    "social_account_id",
+    "status",
+    "scheme",
+    "key_id",
+    "fingerprint",
+    "verification_status",
+    "verified_at",
+    "expires_at",
+    "created_by_user_id",
+    "created_at",
+    "superseded_at",
+    "revoked_at",
+)
+
+
+class SocialAccount(Base):
+    """One account on one platform, belonging to exactly one project.
+
+    external_account_id is the platform's own id of the account. It is
+    set by the first successful connection test and never changed after:
+    from then on every credential of this account must prove that same
+    identity, at entry and again before each live publication.
+    """
+
+    __tablename__ = "social_accounts"
+    __table_args__ = (
+        CheckConstraint(
+            "platform in ('threads')", name="ck_social_accounts_platform"
+        ),
+        CheckConstraint(
+            "status in ('active', 'disabled')",
+            name="ck_social_accounts_status",
+        ),
+        CheckConstraint(
+            "status <> 'disabled' OR disabled_at IS NOT NULL",
+            name="ck_social_accounts_disabled_at",
+        ),
+        CheckConstraint(
+            "length(btrim(display_name)) > 0",
+            name="ck_social_accounts_display_name",
+        ),
+        CheckConstraint("version >= 1", name="ck_social_accounts_version"),
+        # Target of the composite foreign key from publications.
+        UniqueConstraint(
+            "project_id", "id", name="uq_social_accounts_project_id"
+        ),
+        # One Threads identity at most once per project.
+        Index(
+            "uq_social_accounts_project_external",
+            "project_id",
+            "platform",
+            "external_account_id",
+            unique=True,
+            postgresql_where=("external_account_id IS NOT NULL"),
+        ),
+        Index("ix_social_accounts_project", "project_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey(
+            "projects.id",
+            ondelete="RESTRICT",
+            name="fk_social_accounts_project_id",
+        ),
+        nullable=False,
+    )
+    platform: Mapped[str] = mapped_column(String(40), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=ACCOUNT_STATUS_ACTIVE
+    )
+    external_account_id: Mapped[str | None] = mapped_column(String(120))
+    external_username: Mapped[str | None] = mapped_column(String(120))
+    version: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="1"
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_social_accounts_created_by",
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == ACCOUNT_STATUS_ACTIVE
+
+
+class SocialAccountCredential(Base):
+    """A sealed token of one account. At most one is active.
+
+    Only an active credential holds key material: replacing or revoking
+    one sets its ciphertext, nonce and ephemeral key to NULL in the same
+    statement that changes its status, and a check constraint makes any
+    other combination impossible. The rest of the row stays as history.
+    """
+
+    __tablename__ = "social_account_credentials"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('active', 'superseded', 'revoked')",
+            name="ck_social_account_credentials_status",
+        ),
+        CheckConstraint(
+            "(status = 'active') = ("
+            "ciphertext IS NOT NULL AND nonce IS NOT NULL"
+            " AND ephemeral_public_key IS NOT NULL)",
+            name="ck_social_account_credentials_material",
+        ),
+        CheckConstraint(
+            "status <> 'revoked' OR revoked_at IS NOT NULL",
+            name="ck_social_account_credentials_revoked_at",
+        ),
+        CheckConstraint(
+            "status <> 'superseded' OR superseded_at IS NOT NULL",
+            name="ck_social_account_credentials_superseded_at",
+        ),
+        CheckConstraint(
+            "verification_status in ('unverified', 'verified')",
+            name="ck_social_account_credentials_verification",
+        ),
+        CheckConstraint(
+            "length(fingerprint) = 12",
+            name="ck_social_account_credentials_fingerprint",
+        ),
+        Index(
+            "uq_social_account_credentials_one_active",
+            "social_account_id",
+            unique=True,
+            postgresql_where=("status = 'active'"),
+        ),
+        Index(
+            "ix_social_account_credentials_account", "social_account_id"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    social_account_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "social_accounts.id",
+            ondelete="RESTRICT",
+            name="fk_social_account_credentials_account",
+        ),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    scheme: Mapped[str] = mapped_column(String(64), nullable=False)
+    key_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    ephemeral_public_key: Mapped[bytes | None] = mapped_column(LargeBinary)
+    nonce: Mapped[bytes | None] = mapped_column(LargeBinary)
+    ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    fingerprint: Mapped[str] = mapped_column(String(12), nullable=False)
+    verification_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=VERIFICATION_UNVERIFIED
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_social_account_credentials_created_by",
+        ),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    superseded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    def __repr__(self) -> str:
+        # The default repr would include the ciphertext bytes.
+        return (
+            f"SocialAccountCredential(id={self.id}, "
+            f"account={self.social_account_id}, status={self.status}, "
+            f"fingerprint={self.fingerprint})"
+        )
+
+
 
 # --- editorial layer ----------------------------------------------------
 # Content, its immutable revisions and the human decisions about them sit
@@ -1023,6 +1274,18 @@ class ContentRevision(Base):
         Text, nullable=False, server_default=""
     )
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Where this revision is to be published. Part of what an approval
+    #: approves, and of content_hash when set: choosing another account is
+    #: a new revision, which clears the approval. NULL is the legacy
+    #: destination (allow-listed projects only).
+    social_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "social_accounts.id",
+            ondelete="RESTRICT",
+            name="fk_content_revisions_social_account",
+        ),
+    )
     #: NULL for a revision an agent produced; a human author otherwise.
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True),
@@ -1284,3 +1547,74 @@ event.listen(
         dialect="postgresql"
     ),
 )
+
+
+# Account routing guard. A worker that predates social accounts publishes
+# whatever it claims with the deployment token; if it ever claimed an
+# account-bound row it would post as the wrong account. Claiming such a
+# row therefore requires the claiming transaction to declare that it
+# routes by account -- set_config('ai_smm.account_routing', 'on', true),
+# which only ai_smm.queue.claim_due_publication does. An old worker's
+# claim fails here, and nothing is published.
+ACCOUNT_CLAIM_GUARD_FUNCTION = "publication_account_claim_guard"
+ACCOUNT_ROUTING_SETTING = "ai_smm.account_routing"
+
+ACCOUNT_CLAIM_GUARD_FUNCTION_DDL = f"""
+CREATE OR REPLACE FUNCTION {ACCOUNT_CLAIM_GUARD_FUNCTION}() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.social_account_id IS NOT NULL
+       AND current_setting('{ACCOUNT_ROUTING_SETTING}', true)
+           IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION
+            'publication % is bound to social account %; only an '
+            'account-routing worker may claim it', NEW.id,
+            NEW.social_account_id
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    RETURN NEW;
+END
+$$
+"""
+
+ACCOUNT_CLAIM_GUARD_TRIGGER_DDL = (
+    "CREATE TRIGGER trg_publications_account_claim_guard "
+    "BEFORE UPDATE OF status ON publications "
+    "FOR EACH ROW WHEN (NEW.status = 'claimed' "
+    "AND OLD.status IS DISTINCT FROM 'claimed') "
+    f"EXECUTE FUNCTION {ACCOUNT_CLAIM_GUARD_FUNCTION}()"
+)
+
+event.listen(
+    Base.metadata,
+    "before_create",
+    DDL(ACCOUNT_CLAIM_GUARD_FUNCTION_DDL.replace("%", "%%")).execute_if(
+        dialect="postgresql"
+    ),
+)
+event.listen(
+    Publication.__table__,
+    "after_create",
+    DDL(ACCOUNT_CLAIM_GUARD_TRIGGER_DDL).execute_if(dialect="postgresql"),
+)
+event.listen(
+    Base.metadata,
+    "after_drop",
+    DDL(
+        f"DROP FUNCTION IF EXISTS {ACCOUNT_CLAIM_GUARD_FUNCTION}()"
+    ).execute_if(dialect="postgresql"),
+)
+
+
+def credential_metadata_only():
+    """Loader option: never SELECT ciphertext, nonce or ephemeral key."""
+
+    from sqlalchemy.orm import load_only
+
+    return load_only(
+        *(
+            getattr(SocialAccountCredential, name)
+            for name in CREDENTIAL_METADATA_COLUMNS
+        )
+    )

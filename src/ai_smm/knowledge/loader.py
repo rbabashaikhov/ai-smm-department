@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from ai_smm.application.project_ids import is_valid_project_id
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -56,9 +58,21 @@ def load_project_knowledge(
     The editorial policy is shared across all projects.
     """
 
+    # The id is a path segment. Ids can come from an HTTP request since
+    # SMM-025B, so it is checked here too, and the resolved directory must
+    # stay inside knowledge/projects/: one project never reads another's.
+    if not is_valid_project_id(project_id, allow_reserved=True):
+        raise ValueError(f"Invalid project id: {project_id!r}")
+
     root = knowledge_root()
 
+    projects_root = (root / "projects").resolve()
     project_dir = root / "projects" / project_id
+
+    if project_dir.resolve().parent != projects_root:
+        raise ValueError(
+            f"Knowledge directory of {project_id!r} escapes {projects_root}."
+        )
 
     editorial_policy_path = root / "editorial_policy.md"
 

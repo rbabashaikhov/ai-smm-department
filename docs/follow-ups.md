@@ -12,7 +12,7 @@ register below says which.
 
 ## Register
 
-**As of 2026-10-13 (SMM-024C-2B; SMM-025A review added FU-025A-1…4).** The heading stays the same when the
+**As of 2026-10-13 (SMM-024C-2B; SMM-025A review added FU-025A-1…4; SMM-025B review added FU-025B-1…9).** The heading stays the same when the
 register is updated, so links to `#register` keep working; the anchor of
 its first version (`#register-as-of-2026-10-12-smm-024c-1`) is kept too.
 
@@ -51,6 +51,15 @@ mandatory condition for a later step, named in its row.
 | [FU-025A-3](#fu-025a-3--diagnostics-of-a-failed-projects-overview-row) | Diagnostics of a failed Projects Overview row | open | P3 | No |
 | [FU-025A-4](#fu-025a-4--the-initial-route-uses-a-snapshot-of-meprojects) | Initial route uses a snapshot of `me.projects` | open | P3 | No |
 | [FU-025A-2](#fu-025a-2--module-global-navigateref-in-the-test-renderer) | Module-global `navigateRef` in the test renderer | open | P3 | No — test hygiene |
+| [FU-025B-1](#fu-025b-1--the-mutation-privilege-model-must-cover-the-smm-025b-tables) | Mutation privilege model must cover the SMM-025B tables | open | **P1** | **Yes** — part of FU-024C2-3 |
+| [FU-025B-2](#fu-025b-2--a-gated-wrapper-verb-for-creating-a-project-in-production) | Gated wrapper verb for creating a project in production | open | P2 | No |
+| [FU-025B-3](#fu-025b-3--generation-does-not-read-topics-and-tone-of-voice-yet) | Generation does not read topics / tone of voice yet | open | P2 | No |
+| [FU-025B-4](#fu-025b-4--credential-key-rotation-without-re-entering-tokens) | Credential key rotation without re-entering tokens | open | P3 | No |
+| [FU-025B-5](#fu-025b-5--egress-policy-for-the-apis-connection-test) | Egress policy for the API's connection test | open | P3 | No |
+| [FU-025B-6](#fu-025b-6--rate-limits-per-account) | Rate limits per account | open | P3 | No |
+| [FU-025B-7](#fu-025b-7--configuration-changed-under-a-running-worker) | Configuration changed under a running worker | open, accepted | P3 | No |
+| [FU-025B-8](#fu-025b-8--alert-on-a-worker-that-refuses-to-start) | Alert on a worker that refuses to start (exit 78) | open | P3 | No |
+| [FU-025B-9](#fu-025b-9--image-paths-of-legacy-rows-are-not-project-scoped) | Image paths of legacy rows are not project-scoped | open, accepted | P3 | No |
 | [FU-024C1-4](#fu-024c1-4--ux-and-localisation-defects-in-audit-and-preview) | UX and localisation defects in Audit / Preview | open, needs triage | P3 | No |
 | [FU-024B3-3](#fu-024b3-3--secure-session-cookie) | `Secure` session cookie | open, depends on HTTPS | P3 | No (SSH tunnel only) |
 | [FU-024B4A-2](#fu-024b4a-2--the-trust-model-of-backup-evidence-and-the-off-host-acknowledgement) | Trust model of backup evidence / off-host ack | accepted limitation | P3 | No |
@@ -706,3 +715,100 @@ is disclosed (the server decides), and a reload corrects it.
 Done when the initial route uses the same fresh source as the switcher
 (`GET /projects`, waiting for it), or the choice is documented as
 accepted.
+
+## From the SMM-025B review (2026-10-13)
+
+The final independent review of SMM-025B (multi-project & multi-account
+platform) accepted B1 and B2 with these follow-ups; none blocks the
+local commit, FU-025B-1 blocks production mutations. Design and reports:
+[architecture/smm-025b-project-management.md](architecture/smm-025b-project-management.md),
+[reports/smm-025b/](reports/smm-025b/README.md) (the open-issues report
+maps OI-n to these entries).
+
+### FU-025B-1 — The mutation privilege model must cover the SMM-025B tables
+
+**Status:** open. **Priority:** P1. **Blocks mutations:** yes (part of
+FU-024C2-3). **Was:** OI-1.
+
+An editable API needs, and `ai_smm_cc` deliberately has none of:
+`INSERT` on `projects`, `project_memberships`, `project_settings`;
+`UPDATE (display_name, description, default_timezone, default_language,
+version, updated_at)` on `projects`; `INSERT`/`UPDATE` on
+`social_accounts` (no `DELETE`); `INSERT` and `UPDATE (status,
+ciphertext, nonce, ephemeral_public_key, superseded_at, revoked_at,
+verification_status, verified_at)` on `social_account_credentials` —
+writing key material without being able to read it back.
+
+Done when FU-024C2-3's role, grants, verify matrix and tests include
+these, with the refusals of `tests/test_db_least_privilege.py` kept.
+
+### FU-025B-2 — A gated wrapper verb for creating a project in production
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no. **Was:** OI-2.
+
+Before mutations, a second production project can only be created with
+`ai-smm project create` as the owner role. The CC wrapper offers
+`create-owner` (exactly three options) but no project verb.
+
+Done when `cc-compose.sh create-project` exists behind the identity,
+queue-window and backup gates, with the wrapper's allowlist tests.
+
+### FU-025B-3 — Generation does not read topics and tone of voice yet
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no. **Was:** OI-3.
+
+`content_config.topics` and `brand_config.tone_of_voice` are stored and
+edited; the strategist/copywriter agents do not use them (the settings
+page says so).
+
+Done when the AI-assisted stage feeds them into generation.
+
+### FU-025B-4 — Credential key rotation without re-entering tokens
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no. **Was:** OI-4.
+
+Rotation works today by holding both private keys and re-entering each
+token. Done when `ai-smm credentials rewrap` re-seals active credentials
+for a new public key on the worker host, audited, without printing them.
+
+### FU-025B-5 — Egress policy for the API's connection test
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no. **Was:** OI-5.
+
+Saving a token makes the API call `GET /me` on the Threads Graph API.
+Done when the CC network policy allows exactly that host for `smm-api`
+(or the decision to run the test elsewhere is recorded).
+
+### FU-025B-6 — Rate limits per account
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no. **Was:** OI-7.
+
+The daily cap and spacing still count per platform across all accounts
+— conservative, never above the old limits. Belongs to SMM-028.
+
+### FU-025B-7 — Configuration changed under a running worker
+
+**Status:** open, accepted. **Priority:** P3. **Blocks mutations:** no.
+**Was:** OI-8 (remainder).
+
+The worker preflight checks the configuration at start. A change while a
+correctly started worker runs (a key file removed, the allow-list edited
+without a restart) is refused row by row — nothing is sent, the rows
+become `failed`. Done when this is either re-checked periodically or
+documented in the operations runbook as "restart after any change".
+
+### FU-025B-8 — Alert on a worker that refuses to start
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no. **Was:** OI-12.
+
+A failed preflight exits with 78; under `restart: unless-stopped` that is
+a harmless but noisy restart loop. Done when monitoring alerts on it.
+
+### FU-025B-9 — Image paths of legacy rows are not project-scoped
+
+**Status:** open, accepted. **Priority:** P3. **Blocks mutations:** no.
+**Was:** OI-11.
+
+The editorial layer confines revision images to the project's own
+`assets/`; rows written by `import-json` or the CLI are only confined to
+the shared media root. Done when the importer applies the same rule.

@@ -19,9 +19,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ai_smm.db.models import Publication, PublicationStatus
+from ai_smm.db.models import Project, Publication, PublicationStatus
 from ai_smm.logging_setup import get_logger
-from ai_smm.queue import ensure_project, record_audit, utcnow
+from ai_smm.queue import record_audit, utcnow
 
 
 logger = get_logger(__name__)
@@ -34,6 +34,10 @@ FORMAT_ALIASES = {
     "carousel": "carousel",
     "thread": "thread",
 }
+
+
+class UnknownProjectError(ValueError):
+    """The queue file names a project that does not exist."""
 
 
 @dataclass
@@ -162,13 +166,24 @@ def import_json_queue(
     editor_score = approval.get("score")
     human_review_required = bool(approval.get("human_review_required"))
 
-    ensure_project(
-        session,
-        project_id=project_id,
-        display_name=project_display_name or project_id,
-        knowledge_path=knowledge_path or f"knowledge/projects/{project_id}",
-        default_platform=platform,
-    )
+    # The project must already exist, with its owner: a project is created
+    # only by ai_smm.application.projects.create_project (API or
+    # `ai-smm project create`), which writes the owner membership in the
+    # same transaction. The importer adds publications to it and never
+    # rewrites its name or knowledge path.
+    if session.get(Project, project_id) is None:
+        raise UnknownProjectError(
+            f"Project {project_id!r} does not exist. Create it first with "
+            "`ai-smm project create`; the importer no longer creates "
+            "projects."
+        )
+
+    if project_display_name or knowledge_path:
+        logger.warning(
+            "Importer ignores display name and knowledge path; edit the "
+            "project instead",
+            extra={"context": {"project_id": project_id}},
+        )
 
     report = ImportReport()
 

@@ -92,6 +92,9 @@ export class ApiClient {
   post<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
     return this.request<T>("POST", path, { ...options, body: body ?? {} });
   }
+  patch<T>(path: string, body?: unknown, options?: RequestOptions): Promise<T> {
+    return this.request<T>("PATCH", path, { ...options, body: body ?? {} });
+  }
 
   async request<T>(
     method: HttpMethod,

@@ -348,3 +348,94 @@ def test_the_created_owner_can_log_in(
             "role": "owner",
         }
     ]
+
+
+# -- bootstrap of an empty installation (SMM-025B) ----------------------------
+
+
+def test_create_owner_can_create_the_first_project_in_one_transaction(
+    settings: Settings, session: Session, answers
+) -> None:
+    from sqlalchemy import select
+
+    from ai_smm.db.models import (
+        MembershipRole,
+        Project,
+        ProjectMembership,
+        ProjectSettings,
+        User,
+    )
+
+    answers(PASSWORD, PASSWORD)
+
+    assert _run(
+        [
+            "user", "create-owner", "--email", "first@example.com",
+            "--display-name", "First", "--project", "fresh-start",
+            "--create-project", "Fresh start",
+        ],
+        settings,
+    ) == 0
+
+    session.expire_all()
+    user = session.scalars(
+        select(User).where(User.email == "first@example.com")
+    ).one()
+    project = session.get(Project, "fresh-start")
+    memberships = session.scalars(
+        select(ProjectMembership).where(ProjectMembership.project_id == "fresh-start")
+    ).all()
+
+    assert project.display_name == "Fresh start"
+    assert [(m.user_id, m.role) for m in memberships] == [
+        (user.id, MembershipRole.OWNER)
+    ]
+    assert session.get(ProjectSettings, "fresh-start") is not None
+
+
+def test_create_project_is_refused_for_an_existing_project(
+    settings: Settings, session: Session, answers, project: str
+) -> None:
+    from sqlalchemy import select
+
+    from ai_smm.db.models import User
+
+    answers(PASSWORD, PASSWORD)
+
+    assert _run(
+        [
+            "user", "create-owner", "--email", "typo@example.com",
+            "--display-name", "T", "--project", project,
+            "--create-project", "Again",
+        ],
+        settings,
+    ) == 1
+
+    session.expire_all()
+    assert (
+        session.scalars(select(User).where(User.email == "typo@example.com")).all()
+        == []
+    )
+
+
+@pytest.mark.parametrize("bad_id", ["A", "../x", "new"])
+def test_an_invalid_new_project_id_creates_nothing(
+    settings: Settings, session: Session, answers, bad_id: str
+) -> None:
+    from sqlalchemy import func, select
+
+    from ai_smm.db.models import Project, User
+
+    answers(PASSWORD, PASSWORD)
+
+    assert _run(
+        [
+            "user", "create-owner", "--email", "bad@example.com",
+            "--display-name", "B", "--project", bad_id, "--create-project", "X",
+        ],
+        settings,
+    ) == 2
+
+    session.expire_all()
+    assert session.scalar(select(func.count()).select_from(User)) == 0
+    assert session.get(Project, bad_id) is None

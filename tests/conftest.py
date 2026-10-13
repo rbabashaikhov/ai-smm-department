@@ -16,6 +16,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+
+#: The suite's fixture projects publish account-less (legacy) rows, as
+#: every test written before social accounts does. Production allows no
+#: project unless the operator lists it; the tests that check exactly that
+#: build their settings with an empty tuple (tests/test_publish_routing.py).
+#: Set before any ai_smm import: get_settings() is cached on first use,
+#: and importing a module that logs already uses it.
+os.environ.setdefault(
+    "AI_SMM_LEGACY_THREADS_PROJECTS", "test-project,other-project"
+)
+
 from sqlalchemy import Engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
@@ -581,3 +593,176 @@ def make_content(session: Session, project: str):
         return item, revision
 
     return factory
+
+
+# --- social accounts (SMM-025B) -------------------------------------------
+# Tokens here are random test values. No fixture ever reads a real
+# credential, and no test reaches a platform: identity checks go to
+# FakeIdentityService.
+
+
+def fake_token(label: str = "t") -> str:
+    import secrets
+
+    return f"THQtest{label}{secrets.token_urlsafe(32)}"
+
+
+class FakeIdentityService:
+    """Stands in for Threads GET /me: token -> identity, or an error."""
+
+    def __init__(self) -> None:
+        self.identities: dict[str, tuple[str, str | None]] = {}
+        self.rejected: set[str] = set()
+        self.unavailable = False
+        self.calls: list[str] = []
+
+    def register(
+        self, token: str, account_id: str, username: str | None = None
+    ) -> None:
+        self.identities[token] = (account_id, username)
+
+    def __call__(self, token):
+        from ai_smm.publishing.threads import (
+            CredentialRejected,
+            IdentityUnavailable,
+            ThreadsIdentity,
+        )
+
+        value = token.reveal()
+        self.calls.append(value)
+
+        if self.unavailable:
+            raise IdentityUnavailable("Threads could not be reached (test).")
+
+        if value in self.rejected or value not in self.identities:
+            raise CredentialRejected("Threads rejected the token (HTTP 401).")
+
+        account_id, username = self.identities[value]
+
+        return ThreadsIdentity(account_id=account_id, username=username)
+
+
+@pytest.fixture
+def identity_service() -> FakeIdentityService:
+    return FakeIdentityService()
+
+
+@pytest.fixture
+def credential_keys(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from ai_smm.security.credentials import (
+        encode_public_key,
+        generate_key_pair,
+        write_private_key_file,
+    )
+
+    private, public = generate_key_pair()
+    path = tmp_path / "credentials.pem"
+    write_private_key_file(path, private)
+
+    return SimpleNamespace(
+        private=private,
+        public=public,
+        path=path,
+        public_b64=encode_public_key(public),
+    )
+
+
+@pytest.fixture
+def account_settings(settings: Settings, credential_keys) -> Settings:
+    """Worker settings that can decrypt credentials sealed by make_account."""
+
+    return replace(
+        settings,
+        credentials_public_key=credential_keys.public_b64,
+        credentials_private_key_files=(credential_keys.path,),
+    )
+
+
+@pytest.fixture
+def make_account(session: Session, project: str, credential_keys, identity_service):
+    """A verified account with an active sealed credential, by default."""
+
+    import uuid as uuid_module
+
+    from ai_smm.db.models import (
+        CREDENTIAL_STATUS_ACTIVE,
+        VERIFICATION_VERIFIED,
+        SocialAccount,
+        SocialAccountCredential,
+    )
+    from ai_smm.security.credentials import (
+        CredentialSealer,
+        SecretToken,
+        associated_data,
+        token_fingerprint,
+    )
+
+    counter = {"n": 0}
+
+    def factory(
+        *,
+        project_id: str | None = None,
+        display_name: str | None = None,
+        external_id: str | None = None,
+        token: str | None = None,
+        with_credential: bool = True,
+        verified: bool = True,
+        status: str = "active",
+    ):
+        counter["n"] += 1
+        n = counter["n"]
+        now = datetime.now(timezone.utc)
+        external = external_id or f"ext-{n}"
+        token = token or fake_token(str(n))
+
+        account = SocialAccount(
+            id=uuid_module.uuid4(),
+            project_id=project_id or project,
+            platform="threads",
+            display_name=display_name or f"Account {n}",
+            status=status,
+            external_account_id=external if verified else None,
+            external_username=f"user{n}" if verified else None,
+            disabled_at=now if status == "disabled" else None,
+        )
+        session.add(account)
+        session.flush()
+
+        if with_credential:
+            credential_id = uuid_module.uuid4()
+            secret = SecretToken(token)
+            sealed = CredentialSealer(credential_keys.public).seal(
+                secret,
+                aad=associated_data(
+                    account_id=str(account.id), credential_id=str(credential_id)
+                ),
+            )
+            session.add(
+                SocialAccountCredential(
+                    id=credential_id,
+                    social_account_id=account.id,
+                    status=CREDENTIAL_STATUS_ACTIVE,
+                    scheme=sealed.scheme,
+                    key_id=sealed.key_id,
+                    ephemeral_public_key=sealed.ephemeral_public_key,
+                    nonce=sealed.nonce,
+                    ciphertext=sealed.ciphertext,
+                    fingerprint=token_fingerprint(secret),
+                    verification_status=VERIFICATION_VERIFIED,
+                    verified_at=now,
+                )
+            )
+
+        identity_service.register(token, external, f"user{n}")
+        session.commit()
+
+        return account, token
+
+    return factory
+
+
+@pytest.fixture
+def owner_user(member) -> User:
+    return member(MembershipRole.OWNER)

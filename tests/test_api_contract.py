@@ -60,6 +60,13 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/content-items/{content_item_id}/approve",
             "/api/v1/content-items/{content_item_id}/reject",
             "/api/v1/content-items/{content_item_id}/materialize",
+            # SMM-025B: accounts and write-only credentials.
+            "/api/v1/projects/{project_id}/social-accounts",
+            "/api/v1/social-accounts/{account_id}",
+            "/api/v1/social-accounts/{account_id}/disable",
+            "/api/v1/social-accounts/{account_id}/enable",
+            "/api/v1/social-accounts/{account_id}/credentials",
+            "/api/v1/social-account-credentials/{credential_id}/revoke",
         ]
     )
 

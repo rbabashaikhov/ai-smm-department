@@ -149,7 +149,9 @@ def test_content_the_delivery_preflight_would_refuse_is_not_materialised(
 
     item, _ = make_content(
         publication_format="carousel",
-        images=[{"path": "a.jpg", "alt_text": "a"}],
+        images=[
+            {"path": "knowledge/projects/test-project/assets/a.jpg", "alt_text": "a"}
+        ],
     )
     _approve(client, item.id, editor_csrf)
 
@@ -197,8 +199,9 @@ def test_the_snapshot_is_copied_exactly(
     client, session: Session, make_content, editor_csrf
 ) -> None:
     images = [
-        {"path": "knowledge/a.jpg", "alt_text": "первая"},
-        {"path": "knowledge/b.jpg", "alt_text": "вторая"},
+        # Paths inside the project's own assets folder (SMM-025B).
+        {"path": "knowledge/projects/test-project/assets/a.jpg", "alt_text": "первая"},
+        {"path": "knowledge/projects/test-project/assets/b.jpg", "alt_text": "вторая"},
     ]
     item, _ = make_content(
         title="Item title",

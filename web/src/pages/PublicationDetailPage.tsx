@@ -6,7 +6,12 @@ import { qk } from "../api/queryKeys";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { SnapshotView } from "../components/SnapshotView";
 import { Breadcrumbs, Card, KeyValues, Loading, PageHeader, StatusBadge } from "../components/ui";
-import { useProject, useReportActiveProject } from "../features/projects/hooks";
+import { accountLabel } from "../features/accounts/labels";
+import {
+  useProject,
+  useProjectAccounts,
+  useReportActiveProject,
+} from "../features/projects/hooks";
 import { usePublication } from "../features/publications/hooks";
 import { PublicationActions } from "../features/publications/PublicationActions";
 import { formatDateTime } from "../lib/time";
@@ -23,6 +28,7 @@ export function PublicationDetailPage() {
   useReportActiveProject(projectId);
 
   const project = useProject(projectId);
+  const accounts = useProjectAccounts(projectId);
   const preview = useQuery({
     queryKey: qk.preview(publicationId),
     queryFn: () => api.publications.preview(publicationId),
@@ -89,6 +95,16 @@ export function PublicationDetailPage() {
             <KeyValues
               rows={[
                 ["status", <StatusBadge key="s" status={p.status} />],
+                [
+                  "аккаунт",
+                  p.social_account_id
+                    ? (() => {
+                        const account = accounts.data?.find((a) => a.id === p.social_account_id);
+
+                        return account ? accountLabel(account) : p.social_account_id;
+                      })()
+                    : "аккаунт развёртывания (legacy)",
+                ],
                 ["human_reviewed", p.human_reviewed ? "yes" : "no"],
                 ["scheduled_at", formatDateTime(p.scheduled_at, tz)],
                 ["next_attempt_at", formatDateTime(p.next_attempt_at, tz)],

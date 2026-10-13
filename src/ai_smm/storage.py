@@ -21,14 +21,14 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
 import httpx
-from dotenv import load_dotenv
 
 
 if TYPE_CHECKING:
     import paramiko
 
 
-load_dotenv()
+# No load_dotenv() here: importing this module never reads a .env
+# (ai_smm.local_env; entry points opt in explicitly).
 
 MODE_LOCAL: Final[str] = "local"
 MODE_SFTP: Final[str] = "sftp"

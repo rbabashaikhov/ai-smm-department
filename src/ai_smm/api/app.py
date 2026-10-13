@@ -10,13 +10,17 @@ test, a migration shell or a reload loop.
 The API is the control plane. It reads and edits the metadata around the
 publication queue -- identity, membership, project settings -- and it never
 publishes: there is no endpoint that calls ThreadsPublisher, and the worker
-remains the only process that can create a post.
+remains the only process that can create a post. The one outbound call it
+makes is the read-only connection test (GET /me) when an owner stores a
+credential.
 
 Unless AI_SMM_API_MUTATIONS_ENABLED is on, the API is also read-only:
 every business-state change is refused centrally (ai_smm.api.mutation_gate)
 and again at the queue commands (ai_smm.application.control_plane).
 """
 from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI
 from sqlalchemy.orm import Session, sessionmaker
@@ -32,6 +36,7 @@ from ai_smm.api.routers import operations as operations_router
 from ai_smm.api.routers import projects as projects_router
 from ai_smm.api.routers import publications as publications_router
 from ai_smm.api.routers import series as series_router
+from ai_smm.api.routers import social_accounts as social_accounts_router
 from ai_smm.config import Settings, get_settings
 from ai_smm.logging_setup import setup_logging
 
@@ -44,11 +49,18 @@ DESCRIPTION = (
 )
 
 
+def _fetch_identity(token: Any) -> Any:
+    from ai_smm.platform_identity import fetch_identity
+
+    return fetch_identity(token)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
     session_factory: sessionmaker[Session] | None = None,
     access_log: bool = True,
+    identity_fetcher: Any = None,
 ) -> FastAPI:
     """Build the application.
 
@@ -75,6 +87,9 @@ def create_app(
 
     app.state.settings = settings
     app.state.session_factory = session_factory
+    #: Tests a credential at entry (GET /me). Injectable: tests never
+    #: reach the platform.
+    app.state.identity_fetcher = identity_fetcher or _fetch_identity
 
     app.add_middleware(RequestIdMiddleware, access_log=access_log)
     install_error_handlers(app)
@@ -97,6 +112,7 @@ def create_app(
     v1.include_router(series_router.router)
     v1.include_router(operations_router.router)
     v1.include_router(content_router.router)
+    v1.include_router(social_accounts_router.router)
 
     app.include_router(v1)
 

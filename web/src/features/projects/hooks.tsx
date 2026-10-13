@@ -74,3 +74,14 @@ export function useReportActiveProject(projectId: string | undefined | null): vo
     if (projectId && setProjectId) setProjectId(projectId);
   }, [projectId, setProjectId]);
 }
+
+/** Accounts of a project, with readiness. Metadata only: no secret exists here. */
+export function useProjectAccounts(projectId: string | undefined) {
+  const api = useApi();
+
+  return useQuery({
+    queryKey: qk.accounts(projectId ?? ""),
+    queryFn: () => api.accounts.list(projectId!),
+    enabled: Boolean(projectId),
+  });
+}

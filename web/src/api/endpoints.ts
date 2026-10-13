@@ -22,8 +22,13 @@ import type {
   OperationsSummary,
   Page,
   PageParams,
+  Credential,
+  CredentialInput,
   Project,
+  ProjectCreate,
+  ProjectPatch,
   ProjectSettings,
+  ProjectSettingsPatch,
   PublicationDetail,
   PublicationFilters,
   PublicationPreview,
@@ -33,6 +38,8 @@ import type {
   RevisionCreated,
   RevisionDecision,
   ScheduleRequest,
+  SocialAccount,
+  SocialAccountDetail,
 } from "../types/api";
 
 const V1 = "/api/v1";
@@ -52,8 +59,14 @@ export function createEndpoints(client: ApiClient) {
     projects: {
       list: () => client.get<Project[]>(`${V1}/projects`),
       get: (projectId: string) => client.get<Project>(`${V1}/projects/${enc(projectId)}`),
+      /** The caller becomes the owner. Same id + same name again -> 200, same project. */
+      create: (body: ProjectCreate) => client.post<Project>(`${V1}/projects`, body),
+      update: (projectId: string, body: ProjectPatch) =>
+        client.patch<Project>(`${V1}/projects/${enc(projectId)}`, body),
       settings: (projectId: string) =>
         client.get<ProjectSettings>(`${V1}/projects/${enc(projectId)}/settings`),
+      updateSettings: (projectId: string, body: ProjectSettingsPatch) =>
+        client.patch<ProjectSettings>(`${V1}/projects/${enc(projectId)}/settings`, body),
       operationsSummary: (projectId: string) =>
         client.get<OperationsSummary>(
           `${V1}/projects/${enc(projectId)}/operations/summary`,
@@ -103,6 +116,36 @@ export function createEndpoints(client: ApiClient) {
         ),
       cancel: (publicationId: number, body: CancelRequest) =>
         client.post<PublicationDetail>(`${V1}/publications/${publicationId}/cancel`, body),
+    },
+
+    accounts: {
+      list: (projectId: string) =>
+        client.get<SocialAccount[]>(`${V1}/projects/${enc(projectId)}/social-accounts`),
+      get: (accountId: string) =>
+        client.get<SocialAccountDetail>(`${V1}/social-accounts/${enc(accountId)}`),
+      create: (projectId: string, displayName: string) =>
+        client.post<SocialAccount>(`${V1}/projects/${enc(projectId)}/social-accounts`, {
+          platform: "threads",
+          display_name: displayName,
+        }),
+      rename: (accountId: string, expectedVersion: number, displayName: string) =>
+        client.patch<SocialAccount>(`${V1}/social-accounts/${enc(accountId)}`, {
+          expected_version: expectedVersion,
+          display_name: displayName,
+        }),
+      disable: (accountId: string, expectedVersion: number) =>
+        client.post<SocialAccount>(`${V1}/social-accounts/${enc(accountId)}/disable`, {
+          expected_version: expectedVersion,
+        }),
+      enable: (accountId: string, expectedVersion: number) =>
+        client.post<SocialAccount>(`${V1}/social-accounts/${enc(accountId)}/enable`, {
+          expected_version: expectedVersion,
+        }),
+      /** Write-only: the response is metadata, the token never comes back. */
+      setCredential: (accountId: string, body: CredentialInput) =>
+        client.post<Credential>(`${V1}/social-accounts/${enc(accountId)}/credentials`, body),
+      revokeCredential: (credentialId: string) =>
+        client.post<Credential>(`${V1}/social-account-credentials/${enc(credentialId)}/revoke`),
     },
 
     content: {

@@ -21,7 +21,16 @@ from ai_smm.db.session import (
     session_scope,
     with_db_retry,
 )
+from ai_smm.local_env import load_local_dotenv
 from ai_smm.logging_setup import get_logger, setup_logging
+from ai_smm.preflight import (
+    EXIT_CONFIG,
+    Check,
+    PreflightFailed,
+    failures,
+    worker_preflight,
+)
+from ai_smm.publishing.routing import build_opener
 from ai_smm.publishing.service import publish_claimed_publication
 from ai_smm.queue import (
     claim_due_publication,
@@ -32,6 +41,7 @@ from ai_smm.queue import (
     release_expired_leases,
     utcnow,
 )
+from ai_smm.security.credentials import CredentialCryptoError, CredentialOpener
 
 
 logger = get_logger(__name__)
@@ -39,6 +49,9 @@ logger = get_logger(__name__)
 #: Written after each completed cycle so the healthcheck can tell a live
 #: worker from a hung one without opening a network port.
 HEARTBEAT_PATH = Path("/tmp/ai-smm-worker-heartbeat")
+
+
+_UNSET = object()
 
 
 def _default_publisher_factory() -> Any:
@@ -56,9 +69,20 @@ class Worker:
         publisher_factory: Any = _default_publisher_factory,
         media_root: Path | None = None,
         heartbeat_path: Path | None = None,
+        account_publisher_factory: Any = None,
+        identity_fetcher: Any = None,
+        opener: CredentialOpener | None | object = _UNSET,
     ) -> None:
         self.settings = settings or get_settings()
+        #: Legacy rows only (deployment token). Account rows never reach it.
         self.publisher_factory = publisher_factory
+        self.account_publisher_factory = account_publisher_factory
+        self.identity_fetcher = identity_fetcher
+        # Loaded once, here: a configured but unreadable or group-readable
+        # key file stops the worker at start instead of failing rows later.
+        self.opener = (
+            build_opener(self.settings) if opener is _UNSET else opener
+        )
         self.media_root = media_root or self.settings.media_root
         self.heartbeat_path = heartbeat_path or HEARTBEAT_PATH
 
@@ -90,6 +114,12 @@ class Worker:
                 "context": {
                     "worker_id": self.settings.worker_id,
                     "dry_run": self.settings.dry_run,
+                    "credential_keys": (
+                        sorted(self.opener.key_ids) if self.opener else []
+                    ),
+                    "legacy_threads_projects": list(
+                        self.settings.legacy_threads_projects
+                    ),
                     "poll_interval_seconds": (
                         self.settings.poll_interval_seconds
                     ),
@@ -97,6 +127,11 @@ class Worker:
                 }
             },
         )
+
+        # Before anything is recovered, scheduled or claimed: a release
+        # started with a configuration that does not fit the queue stops
+        # here instead of failing the rows it cannot route.
+        self.preflight()
 
         self.recover_on_start()
 
@@ -139,6 +174,37 @@ class Worker:
         finally:
             if acquired:
                 self._cycle_lock.release()
+
+    # -- preflight --------------------------------------------------------
+
+    def preflight(self) -> list[Check]:
+        """Run ai_smm.preflight; raise PreflightFailed on any FAIL."""
+
+        def operation() -> list[Check]:
+            with session_scope(self.settings) as session:
+                return worker_preflight(session, self.settings, self.opener)
+
+        checks = with_db_retry(operation)
+
+        for check in checks:
+            if check.status == "FAIL":
+                logger.error(
+                    "Preflight failed", extra={"context": {"check": check.line()}}
+                )
+            elif check.status == "INFO":
+                logger.warning(
+                    "Preflight note", extra={"context": {"check": check.line()}}
+                )
+
+        if failures(checks):
+            raise PreflightFailed(checks)
+
+        logger.info(
+            "Preflight passed",
+            extra={"context": {"checks": [c.line() for c in checks]}},
+        )
+
+        return checks
 
     # -- recovery ---------------------------------------------------------
 
@@ -258,6 +324,9 @@ class Worker:
                 settings=self.settings,
                 publisher_factory=self.publisher_factory,
                 media_root=self.media_root,
+                account_publisher_factory=self.account_publisher_factory,
+                identity_fetcher=self.identity_fetcher,
+                opener=self.opener,
             )
 
             return outcome.status
@@ -324,10 +393,22 @@ class Worker:
 
 
 def main() -> int:
+    # The entry point, not an import, decides whether a local .env is read.
+    load_local_dotenv()
     settings = get_settings()
     setup_logging(settings)
 
-    Worker(settings=settings).run()
+    try:
+        Worker(settings=settings).run()
+    except (PreflightFailed, CredentialCryptoError) as exc:
+        # Fail closed: nothing was claimed. A restart loop of this process
+        # publishes nothing until the configuration is fixed.
+        logger.error(
+            "Worker refused to start: configuration does not fit the queue",
+            extra={"context": {"error": str(exc)}},
+        )
+
+        return EXIT_CONFIG
 
     return 0
 

@@ -36,7 +36,8 @@ table_grants(relname, privilege) AS (
         ('content_approvals', 'SELECT'),
         ('content_publication_links', 'SELECT'),
         ('audit_log', 'SELECT'), ('users', 'SELECT'),
-        ('user_sessions', 'SELECT')
+        ('user_sessions', 'SELECT'),
+        ('social_accounts', 'SELECT')
 ),
 column_grants(relname, attname, privilege) AS (
     VALUES
@@ -54,7 +55,20 @@ column_grants(relname, attname, privilege) AS (
         ('audit_log', 'actor', 'INSERT'),
         ('audit_log', 'action', 'INSERT'),
         ('audit_log', 'subject', 'INSERT'),
-        ('audit_log', 'details', 'INSERT')
+        ('audit_log', 'details', 'INSERT'),
+        ('social_account_credentials', 'id', 'SELECT'),
+        ('social_account_credentials', 'social_account_id', 'SELECT'),
+        ('social_account_credentials', 'status', 'SELECT'),
+        ('social_account_credentials', 'scheme', 'SELECT'),
+        ('social_account_credentials', 'key_id', 'SELECT'),
+        ('social_account_credentials', 'fingerprint', 'SELECT'),
+        ('social_account_credentials', 'verification_status', 'SELECT'),
+        ('social_account_credentials', 'verified_at', 'SELECT'),
+        ('social_account_credentials', 'expires_at', 'SELECT'),
+        ('social_account_credentials', 'created_by_user_id', 'SELECT'),
+        ('social_account_credentials', 'created_at', 'SELECT'),
+        ('social_account_credentials', 'superseded_at', 'SELECT'),
+        ('social_account_credentials', 'revoked_at', 'SELECT')
 ),
 tables AS (
     SELECT c.oid, c.relname

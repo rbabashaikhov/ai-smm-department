@@ -16,10 +16,11 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from ai_smm.db.models import (
+    ACCOUNT_ROUTING_SETTING,
     AttemptOutcome,
     AttemptPhase,
     AuditLog,
@@ -312,6 +313,15 @@ def claim_due_publication(
 
     if publication_id is None:
         return None
+
+    # This process routes every row by its own account
+    # (ai_smm.publishing.routing). Declared for this transaction only, so
+    # the database lets it claim account-bound rows; a worker that does
+    # not declare it is refused by trg_publications_account_claim_guard.
+    session.execute(
+        text("SELECT set_config(:name, 'on', true)"),
+        {"name": ACCOUNT_ROUTING_SETTING},
+    )
 
     claim_stmt = (
         update(Publication)

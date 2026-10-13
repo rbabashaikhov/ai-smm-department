@@ -169,13 +169,12 @@ $C up -d --wait postgres
 $C --profile tools run --rm migrate upgrade head
 $C --profile tools run --rm migrate current        # expect "(head)"
 
-# 4. An empty local project "demo" (existing import command, no posts)
-$C --profile tools run --rm cli import-json \
-    /srv/ai-smm/bootstrap/demo-project.json --display-name "Demo (local)"
-
-# 5. The first owner -- prompts for the password twice; there is no default
+# 4. The first owner and an empty local project "demo", in one transaction
+#    -- prompts for the password twice; there is no default. Since SMM-025B
+#    import-json no longer creates projects, so the bootstrap does.
 $C --profile tools run --rm cli user create-owner \
-    --email owner@local.test --display-name "Local Owner" --project demo
+    --email owner@local.test --display-name "Local Owner" \
+    --project demo --create-project "Demo (local)"
 
 # 6. API and web
 $C up -d --wait

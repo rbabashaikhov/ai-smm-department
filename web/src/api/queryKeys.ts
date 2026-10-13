@@ -8,6 +8,8 @@ export const qk = {
   projects: () => ["projects"] as const,
   project: (projectId: string) => ["projects", projectId] as const,
   settings: (projectId: string) => ["projects", projectId, "settings"] as const,
+  accounts: (projectId: string) => ["projects", projectId, "accounts"] as const,
+  account: (accountId: string) => ["social-accounts", accountId] as const,
 
   operations: (projectId: string) => ["projects", projectId, "operations"] as const,
   operationsSummary: (projectId: string) =>

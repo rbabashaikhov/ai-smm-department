@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -62,6 +63,7 @@ from ai_smm.db.models import (
     Publication,
     PublicationStatus,
     RevisionSource,
+    SocialAccount,
     User,
 )
 from ai_smm.publishing.service import PublishBlocked, validate_ready_to_publish
@@ -189,6 +191,10 @@ class RevisionInput:
     source_ref: str | None = None
     editor_score: float | None = None
     editor_notes: str = ""
+    #: Where the revision is to be published; approved together with
+    #: the text. None: no destination chosen yet (a draft), or the legacy
+    #: deployment account of an allow-listed project.
+    social_account_id: uuid.UUID | None = None
 
 
 def content_hash(
@@ -198,23 +204,31 @@ def content_hash(
     format: str,
     images: list[Any],
     items: list[Any],
+    social_account_id: uuid.UUID | None = None,
 ) -> str:
     """SHA-256 of the deliverable snapshot, in a canonical JSON form.
 
-    Covers exactly what would be published. metadata, source and the
-    editor's notes are about the revision, not part of the post, and are
-    left out so that two revisions which would publish the same thing
-    have the same hash.
+    Covers exactly what would be published, and where. metadata, source
+    and the editor's notes are about the revision, not part of the post,
+    and are left out so that two revisions which would publish the same
+    thing have the same hash. The destination account is included only
+    when one is set, so every hash computed before accounts existed stays
+    valid.
     """
 
+    snapshot: dict[str, Any] = {
+        "title": title,
+        "body": body,
+        "format": format,
+        "images": images,
+        "items": items,
+    }
+
+    if social_account_id is not None:
+        snapshot["social_account_id"] = str(social_account_id)
+
     canonical = json.dumps(
-        {
-            "title": title,
-            "body": body,
-            "format": format,
-            "images": images,
-            "items": items,
-        },
+        snapshot,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
@@ -223,7 +237,45 @@ def content_hash(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _validate_input(revision: RevisionInput) -> None:
+def project_asset_prefix(project_id: str) -> str:
+    return f"knowledge/projects/{project_id}/assets/"
+
+
+def validate_image_paths(
+    images: list[dict[str, Any]], *, project_id: str
+) -> None:
+    """Every image must be a file of this project's own assets folder.
+
+    The publisher resolves paths against one media root shared by all
+    projects; this is what keeps project B from publishing project A's
+    media. Relative, no '..', under knowledge/projects/<id>/assets/.
+    """
+
+    prefix = project_asset_prefix(project_id)
+
+    for image in images:
+        path = image.get("path") if isinstance(image, dict) else None
+
+        if not isinstance(path, str) or not path:
+            raise ValueError("Every image needs a path.")
+
+        parts = path.split("/")
+
+        if (
+            path.startswith("/")
+            or "\\" in path
+            or any(part in ("", ".", "..") for part in parts)
+            or not path.startswith(prefix)
+            or len(path) <= len(prefix)
+        ):
+            raise ValueError(
+                f"Image paths must be inside {prefix} of this project."
+            )
+
+
+def _validate_input(
+    revision: RevisionInput, *, project_id: str | None = None
+) -> None:
     if revision.format not in CONTENT_FORMATS:
         raise ValueError(
             f"format must be one of {', '.join(CONTENT_FORMATS)}."
@@ -231,6 +283,67 @@ def _validate_input(revision: RevisionInput) -> None:
 
     if not revision.body.strip():
         raise ValueError("body must not be empty.")
+
+    if project_id is not None:
+        validate_image_paths(list(revision.images), project_id=project_id)
+
+
+def _validate_account(
+    db: Session, *, account_id: uuid.UUID | None, project_id: str
+) -> None:
+    """The chosen account must be an active account of the item's project."""
+
+    if account_id is None:
+        return
+
+    account = db.get(SocialAccount, account_id)
+    project = db.get(Project, project_id)
+
+    if account is None or account.project_id != project_id:
+        # Never confirm that another project's account exists.
+        raise ValueError("social_account_id is not an account of this project.")
+
+    if not account.is_active:
+        raise ValueError("The chosen social account is disabled.")
+
+    if project is not None and account.platform != project.default_platform:
+        raise ValueError(
+            f"The chosen account is on {account.platform}; this project "
+            f"publishes to {project.default_platform}."
+        )
+
+
+def _legacy_projects(legacy_projects: Collection[str] | None) -> Collection[str]:
+    if legacy_projects is not None:
+        return legacy_projects
+
+    from ai_smm.config import get_settings
+
+    return get_settings().legacy_threads_projects
+
+
+class DestinationRequired(ValueError):
+    """The revision has no social account and the project may not use the
+    deployment account."""
+
+
+def _require_destination(
+    revision: ContentRevision,
+    *,
+    project_id: str,
+    legacy_projects: Collection[str] | None,
+    command: str,
+) -> None:
+    if revision.social_account_id is not None:
+        return
+
+    if project_id in _legacy_projects(legacy_projects):
+        return
+
+    raise DestinationRequired(
+        f"Choose the social account this content is published to before "
+        f"you {command} it: create a revision with social_account_id."
+    )
 
 
 def _build_revision(
@@ -262,7 +375,9 @@ def _build_revision(
             format=revision.format,
             images=list(revision.images),
             items=list(revision.items),
+            social_account_id=revision.social_account_id,
         ),
+        social_account_id=revision.social_account_id,
         created_by_user_id=created_by_user.id if created_by_user else None,
         created_at=now,
     )
@@ -366,7 +481,10 @@ def create_content_item(
     to revision is deferred to commit, by which point both exist.
     """
 
-    _validate_input(revision)
+    _validate_input(revision, project_id=project_id)
+    _validate_account(
+        db, account_id=revision.social_account_id, project_id=project_id
+    )
 
     if not title.strip():
         raise ValueError("title must not be empty.")
@@ -461,6 +579,10 @@ def create_revision(
 
     _require_not_archived(item, command="revise")
     _check_version(item, expected_item_version)
+    _validate_input(revision, project_id=item.project_id)
+    _validate_account(
+        db, account_id=revision.social_account_id, project_id=item.project_id
+    )
 
     number = (
         db.execute(
@@ -533,8 +655,14 @@ def submit_for_review(
     expected_item_version: int | None = None,
     note: str = "",
     now: datetime | None = None,
+    legacy_projects: Collection[str] | None = None,
 ) -> ContentItem:
-    """draft -> in_review, for the exact revision the submitter looked at."""
+    """draft -> in_review, for the exact revision the submitter looked at.
+
+    A revision without a destination account is not submitted (unless its
+    project is an allow-listed legacy project): the reviewer must see where
+    the content goes in order to approve it.
+    """
 
     now = now or utcnow()
 
@@ -547,6 +675,14 @@ def submit_for_review(
     _require_not_archived(item, command="submit")
     _check_version(item, expected_item_version)
     revision = _resolve_current_revision(db, item=item, revision_id=revision_id)
+
+    if item.status is ContentStatus.DRAFT:
+        _require_destination(
+            revision,
+            project_id=item.project_id,
+            legacy_projects=legacy_projects,
+            command="submit",
+        )
 
     if item.status is not ContentStatus.DRAFT:
         raise InvalidContentTransition(
@@ -809,6 +945,8 @@ def _build_publication(
         editor_score=revision.editor_score,
         idempotency_key=key,
         source_ref=publication_link(item.id),
+        # Where it goes is part of what was approved; never changed after.
+        social_account_id=revision.social_account_id,
         # The reason this Publication may be delivered at all: a person
         # approved exactly this text. The worker still requires it.
         human_reviewed=True,
@@ -829,6 +967,7 @@ def materialize_approved_revision(
     mutations_enabled: bool,
     revision_id: uuid.UUID | None = None,
     now: datetime | None = None,
+    legacy_projects: Collection[str] | None = None,
 ) -> MaterializeResult:
     """Turn the approved revision into a delivery Publication. Nothing more.
 
@@ -924,6 +1063,24 @@ def materialize_approved_revision(
             allowed=(ContentStatus.APPROVED,),
             hint="No human approval is recorded for the current revision.",
         )
+
+    # The destination is part of what was approved. Re-checked here:
+    # the account may have been disabled since.
+    _require_destination(
+        revision,
+        project_id=item.project_id,
+        legacy_projects=legacy_projects,
+        command="materialize",
+    )
+
+    try:
+        _validate_account(
+            db,
+            account_id=revision.social_account_id,
+            project_id=item.project_id,
+        )
+    except ValueError as exc:
+        raise NotDeliverable(str(exc)) from exc
 
     project = db.get(Project, item.project_id)
     assert project is not None
@@ -1081,6 +1238,11 @@ def materialize_approved_revision(
             "revision_number": revision.revision_number,
             "content_hash": revision.content_hash,
             "platform": platform,
+            "social_account_id": (
+                str(revision.social_account_id)
+                if revision.social_account_id
+                else None
+            ),
         },
     )
 
@@ -1102,6 +1264,11 @@ def _revision_details(revision: ContentRevision) -> dict[str, Any]:
         "source": revision.source.value,
         "source_ref": revision.source_ref,
         "content_hash": revision.content_hash,
+        "social_account_id": (
+            str(revision.social_account_id)
+            if revision.social_account_id
+            else None
+        ),
     }
 
 

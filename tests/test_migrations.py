@@ -279,7 +279,11 @@ def test_the_publications_table_is_not_changed_by_the_new_migration(
     try:
         before = snapshot()
 
-        command.upgrade(config, "head")
+        # Up to the editorial layer, which left publications untouched.
+        # a7c2e5f19b40 (social accounts) adds exactly one nullable column,
+        # its foreign key, index and claim guard; that is asserted in
+        # tests/test_migration_social_accounts.py.
+        command.upgrade(config, "3d4ac1986f07")
 
         after = snapshot()
     finally:
@@ -372,6 +376,7 @@ def test_a_session_token_hash_column_is_not_the_token(
 
 CONTROL_PLANE_HEAD = "2964ac9ceea7"
 EDITORIAL_REVISION = "3d4ac1986f07"
+SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",
@@ -814,7 +819,7 @@ def test_a_lock_timeout_rolls_back_every_pending_revision(
         with engine.connect() as connection:
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == EDITORIAL_REVISION
+                == SOCIAL_ACCOUNTS_REVISION
             )
     finally:
         engine.dispose()

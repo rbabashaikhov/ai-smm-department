@@ -32,8 +32,7 @@
 #   docker compose -f compose.runtime.yml build
 #   docker compose -f compose.runtime.yml up -d postgres
 #   docker compose -f compose.runtime.yml --profile tools run --rm migrate upgrade head
-#   docker compose -f compose.runtime.yml --profile tools run --rm cli import-json /srv/ai-smm/bootstrap/demo-project.json --display-name "Demo (local)"
-#   docker compose -f compose.runtime.yml --profile tools run --rm cli user create-owner --email ... --display-name ... --project demo
+#   docker compose -f compose.runtime.yml --profile tools run --rm cli user create-owner --email ... --display-name ... --project demo --create-project "Demo (local)"
 #   docker compose -f compose.runtime.yml up -d
 #   docker compose -f compose.runtime.yml down        # keep the volume
 #   docker compose -f compose.runtime.yml down -v     # discard the local DB

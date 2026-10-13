@@ -22,6 +22,14 @@ export const permissions = (role: Role | undefined, mutationsEnabled: boolean) =
   /** schedule / reschedule / cancel */
   canCommandPublications: mutationsEnabled && atLeast(role, "admin"),
   canReadAudit: atLeast(role, "admin"),
+  /** project name, description, timezone, topics, tone */
+  canEditSettings: mutationsEnabled && atLeast(role, "admin"),
+  /** accounts and credentials: which identity the project speaks as */
+  canManageAccounts: mutationsEnabled && atLeast(role, "owner"),
 });
+
+/** POST /projects: the server allows it to the owner of any project. */
+export const canCreateProject = (roles: Role[], mutationsEnabled: boolean): boolean =>
+  mutationsEnabled && roles.some((role) => role === "owner");
 
 export type Permissions = ReturnType<typeof permissions>;
