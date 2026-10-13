@@ -30,6 +30,15 @@ SNAPSHOT_SQL = DB_DIR / "acl-snapshot.sql"
 
 API_ROLE = "ai_smm_cc"
 
+# -- smm-auth (SMM-024C-3B-1) -------------------------------------------------
+AUTH_ROLE = "ai_smm_auth"
+AUTH_FUNCTIONS_SQL = DB_DIR / "smm_auth.functions.sql"
+AUTH_DROP_SQL = DB_DIR / "smm_auth.drop.sql"
+AUTH_GRANTS_SQL = DB_DIR / "ai_smm_auth.grants.sql"
+AUTH_VERIFY_SQL = DB_DIR / "ai_smm_auth.verify.sql"
+AUTH_REVOKE_SQL = DB_DIR / "ai_smm_auth.revoke.sql"
+#: The privileges of every role but ai_smm_auth -- ai_smm_cc included.
+AUTH_SNAPSHOT_SQL = DB_DIR / "ai_smm_auth.acl-snapshot.sql"
 
 
 def libpq_url(url: str) -> str:
@@ -145,3 +154,61 @@ def provision(admin_url: str, database_url: str) -> ApiRole:
 
 def retire(admin_url: str) -> None:
     run_script(admin_url, REVOKE_SQL)
+
+
+# -- smm-auth (SMM-024C-3B-1) -------------------------------------------------
+
+
+def verify_auth(admin_url: str) -> list[str]:
+    """ai_smm_auth.verify.sql, read-only, as the lines psql -tA prints."""
+
+    return [
+        row[0]
+        for row in query_admin(
+            admin_url, AUTH_VERIFY_SQL.read_text(encoding="utf-8")
+        )
+    ]
+
+
+def snapshot_except_auth(admin_url: str) -> list[str]:
+    return [
+        row[0]
+        for row in query_admin(
+            admin_url, AUTH_SNAPSHOT_SQL.read_text(encoding="utf-8")
+        )
+    ]
+
+
+def set_auth_password(admin_url: str, password: str | None = None) -> str:
+    """Set ai_smm_auth's password; a new random one unless given."""
+
+    password = password or secrets.token_hex(24)
+
+    run_admin(
+        admin_url,
+        sql.SQL("ALTER ROLE ai_smm_auth PASSWORD {}").format(
+            sql.Literal(password)
+        ),
+    )
+
+    return password
+
+
+def auth_role_url(database_url: str, password: str) -> str:
+    return make_url(database_url).set(
+        username=AUTH_ROLE, password=password
+    ).render_as_string(hide_password=False)
+
+
+def install_auth(admin_url: str) -> None:
+    """P3, as the operator runs it: the functions, then the role's grants."""
+
+    run_script(admin_url, AUTH_FUNCTIONS_SQL)
+    run_script(admin_url, AUTH_GRANTS_SQL)
+
+
+def uninstall_auth(admin_url: str) -> None:
+    """The P3 rollback, in its required order: the role, then the functions."""
+
+    run_script(admin_url, AUTH_REVOKE_SQL)
+    run_script(admin_url, AUTH_DROP_SQL)
