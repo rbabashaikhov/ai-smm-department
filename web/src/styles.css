@@ -411,6 +411,38 @@ label.checkbox input {
   font-weight: 600;
 }
 
+.badge-inactive {
+  background: var(--warn-bg);
+  border-color: var(--warn-border);
+}
+
+.project-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.breadcrumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.breadcrumbs li + li::before {
+  content: "›";
+  margin-right: 6px;
+}
+
 .banner {
   border: 1px solid var(--border);
   border-radius: 6px;

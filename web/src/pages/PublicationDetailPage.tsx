@@ -5,7 +5,7 @@ import { useApi } from "../api/context";
 import { qk } from "../api/queryKeys";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { SnapshotView } from "../components/SnapshotView";
-import { Card, KeyValues, Loading, PageHeader, StatusBadge } from "../components/ui";
+import { Breadcrumbs, Card, KeyValues, Loading, PageHeader, StatusBadge } from "../components/ui";
 import { useProject, useReportActiveProject } from "../features/projects/hooks";
 import { usePublication } from "../features/publications/hooks";
 import { PublicationActions } from "../features/publications/PublicationActions";
@@ -44,8 +44,18 @@ export function PublicationDetailPage() {
   const tz = project.data?.default_timezone;
   const contentItemRef = p.source_ref ? CONTENT_ITEM_REF.exec(p.source_ref)?.[1] : undefined;
 
+  const projectPath = `/projects/${encodeURIComponent(p.project_id)}`;
+
   return (
     <>
+      <Breadcrumbs
+        items={[
+          { label: "Проекты", to: "/projects" },
+          { label: project.data?.display_name ?? p.project_id, to: projectPath },
+          { label: "Publications", to: `${projectPath}/publications` },
+          { label: `#${p.id}` },
+        ]}
+      />
       <PageHeader
         title={`Publication #${p.id}: ${p.title || "(untitled)"}`}
         subtitle={

@@ -14,6 +14,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { SnapshotView } from "../components/SnapshotView";
 import {
+  Breadcrumbs,
   Card,
   KeyValues,
   Loading,
@@ -182,8 +183,18 @@ export function ContentDetailPage() {
   const dialogError =
     activeMutation?.error && !notice ? activeMutation.error : null;
 
+  const projectPath = `/projects/${encodeURIComponent(item.project_id)}`;
+
   return (
     <>
+      <Breadcrumbs
+        items={[
+          { label: "Проекты", to: "/projects" },
+          { label: project.data?.display_name ?? item.project_id, to: projectPath },
+          { label: "Content", to: `${projectPath}/content` },
+          { label: item.title },
+        ]}
+      />
       <PageHeader
         title={item.title}
         subtitle={

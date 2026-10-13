@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Link } from "react-router";
 
 import type { PageParams } from "../types/api";
 
@@ -109,6 +110,20 @@ export function Pagination({
         Вперёд →
       </button>
     </div>
+  );
+}
+
+/**
+ * "Проекты › Project › Section › current". A plain list rather than a
+ * <nav>: the sidebar stays the page's only navigation landmark.
+ */
+export function Breadcrumbs({ items }: { items: { label: ReactNode; to?: string }[] }) {
+  return (
+    <ol className="breadcrumbs" data-testid="breadcrumbs">
+      {items.map((item, index) => (
+        <li key={index}>{item.to ? <Link to={item.to}>{item.label}</Link> : item.label}</li>
+      ))}
+    </ol>
   );
 }
 

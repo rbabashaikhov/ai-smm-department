@@ -1,22 +1,66 @@
 import { useState } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 
 import { ErrorBanner } from "../components/ErrorBanner";
 import { useAuth, useMe, useMutationsEnabled } from "../features/auth/AuthProvider";
 import { atLeast } from "../features/auth/rbac";
-import { useActiveProjectId } from "../features/projects/hooks";
+import { useActiveProjectId, useProjects } from "../features/projects/hooks";
+import type { Role } from "../types/api";
+
+interface SwitcherOption {
+  id: string;
+  label: string;
+  role: Role;
+  inactive: boolean;
+}
+
+/** Sections that exist in every project; "" is the dashboard. */
+const PROJECT_SECTION = /^\/projects\/[^/]+(?:\/(content|publications|attention|audit))?\/?$/;
+
+/**
+ * Where choosing another project leads: the same section when it exists
+ * there and the role allows it, else the project's dashboard. Filters
+ * (the query string) are never carried over -- they belong to the
+ * project they were set in.
+ */
+function switchTarget(pathname: string, projectId: string, role: Role): string {
+  const base = `/projects/${encodeURIComponent(projectId)}`;
+  const section = PROJECT_SECTION.exec(pathname)?.[1];
+
+  if (!section) return base;
+  if (section === "audit" && !atLeast(role, "admin")) return base;
+
+  return `${base}/${section}`;
+}
 
 export function AppLayout() {
   const me = useMe();
   const mutationsEnabled = useMutationsEnabled();
   const { logout } = useAuth();
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const projectId = useActiveProjectId();
+  const projects = useProjects();
   const [logoutError, setLogoutError] = useState<unknown>(null);
   const [loggingOut, setLoggingOut] = useState(false);
 
   const access = me.projects.find((p) => p.project_id === projectId);
   const base = projectId ? `/projects/${encodeURIComponent(projectId)}` : null;
+
+  // GET /projects knows is_active; /auth/me stands in while it loads.
+  const options: SwitcherOption[] = projects.data
+    ? projects.data.map((p) => ({
+        id: p.id,
+        label: p.display_name,
+        role: p.role,
+        inactive: !p.is_active,
+      }))
+    : me.projects.map((p) => ({
+        id: p.project_id,
+        label: p.display_name,
+        role: p.role,
+        inactive: false,
+      }));
 
   const onLogout = async () => {
     setLoggingOut(true);
@@ -67,16 +111,17 @@ export function AppLayout() {
             <select
               aria-label="Project switcher"
               value={projectId ?? ""}
+              disabled={options.length === 0}
               onChange={(event) => {
-                if (event.target.value) {
-                  navigate(`/projects/${encodeURIComponent(event.target.value)}`);
-                }
+                const target = options.find((p) => p.id === event.target.value);
+
+                if (target) navigate(switchTarget(pathname, target.id, target.role));
               }}
             >
-              <option value="">— выберите —</option>
-              {me.projects.map((p) => (
-                <option key={p.project_id} value={p.project_id}>
-                  {p.display_name} ({p.role})
+              <option value="">{options.length === 0 ? "— нет проектов —" : "— выберите —"}</option>
+              {options.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label} ({p.role}){p.inactive ? " (неактивен)" : ""}
                 </option>
               ))}
             </select>

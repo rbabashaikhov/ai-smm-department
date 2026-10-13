@@ -2,8 +2,9 @@ import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
 
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Loading } from "../components/ui";
-import { useAuth } from "../features/auth/AuthProvider";
+import { useAuth, useMe } from "../features/auth/AuthProvider";
 import { ActiveProjectProvider } from "../features/projects/hooks";
+import { ProjectScope } from "../features/projects/ProjectScope";
 import { AppLayout } from "../layouts/AppLayout";
 import { AttentionPage } from "../pages/AttentionPage";
 import { AuditPage } from "../pages/AuditPage";
@@ -45,6 +46,16 @@ function RequireAuth() {
   );
 }
 
+/** "/": a user with exactly one project goes straight into it. */
+function HomeRedirect() {
+  const { projects } = useMe();
+  const only = projects.length === 1 ? projects[0] : undefined;
+
+  return (
+    <Navigate to={only ? `/projects/${encodeURIComponent(only.project_id)}` : "/projects"} replace />
+  );
+}
+
 export function AppRoutes() {
   const { state } = useAuth();
 
@@ -56,14 +67,16 @@ export function AppRoutes() {
       />
       <Route element={<RequireAuth />}>
         <Route element={<AppLayout />}>
-          <Route index element={<Navigate to="/projects" replace />} />
+          <Route index element={<HomeRedirect />} />
           <Route path="/projects" element={<ProjectsPage />} />
-          <Route path="/projects/:projectId" element={<DashboardPage />} />
-          <Route path="/projects/:projectId/content" element={<ContentListPage />} />
-          <Route path="/projects/:projectId/content/new" element={<CreateContentPage />} />
-          <Route path="/projects/:projectId/publications" element={<PublicationsPage />} />
-          <Route path="/projects/:projectId/attention" element={<AttentionPage />} />
-          <Route path="/projects/:projectId/audit" element={<AuditPage />} />
+          <Route path="/projects/:projectId" element={<ProjectScope />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="content" element={<ContentListPage />} />
+            <Route path="content/new" element={<CreateContentPage />} />
+            <Route path="publications" element={<PublicationsPage />} />
+            <Route path="attention" element={<AttentionPage />} />
+            <Route path="audit" element={<AuditPage />} />
+          </Route>
           <Route path="/content/:contentItemId" element={<ContentDetailPage />} />
           <Route path="/publications/:publicationId" element={<PublicationDetailPage />} />
           <Route path="*" element={<NotFoundPage />} />

@@ -55,8 +55,9 @@ describe("login", () => {
     await user.type(screen.getByLabelText("Password"), "correct horse");
     await user.click(screen.getByRole("button", { name: "Войти" }));
 
-    expect(await screen.findByRole("heading", { name: "Проекты" })).toBeInTheDocument();
-    expect(currentPath()).toBe("/projects");
+    // One project: the landing page is that project's dashboard (SMM-025A, F2).
+    expect(await screen.findByRole("heading", { name: "Demo Project" })).toBeInTheDocument();
+    expect(currentPath()).toBe("/projects/demo");
 
     const login = server.callsTo("POST", "/api/v1/auth/login")[0]!;
     expect(login.body).toEqual({ email: "operator@example.com", password: "correct horse" });
@@ -116,6 +117,8 @@ describe("logout", () => {
     await user.type(screen.getByLabelText("Password"), "pw");
     await user.click(screen.getByRole("button", { name: "Войти" }));
 
-    await waitFor(() => expect(currentPath()).toBe("/projects"));
+    // The default landing page (one project: its dashboard), not the
+    // previous session's /projects/demo/content.
+    await waitFor(() => expect(currentPath()).toBe("/projects/demo"));
   });
 });

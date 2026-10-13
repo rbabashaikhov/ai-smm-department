@@ -6,6 +6,8 @@ import { qk } from "../api/queryKeys";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Empty, Loading, PageHeader } from "../components/ui";
 import { useProjects } from "../features/projects/hooks";
+import { InactiveBadge } from "../features/projects/ProjectScope";
+import { formatDateTime } from "../lib/time";
 import type { Project } from "../types/api";
 
 function SettingsSummary({ project }: { project: Project }) {
@@ -36,6 +38,50 @@ function SettingsSummary({ project }: { project: Project }) {
   );
 }
 
+/**
+ * Queue counters of one project. Each row asks on its own, so one
+ * project that fails to answer shows "—" and the others still render.
+ */
+function SummaryCells({ project }: { project: Project }) {
+  const api = useApi();
+  const summary = useQuery({
+    queryKey: qk.operationsSummary(project.id),
+    queryFn: () => api.projects.operationsSummary(project.id),
+  });
+
+  if (!summary.data) {
+    const placeholder = summary.isError ? "—" : "…";
+
+    return (
+      <>
+        {[0, 1, 2, 3].map((i) => (
+          <td key={i} className="num muted" data-testid="summary-unavailable">
+            {placeholder}
+          </td>
+        ))}
+      </>
+    );
+  }
+
+  const s = summary.data;
+  const base = `/projects/${encodeURIComponent(project.id)}`;
+
+  return (
+    <>
+      <td className="num">
+        {s.needs_attention > 0 ? (
+          <Link to={`${base}/attention`}>{s.needs_attention}</Link>
+        ) : (
+          s.needs_attention
+        )}
+      </td>
+      <td className="num">{s.due_now}</td>
+      <td>{formatDateTime(s.next_scheduled_at, project.default_timezone)}</td>
+      <td className="num">{s.published_last_24h}</td>
+    </>
+  );
+}
+
 export function ProjectsPage() {
   const projects = useProjects();
 
@@ -47,7 +93,7 @@ export function ProjectsPage() {
         <ErrorBanner error={projects.error} onRetry={() => projects.refetch()} />
       ) : null}
       {projects.data && projects.data.length === 0 ? (
-        <Empty>У вас нет доступа ни к одному проекту.</Empty>
+        <Empty>У вас нет доступа ни к одному проекту. Обратитесь к владельцу проекта.</Empty>
       ) : null}
       {projects.data && projects.data.length > 0 ? (
         <table className="table">
@@ -56,6 +102,10 @@ export function ProjectsPage() {
               <th>Проект</th>
               <th>ID</th>
               <th>Роль</th>
+              <th>Attention</th>
+              <th>Due now</th>
+              <th>Next scheduled</th>
+              <th>Published 24h</th>
               <th>Платформа</th>
               <th>Timezone</th>
               <th>Язык</th>
@@ -68,7 +118,7 @@ export function ProjectsPage() {
               <tr key={project.id}>
                 <td>
                   <strong>{project.display_name}</strong>
-                  {project.is_active ? null : <span className="badge"> inactive</span>}
+                  {project.is_active ? null : <> <InactiveBadge /></>}
                   {project.description ? (
                     <div className="muted small">{project.description}</div>
                   ) : null}
@@ -79,6 +129,7 @@ export function ProjectsPage() {
                 <td>
                   <span className="badge badge-role">{project.role}</span>
                 </td>
+                <SummaryCells project={project} />
                 <td>{project.default_platform}</td>
                 <td>{project.default_timezone}</td>
                 <td>{project.default_language}</td>

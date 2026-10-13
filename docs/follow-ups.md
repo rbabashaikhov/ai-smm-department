@@ -12,7 +12,7 @@ register below says which.
 
 ## Register
 
-**As of 2026-10-13 (SMM-024C-2B).** The heading stays the same when the
+**As of 2026-10-13 (SMM-024C-2B; SMM-025A review added FU-025A-1…4).** The heading stays the same when the
 register is updated, so links to `#register` keep working; the anchor of
 its first version (`#register-as-of-2026-10-12-smm-024c-1`) is kept too.
 
@@ -47,6 +47,10 @@ mandatory condition for a later step, named in its row.
 | [FU-024B2-1](#fu-024b2-1--flaky-vitest-tests) | Flaky Vitest tests | open | P2 | No — but fix before UI work for mutations, so regressions are not masked |
 | [FU-024B3-4](#fu-024b3-4--atomic-finalisation-of-dump-and-checksum) | Atomic finalisation of dump and checksum | open | P2 | No (before the next migration preferably) |
 | [FU-024B3-2](#fu-024b3-2--take-the-api-off-the-shared-network) | Take the API off the shared network | open | P2 | No (session + CSRF still required) |
+| [FU-025A-1](#fu-025a-1--local-state-of-content-detail-survives-a-change-of-item) | Content Detail keeps local state when the item changes | open | P2 | No — the server refuses a revision of another item; fix before the editorial UI is used with mutations on |
+| [FU-025A-3](#fu-025a-3--diagnostics-of-a-failed-projects-overview-row) | Diagnostics of a failed Projects Overview row | open | P3 | No |
+| [FU-025A-4](#fu-025a-4--the-initial-route-uses-a-snapshot-of-meprojects) | Initial route uses a snapshot of `me.projects` | open | P3 | No |
+| [FU-025A-2](#fu-025a-2--module-global-navigateref-in-the-test-renderer) | Module-global `navigateRef` in the test renderer | open | P3 | No — test hygiene |
 | [FU-024C1-4](#fu-024c1-4--ux-and-localisation-defects-in-audit-and-preview) | UX and localisation defects in Audit / Preview | open, needs triage | P3 | No |
 | [FU-024B3-3](#fu-024b3-3--secure-session-cookie) | `Secure` session cookie | open, depends on HTTPS | P3 | No (SSH tunnel only) |
 | [FU-024B4A-2](#fu-024b4a-2--the-trust-model-of-backup-evidence-and-the-off-host-acknowledgement) | Trust model of backup evidence / off-host ack | accepted limitation | P3 | No |
@@ -629,3 +633,76 @@ function.
 
 Fix: an explicit `db.flush()` before the `try`, the user id captured
 before it, and a test with a pending change the role may not make.
+
+---
+
+## From the SMM-025A code review (2026-10-13)
+
+The independent review of the SMM-025A frontend changes (F1–F8, branch
+`feat/smm-025a-multi-project-ui`) ended in **ACCEPT WITH FOLLOW-UPS**. No
+finding blocked the patch. Design and acceptance criteria:
+[architecture/smm-025a-product-ui-design.md](architecture/smm-025a-product-ui-design.md).
+
+### FU-025A-1 — Local state of Content Detail survives a change of item
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no. **Pre-existing:**
+yes — not introduced by SMM-025A; F1 keys only the `/projects/:projectId/*`
+pages.
+
+`/content/:contentItemId` is one route instance. Going from one item
+straight to another (back / forward, a typed URL) keeps
+`ContentDetailPage`'s local state: `editing`, the open confirmation
+`dialog` (with the revision and item version it was opened for),
+`note`, `notice` and `lastMaterialize`. Queries, breadcrumbs and the
+active project follow the new item correctly; only this local state is
+stale. By reading the code (not tested): confirming a dialog left over
+from item A sends A's `revision_id` to item B's endpoint, which the
+server refuses because only B's current revision is accepted — an error,
+not a wrong decision. `PublicationDetailPage` has the same shape with
+less state.
+
+Done when the detail pages start from fresh state for each id (for
+example keyed by the id, as `ProjectScope` keys its outlet), with a test
+that navigates item → item with a dialog open.
+
+### FU-025A-2 — Module-global `navigateRef` in the test renderer
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no.
+
+`web/src/test/render.tsx` keeps the router's `navigate` in a module-level
+variable set by `NavigateProbe`, used by `navigateTo()`. It works because
+tests in a file run one after another and each render replaces it, but
+it is shared mutable state: a test that calls `navigateTo()` before its
+own render, or tests run concurrently within a file, would use another
+render's router.
+
+Done when `renderApp()` returns its own `navigateTo` (bound to that
+render), and the global is gone.
+
+### FU-025A-3 — Diagnostics of a failed Projects Overview row
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no.
+
+When one project's `/operations/summary` fails, its row shows "—" in the
+four counter cells (AC-A5) — with no reason and no way to retry that
+row; the error code and request id are discarded. A 401 still ends the
+session as everywhere else.
+
+Done when a failed row says why (at least the error title and request
+id, for example in a tooltip or a small inline note) and offers a
+per-row retry, without turning one row's failure into a page banner.
+
+### FU-025A-4 — The initial route uses a snapshot of `me.projects`
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no.
+
+`/` decides between "the only project's dashboard" and `/projects` from
+`/auth/me`, read at sign-in or bootstrap, while the switcher and the
+overview use `GET /projects`. If memberships change during a session,
+`/` can send the user into a project that now answers with the
+no-access panel, or to the list although one project is left. Nothing
+is disclosed (the server decides), and a reload corrects it.
+
+Done when the initial route uses the same fresh source as the switcher
+(`GET /projects`, waiting for it), or the choice is documented as
+accepted.

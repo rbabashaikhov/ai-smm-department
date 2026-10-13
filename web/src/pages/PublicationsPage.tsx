@@ -127,7 +127,24 @@ export function PublicationsPage() {
 
       {list.isPending ? <Loading /> : null}
       {list.isError ? <ErrorBanner error={list.error} onRetry={() => list.refetch()} /> : null}
-      {list.data && list.data.items.length === 0 ? <Empty>Ничего не найдено.</Empty> : null}
+      {list.data && list.data.items.length === 0 ? (
+        status || format || reviewed !== null || seriesId || offset > 0 ? (
+          <Empty>
+            Ничего не найдено по выбранным фильтрам.{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setSeriesDraft("");
+                setParams(new URLSearchParams());
+              }}
+            >
+              Сбросить фильтры
+            </button>
+          </Empty>
+        ) : (
+          <Empty>В проекте пока нет публикаций.</Empty>
+        )
+      ) : null}
       {list.data && list.data.items.length > 0 ? (
         <>
           <PublicationTable rows={list.data.items} timeZone={project.data?.default_timezone} />

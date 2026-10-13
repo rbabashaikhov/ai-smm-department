@@ -278,3 +278,107 @@ export function createServer(
 
   return api;
 }
+
+// -- two projects (SMM-025A) -------------------------------------------------
+
+export const PROJECT_B_ID = "beta";
+export const ITEM_B_ID = "55555555-5555-4555-8555-555555555555";
+export const PUBLICATION_B_ID = 77;
+
+/** A response held back until the test releases it. */
+export function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+
+  return { promise, resolve };
+}
+
+export function makeBetaProject(role: Role, isActive = true): Project {
+  return {
+    ...makeProject(role),
+    id: PROJECT_B_ID,
+    display_name: "Beta Project",
+    default_timezone: "Europe/Berlin",
+    is_active: isActive,
+  };
+}
+
+/**
+ * Two projects with clearly different data: "demo" (Demo Project) and
+ * "beta" (Beta Project). Any other project id answers 404, as the API
+ * does for an unknown project and for one without a membership.
+ */
+export function createTwoProjectServer(
+  options: {
+    roles?: { demo: Role; beta: Role };
+    betaActive?: boolean;
+    mutationsEnabled?: boolean;
+  } = {},
+): FakeApi {
+  const roles = options.roles ?? { demo: "owner", beta: "viewer" };
+  const mutationsEnabled = options.mutationsEnabled ?? true;
+  const server = createServer(roles.demo, { mutationsEnabled });
+
+  const projects: Record<string, Project> = {
+    [PROJECT_ID]: makeProject(roles.demo),
+    [PROJECT_B_ID]: makeBetaProject(roles.beta, options.betaActive ?? true),
+  };
+  const items: Record<string, ContentItemDetail> = {
+    [PROJECT_ID]: makeItem("draft", { title: "Demo post" }),
+    [PROJECT_B_ID]: makeItem("draft", { id: ITEM_B_ID, project_id: PROJECT_B_ID, title: "Beta post" }),
+  };
+  const publications: Record<string, PublicationDetail> = {
+    [PROJECT_ID]: makePublication("failed", { title: "Demo snapshot" }),
+    [PROJECT_B_ID]: makePublication("failed", {
+      id: PUBLICATION_B_ID,
+      project_id: PROJECT_B_ID,
+      title: "Beta snapshot",
+    }),
+  };
+  const notFound = {
+    status: 404,
+    body: { error: { code: "NOT_FOUND", message: "Project not found.", details: {}, request_id: "r" } },
+  };
+  const known = (id: string | undefined) => id !== undefined && id in projects;
+
+  server
+    .on("GET", "/api/v1/auth/me", ok({
+      ...makeMe(roles.demo, mutationsEnabled),
+      projects: Object.values(projects).map((p) => ({
+        project_id: p.id,
+        display_name: p.display_name,
+        role: p.role,
+      })),
+    }))
+    .on("GET", "/api/v1/projects", ok(Object.values(projects)))
+    .on("GET", "/api/v1/projects/:projectId", (req) =>
+      known(req.params.projectId) ? ok(projects[req.params.projectId!]) : notFound,
+    )
+    .on("GET", "/api/v1/projects/:projectId/operations/summary", (req) =>
+      known(req.params.projectId)
+        ? ok(makeSummary({ project_id: req.params.projectId!, api_mutations_enabled: mutationsEnabled }))
+        : notFound,
+    )
+    .on("GET", "/api/v1/projects/:projectId/content-items", (req) =>
+      known(req.params.projectId) ? ok(page([items[req.params.projectId!]])) : notFound,
+    )
+    .on("GET", "/api/v1/projects/:projectId/publications", (req) =>
+      known(req.params.projectId) ? ok(page([publications[req.params.projectId!]])) : notFound,
+    )
+    .on("GET", "/api/v1/projects/:projectId/operations/attention", (req) =>
+      known(req.params.projectId) ? ok(page([publications[req.params.projectId!]])) : notFound,
+    )
+    .on("GET", "/api/v1/projects/:projectId/audit", (req) =>
+      known(req.params.projectId) ? ok(page([])) : notFound,
+    )
+    .on("GET", "/api/v1/content-items/:id", (req) =>
+      ok(req.params.id === ITEM_B_ID ? items[PROJECT_B_ID] : items[PROJECT_ID]),
+    )
+    .on("GET", "/api/v1/publications/:id", (req) =>
+      ok(Number(req.params.id) === PUBLICATION_B_ID ? publications[PROJECT_B_ID] : publications[PROJECT_ID]),
+    );
+
+  return server;
+}
