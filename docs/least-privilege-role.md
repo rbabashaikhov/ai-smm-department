@@ -2,16 +2,17 @@
 
 | | |
 |---|---|
-| Stage | SMM-024C-2A — design and local validation (FU-024B3-1); SMM-024C-2A-FIX — security review corrections (2026-10-12) |
-| Baseline | `main` at `bc60b48bf79eeb44f744f4bd6ff3058794f0c7f3` |
-| Status | **Designed and validated locally. NOT applied in production.** Creating the role, storing its credentials, building and loading new images and switching `smm-api` each need the owner's approval (§7) |
+| Stage | SMM-024C-2A — design and local validation (FU-024B3-1); SMM-024C-2A-FIX — security review corrections (2026-10-12); SMM-024C-2B — production rollout (2026-10-12 – 2026-10-13) |
+| Baseline | `main` at `bc60b48bf79eeb44f744f4bd6ff3058794f0c7f3`; released as `0cbd641074ad3bc0501e54f59dac90bd1ccc9006` |
+| Status | **In production since 2026-10-13, accepted by the owner.** `smm-api` connects as `ai_smm_cc`; the worker, `migrate` and `cli` keep the owner role. Record: [production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md) |
 | Scope | the read-only business mode deployed on 2026-10-11. Business mutations (SMM-025) need a separate design (§9) |
 
 ## 1. Problem
 
-Since 2026-10-11 the deployed API connects as `ai_smm`: the database owner,
-the role the live worker and the migrations use. The read-only guarantee
-therefore rests on the application alone — the central mutation gate and
+From 2026-10-11 until the rollout of this design on 2026-10-13 the
+deployed API connected as `ai_smm`: the database owner, the role the live
+worker and the migrations use. The read-only guarantee therefore rested
+on the application alone — the central mutation gate and
 the service-level checks. A code path that escaped both could change or
 delete anything, including the publication queue that the live worker
 sends to Threads, and could run DDL.
@@ -520,9 +521,31 @@ only that refusal, briefly; a deterministic test proves a session that
 goes away is outlasted and one that stays still fails. Not a product
 issue: `cc-db-backup.sh` drops its scratch database as the superuser.
 
-## 7. Production rollout — NOT EXECUTED, REQUIRES OWNER APPROVAL
+## 7. Production rollout
 
-Nothing in this section has been run. Four separate owner approvals:
+> **Executed in production (SMM-024C-2B).** P1 on 2026-10-12 15:04 UTC,
+> A1 at 18:30, A2 at 19:03, A3 on 2026-10-13 04:42 UTC — after a first A3
+> attempt at 04:38 that was rolled back by RB-1 because one diagnostic
+> probe named a non-existent column. Each step had its own owner approval
+> and window. The sanitised record, with results and deviations, is
+> [production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md).
+>
+> The blocks below stay as the **template** for any later run (another
+> release, a re-creation of the role). Differences from the text as it
+> was approved:
+>
+> - the release files were staged in a separate staging directory next
+>   to `$CC`, not in `$CC/release-$M`; the commands work the same with
+>   that path;
+> - §7.4 installs `compose.control-center.yml` **last** (corrected below;
+>   the original single `cp` copied it first);
+> - the new wrapper's `preflight` needs a current `control-center.window`
+>   (it runs the queue gate); A3 rewrote the file for its window and kept
+>   the previous one in `$EV/prev`;
+> - a privilege probe used as a rollback trigger must name real columns:
+>   check them in `information_schema` before the run.
+
+Four separate owner approvals:
 
 | | Operation | Touches |
 |---|---|---|
@@ -692,15 +715,29 @@ configuration until `up`.
 ```bash
 cd "$CC"
 install -d -m 700 "$EV/prev"
-cp -p compose.control-center.yml cc-common.sh cc-gate.sh cc-compose.sh cc-db-backup.sh "$EV/prev/"
+cp -p compose.control-center.yml cc-common.sh cc-gate.sh cc-compose.sh cc-db-backup.sh \
+      control-center.window "$EV/prev/"
 ( cd "$EV/prev" && sha256sum * > SHA256 )
-cp -p "release-$M"/{compose.control-center.yml,cc-common.sh,cc-gate.sh,cc-compose.sh,cc-db-backup.sh,ai_smm_cc.verify.sql} .
+# the approved window: the new wrapper's preflight runs the queue gate
+printf 'SMM_CC_WINDOW_START=%s\nSMM_CC_WINDOW_END=%s\n' '<start, UTC>' '<end, UTC>' > control-center.window
+# scripts and the verify file first ...
+cp -p "release-$M"/{cc-common.sh,cc-gate.sh,cc-compose.sh,cc-db-backup.sh,ai_smm_cc.verify.sql} .
+# ... the compose file LAST: the previous wrapper with the new compose file
+# would start smm-api on control-center.api.env without the API role gate.
+cp -p "release-$M/compose.control-center.yml" .
 chmod 644 compose.control-center.yml cc-common.sh cc-gate.sh ai_smm_cc.verify.sql
 chmod 755 cc-compose.sh cc-db-backup.sh
+# the installed copies against the manifest: six lines "OK"
+grep -E '  (compose\.control-center\.yml|cc-(common|gate|compose|db-backup)\.sh|ai_smm_cc\.verify\.sql)$' \
+  "release-$M/MANIFEST-$M.sha256" | sha256sum -c -
 ./cc-compose.sh config --quiet && echo config-ok
 ./cc-compose.sh config --services                  # smm-api smm-web
 ./cc-compose.sh ps                                  # unchanged: same smm-api container
+./cc-compose.sh preflight                           # identity, API role and queue gates; starts nothing
 ```
+
+If anything in this step fails, put the previous files back before any
+`up` (RB-1's `cp` from `$EV/prev`, §7.8); no container has changed yet.
 
 ### 7.5 R5 — Switch `smm-api`
 
@@ -785,7 +822,14 @@ any smoke check failing; any `permission denied` in the API log; any
 ### 7.8 Rollback
 
 **RB-1 — configuration rollback (minutes, no SQL).** Puts `smm-api` back
-on the owner URL exactly as deployed on 2026-10-11:
+on the owner URL with the previous compose file and scripts (images stay
+`M`). It does not restore `control-center.window` or remove
+`ai_smm_cc.verify.sql`: the previous wrapper does not read the verify
+file and reads the window (same format) only for `preflight` and
+`migrate`. Its `up`
+recreates only `smm-api` (`smm-web` keeps running) and never touches the
+worker, which is not part of this Compose project. Ran once in production,
+on 2026-10-13, and worked:
 
 ```bash
 cd "$CC"
@@ -928,15 +972,14 @@ Constraints for that design, from what this stage established:
 
 ## 10. Open items and blockers
 
-**Blocking the production rollout** (each an owner decision; none is a
-defect of the design):
+**Blocking the production rollout — all resolved (SMM-024C-2B):**
 
-| # | Item |
-|---|---|
-| B1 | Approvals A0 (images `M` on the current configuration), A1 (role and grants on the shared instance), A2 (credential), A3 (switch `smm-api`) — §7 |
-| B2 | Build `ai-smm-api` and `ai-smm-web` from the merge commit `M` (required since 2A-FIX: `auth.py` changed) and the release bundle with its manifest — local work, then transfer and load under A0 |
-| B3 | Facts only the read-only baseline R1 can establish on the host: the role name is free; every application table is owned by `ai_smm`; `PUBLIC` has no `CREATE` on `public`/`ai_smm` (otherwise the grants file stops, and revoking it from `PUBLIC` — which also changes the worker's privileges — is a separate decision); no `trust` rule applies to connections from the shared network |
-| B4 | Review and merge of this branch. Nothing is committed yet |
+| # | Item | Resolution |
+|---|---|---|
+| B1 | Approvals A0 (images `M` on the current configuration), A1 (role and grants on the shared instance), A2 (credential), A3 (switch `smm-api`) — §7 | granted and executed 2026-10-12 – 2026-10-13 |
+| B2 | Build `ai-smm-api` and `ai-smm-web` from the merge commit `M` (required since 2A-FIX: `auth.py` changed) and the release bundle with its manifest | built from `0cbd641`, reproducible; loaded under A0 (P1) |
+| B3 | Facts only the read-only baseline R1 can establish on the host: the role name is free; every application table is owned by `ai_smm`; `PUBLIC` has no `CREATE` on `public`/`ai_smm`; no `trust` rule applies to connections from the shared network | confirmed by the read-only preflight (SMM-024C-2B-1) and again before A1 |
+| B4 | Review and merge of this branch | merged to `main` as `0cbd641` |
 
 **Open, not blocking:**
 

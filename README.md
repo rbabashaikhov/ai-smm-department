@@ -354,15 +354,19 @@ Publication status: blocked
 | Этап | Содержание | Статус |
 |---|---|---|
 | SMM-024B | Production-упаковка и развёртывание Control Center v1 (read-only) | **выполнено 2026-10-11** ([акт приёмки](docs/production-acceptance-smm-024b.md)) |
-| SMM-024C | Стабилизация после развёртывания; SMM-024C-1 — выравнивание документации с production; далее — P1 follow-ups ([docs/follow-ups.md](docs/follow-ups.md)) | в работе |
+| SMM-024C | Стабилизация после развёртывания: SMM-024C-1 — выравнивание документации с production; SMM-024C-2 — роль БД с минимальными правами для API, **в production с 2026-10-13** ([акт приёмки](docs/production-acceptance-smm-024c2.md)); далее — оставшиеся follow-ups ([docs/follow-ups.md](docs/follow-ups.md)) | в работе |
 | SMM-025 | этап согласованной дорожной карты; детальное ТЗ и критерии приёмки ещё не утверждены | запланировано |
 | SMM-031 | этап согласованной дорожной карты; детальное ТЗ и критерии приёмки ещё не утверждены | запланировано |
 
 Включение бизнес-мутаций в production Control Center не запланировано
-как отдельный шаг: сначала закрываются блокирующие P1 follow-ups — роль
-БД с минимальными правами для API (FU-024B3-1) и проверка safety gates
-перед включением публикационных мутаций (FU-024C1-5), — затем изменение
-compose-файла через review и отдельное одобрение владельца. Любая
+как отдельный шаг. Роль БД с минимальными правами для API (FU-024B3-1)
+работает в production с 2026-10-13 и рассчитана только на режим
+read-only: с ней включение мутаций завершается отказом PostgreSQL.
+Сначала закрываются блокирующие P1 follow-ups — проверка safety gates
+(FU-024C1-5), защита от подделки сессий (FU-024C2-1), достоверность
+автора записей аудита (FU-024C2-2) и модель прав для бизнес-мутаций
+(FU-024C2-3), — затем изменение compose-файла через review и отдельное
+одобрение владельца. Любая
 следующая миграция при активной записи в очередь дополнительно требует
 закрытия FU-024B4A-1.
 
@@ -389,24 +393,27 @@ compose-файла через review и отдельное одобрение в
 запланированные материалы, а Control Center даёт операторам приватный
 браузерный доступ к той же очереди.
 
-### Текущее состояние (на 2026-10-11, приёмка SMM-024B)
+### Текущее состояние (на 2026-10-13, приёмка SMM-024C-2B)
 
 | Компонент | Состояние |
 |---|---|
 | Worker | работает, режим **LIVE** (`AI_SMM_DRY_RUN=false`): одобренная и запланированная запись будет опубликована. При развёртывании Control Center не изменялся |
-| Control Center v1 (FastAPI + React/Vite) | **развёрнут 2026-10-11**, release `8ccccda161c3a0b4bc3fd4a90d86dfd19dabd665`; API и web были `healthy` на момент приёмки |
+| Control Center v1 (FastAPI + React/Vite) | **развёрнут 2026-10-11** (release `8ccccda`); с 2026-10-13 — release `0cbd641074ad3bc0501e54f59dac90bd1ccc9006`; API и web `healthy` на момент приёмки |
+| Роль БД API | **`ai_smm_cc`** с минимальными правами (с 2026-10-13): чтение и только записи входа/выхода; бизнес-записи и DDL отклоняет сам PostgreSQL. Worker, миграции и CLI — под прежней ролью-владельцем ([docs/least-privilege-role.md](docs/least-privilege-role.md)) |
 | Доступ | только через SSH-туннель к loopback-порту хоста; публичного маршрута, домена и открытого порта нет |
 | Бизнес-мутации | **выключены**: `AI_SMM_API_MUTATIONS_ENABLED=false` для любой роли, включая owner |
 | Что всё же пишется в БД | вход, выход и обслуживание сессии: `user_sessions`, `users.last_login_at`, `auth.*` в `audit_log` |
 | PostgreSQL / Alembic | существующий экземпляр PostgreSQL 16, отдельная база; ревизия **`3d4ac1986f07`** (head) |
-| Backup | перед миграцией создан дамп, пробное восстановление прошло; off-host копия есть, её шифрование не подтверждено |
-| Приёмка | smoke-тесты через туннель и ручная проверка экранов Projects, Dashboard, Publications, Preview публикации №3, Content, Attention, Audit |
+| Backup | перед миграцией 2026-10-11 создан дамп, пробное восстановление прошло, off-host копия не зашифрована; ночной дамп 2026-10-12 проверен восстановлением, его off-host копия зашифрована (вручную; автоматизации нет — FU-024C1-3) |
+| Приёмка | 2026-10-11: smoke-тесты через туннель и ручная проверка экранов Projects, Dashboard, Publications, Preview публикации №3, Content, Attention, Audit. 2026-10-13 (роль API): `verify.sql` 701/0/5, smoke 37/37, 24/24 read views, 11/11 отказов PostgreSQL на бизнес-записи, недоступность API ≈ 3,6 с; владелец проверил Dashboard |
 
 ### Документы
 
 | Документ | Назначение |
 |---|---|
-| [docs/production-acceptance-smm-024b.md](docs/production-acceptance-smm-024b.md) | акт приёмки Control Center v1: release, тесты, миграция, backup/restore, worker, smoke, ограничения, откат |
+| [docs/production-acceptance-smm-024c2.md](docs/production-acceptance-smm-024c2.md) | акт приёмки перевода API на роль `ai_smm_cc` (2026-10-13): шаги и одобрения, проверки, откат RB-1, остаточные риски |
+| [docs/production-acceptance-smm-024b.md](docs/production-acceptance-smm-024b.md) | акт приёмки Control Center v1 (2026-10-11): release, тесты, миграция, backup/restore, worker, smoke, ограничения, откат |
+| [docs/least-privilege-role.md](docs/least-privilege-role.md) | роль БД `ai_smm_cc` для API: матрица прав, гарантии и остаточные риски, runbook rollout и отката |
 | [docs/operations.md](docs/operations.md) | эксплуатация worker: команды, разбор `needs_review`, backup, rollback |
 | [docs/control-center-deployment.md](docs/control-center-deployment.md) | runbook Control Center: топология, контракт окружения, deployment gates, совместимость миграций (выполнен 2026-10-11; для нового запуска — новое одобрение) |
 | [docs/control-center-rollback.md](docs/control-center-rollback.md) | откат Control Center без участия worker; почему `downgrade` и restore дампа не безобидны |
@@ -641,7 +648,7 @@ AI_SMM_TEST_DATABASE_URL=postgresql+psycopg://ai_smm:testpass@127.0.0.1:55433/ai
   uv run pytest -q
 ```
 
-На релизе Control Center v1 (`8ccccda`) — 1509 пройденных тестов на стороне Python; отдельно — тесты web (Vitest; часть из них нестабильна, FU-024B2-1). Все внешние API замоканы. Набор покрывает миграции,
+На релизе Control Center v1 (`8ccccda`) — 1509 пройденных тестов на стороне Python, на релизе `0cbd641` (роль `ai_smm_cc`) — 1822; прогон с API под ограниченной ролью даёт только 122 ожидаемых отказа PostgreSQL на бизнес-командах; отдельно — тесты web (Vitest; часть из них нестабильна, FU-024B2-1). Все внешние API замоканы. Набор покрывает миграции,
 дедупликацию, конкурентное резервирование, истечение lease, перезапуск
 worker, недоступность PostgreSQL, timeout Threads API, переход в
 `needs_review`, dry-run и отсутствие секретов в логах, а также HTTP API:

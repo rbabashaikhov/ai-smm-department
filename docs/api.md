@@ -24,13 +24,17 @@ Status:
   gates; SMM-024B.4B deployed them.
 
 **Production (since 2026-10-11).** The API and the Control Center run in
-production, **read-only for business operations**: release `8ccccda`,
-Alembic `3d4ac1986f07`, `AI_SMM_API_MUTATIONS_ENABLED=false`, API docs
+production, **read-only for business operations**: since 2026-10-13
+release `0cbd641` (first deployed as `8ccccda`), Alembic `3d4ac1986f07`,
+the API connected as the least-privilege role `ai_smm_cc`
+([least-privilege-role.md](least-privilege-role.md)) so that PostgreSQL
+itself refuses business writes, `AI_SMM_API_MUTATIONS_ENABLED=false`, API docs
 off, reachable only through an SSH tunnel to the host's loopback. Login,
 logout and session maintenance still write (see
 [Read-only mode](#read-only-mode)). The production worker runs **live**
-(not dry-run) and was not changed by the deployment. Record:
-[production-acceptance-smm-024b.md](production-acceptance-smm-024b.md);
+(not dry-run) and was not changed by the deployment. Records:
+[production-acceptance-smm-024b.md](production-acceptance-smm-024b.md),
+[production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md);
 runbook: [control-center-deployment.md](control-center-deployment.md).
 
 *Historical:* until 2026-10-11 the API was not deployed and the

@@ -5,7 +5,8 @@ Audience: whoever runs the operator UI locally or changes it.
 Status: SMM-023, private-first MVP, packaged in SMM-024B.3.
 
 **Production (since 2026-10-11):** deployed privately as part of the
-Control Center v1 (release `8ccccda`), reachable only through an SSH
+Control Center v1 (release `0cbd641` since 2026-10-13; first deployed
+as `8ccccda`), reachable only through an SSH
 tunnel to the host's loopback; no public domain, no public route. It runs
 with `AI_SMM_API_MUTATIONS_ENABLED=false`: the editing and queue
 features described below — new content and revisions, submit / approve /
@@ -13,8 +14,9 @@ reject, materialise, schedule / reschedule / cancel, project settings —
 exist in the code but are **refused by the server** for every role, owner
 included, and the UI hides them behind the "Только чтение" notice. Sign
 in and sign out still write session and audit rows
-([api.md, Read-only mode](../docs/api.md#read-only-mode)). Record:
-[production-acceptance-smm-024b.md](../docs/production-acceptance-smm-024b.md).
+([api.md, Read-only mode](../docs/api.md#read-only-mode)). Records:
+[production-acceptance-smm-024b.md](../docs/production-acceptance-smm-024b.md),
+[production-acceptance-smm-024c2.md](../docs/production-acceptance-smm-024c2.md).
 
 The UI is a client of the existing `/api/v1` and nothing else. It cannot
 publish: there is no publish, publish-now or retry-publish control or

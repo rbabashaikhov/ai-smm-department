@@ -21,6 +21,12 @@ and was not verified.
 2026-10-11, 19:32 UTC). Business mutations are off; the live worker was
 not changed.
 
+> **Later change.** This record describes the state of 2026-10-11 and is
+> kept as history. On 2026-10-13 the API moved to release `0cbd641` and
+> the least-privilege role `ai_smm_cc` (SMM-024C-2B), which closes the
+> first limitation in §9 for the read-only mode:
+> [production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md).
+
 ---
 
 ## 1. Release identity

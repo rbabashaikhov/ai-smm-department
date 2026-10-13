@@ -4,16 +4,24 @@ SMM-024B.3. What to do when a step of
 [control-center-deployment.md](control-center-deployment.md) fails, or
 the deployed Control Center has to be taken back.
 
-> **Status (2026-10-12): no rollback has been needed or run.** The
-> Control Center was deployed on 2026-10-11 (release `8ccccda`, schema
-> `3d4ac1986f07`, mutations off) and accepted
-> ([production-acceptance-smm-024b.md](production-acceptance-smm-024b.md)).
-> Every block that touches the VPS is **NOT EXECUTED — REQUIRES OWNER
-> APPROVAL**.
+> **Status (2026-10-13).** The Control Center was deployed on 2026-10-11
+> (release `8ccccda`, schema `3d4ac1986f07`, mutations off) and accepted
+> ([production-acceptance-smm-024b.md](production-acceptance-smm-024b.md));
+> since 2026-10-13 it runs release `0cbd641` with `smm-api` on the role
+> `ai_smm_cc`
+> ([production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md)).
+> None of the rollbacks in this document has been run. The role's own
+> RB-1 ([least-privilege-role.md §7.8](least-privilege-role.md#78-rollback))
+> ran once, automatically, during the first A3 attempt on 2026-10-13 and
+> restored the owner URL as designed. Every block that touches the VPS is
+> **NOT EXECUTED — REQUIRES OWNER APPROVAL**.
 >
 > Applied to the current production: §1 (stop) is the default rollback;
-> §3 does not apply — there is no earlier production Control Center
-> image; §4.1 belongs to the migration that already succeeded; for §4.3
+> for the role, RB-1 comes first (below); §3 can now go back to the
+> previous release `8ccccda`, whose images are still on the host — but
+> only after RB-1, because that image's login does not expect the
+> restricted role (P1's rollback in least-privilege-role.md §7); §4.1
+> belongs to the migration that already succeeded; for §4.3
 > a downgrade needs a newly approved window, and `$EV/worker-before.txt`
 > is the 2026-10-11 baseline — take a fresh one before acting. The
 > pre-migration dump of 2026-10-11 is kept at least until 2026-11-10.
@@ -79,7 +87,12 @@ This leaves the database, its schema and the two images in place.
 Once `smm-api` connects as `ai_smm_cc`, putting it back on the owner URL
 — and, separately, disabling or retiring the role — is
 [least-privilege-role.md §7.8](least-privilege-role.md#78-rollback)
-(RB-1 to RB-3). A readiness 503 or a `permission denied` in the API log
+(RB-1 to RB-3). With the files of release `0cbd641` (production since
+2026-10-13), every wrapper verb — `down`, `ps` and `logs` included —
+needs `control-center.api.env` to exist (Compose loads it for
+`smm-api`), and `up`/`restart` also pass the API role gate. Keep the file
+until the previous files are back (RB-1); remove it only as part of
+RB-3. A readiness 503 or a `permission denied` in the API log
 right after that switch is RB-1's trigger, not §2 below.
 
 ---
