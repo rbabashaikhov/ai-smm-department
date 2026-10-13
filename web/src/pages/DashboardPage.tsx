@@ -5,7 +5,7 @@ import { Link, useParams } from "react-router";
 import { useApi } from "../api/context";
 import { qk } from "../api/queryKeys";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { Card, Loading, PageHeader, StatusBadge } from "../components/ui";
+import { Card, Empty, Loading, PageHeader, StatusBadge } from "../components/ui";
 import { useProject, useReportActiveProject } from "../features/projects/hooks";
 import { formatDateTime } from "../lib/time";
 import { CONTENT_STATUSES, PUBLICATION_STATUSES, type OperationsSummary } from "../types/api";
@@ -27,11 +27,18 @@ function Metric({ label, value, to }: { label: string; value: ReactNode; to?: st
  * process's own setting and says nothing about the worker.
  */
 function WorkerMode({ summary }: { summary: OperationsSummary }) {
-  const apiDryRun = (
-    <div className="muted small">
-      AI_SMM_DRY_RUN процесса API: <code>{String(summary.api_dry_run)}</code> — относится только к
-      API, не к worker.
-    </div>
+  // Shown under every mode: one worker serves every project, so its mode
+  // is not a property of the project this dashboard belongs to.
+  const modeNotes = (
+    <>
+      <div className="muted small" data-testid="worker-mode-scope">
+        Режим worker общий для всего деплоя, а не для этого проекта.
+      </div>
+      <div className="muted small">
+        AI_SMM_DRY_RUN процесса API: <code>{String(summary.api_dry_run)}</code> — относится только
+        к API, не к worker.
+      </div>
+    </>
   );
 
   if (summary.worker_mode === "live") {
@@ -39,7 +46,7 @@ function WorkerMode({ summary }: { summary: OperationsSummary }) {
       <div className="banner banner-error" role="status" data-testid="worker-mode">
         Worker: <strong>LIVE</strong> — запланированные публикации отправляются в Threads.
         {summary.worker_mode_source ? ` Источник: ${summary.worker_mode_source}.` : null}
-        {apiDryRun}
+        {modeNotes}
       </div>
     );
   }
@@ -49,7 +56,7 @@ function WorkerMode({ summary }: { summary: OperationsSummary }) {
       <div className="banner banner-info" role="status" data-testid="worker-mode">
         Worker: <strong>DRY RUN</strong> — worker ничего не отправляет в Threads.
         {summary.worker_mode_source ? ` Источник: ${summary.worker_mode_source}.` : null}
-        {apiDryRun}
+        {modeNotes}
       </div>
     );
   }
@@ -59,7 +66,7 @@ function WorkerMode({ summary }: { summary: OperationsSummary }) {
       Режим worker: <strong>UNKNOWN</strong>. Control Center не получает режим worker из
       проверяемого источника. Исходите из того, что запланированная публикация может быть
       отправлена в Threads.
-      {apiDryRun}
+      {modeNotes}
     </div>
   );
 }
@@ -120,6 +127,11 @@ export function DashboardPage() {
       {summary.data ? (
         <>
           <WorkerMode summary={summary.data} />
+          {summary.data.total === 0 &&
+          content.data &&
+          Object.values(content.data).every((n) => n === 0) ? (
+            <Empty>В проекте пока нет материалов и публикаций.</Empty>
+          ) : null}
           <div className="metrics">
             <Metric label="Publications total" value={summary.data.total} to={`${base}/publications`} />
             <Metric label="Due now" value={summary.data.due_now} />

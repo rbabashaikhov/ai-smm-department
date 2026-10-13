@@ -15,7 +15,8 @@ export function LoginPage() {
   const [pending, setPending] = useState(false);
 
   const from = (location.state as { from?: string } | null)?.from;
-  const target = from && from !== "/login" ? from : "/projects";
+  // "/" lets the index route pick the landing page (one project: its dashboard).
+  const target = from && from !== "/login" ? from : "/";
 
   if (state.status === "authenticated" && !pending) {
     return <Navigate to={target} replace />;
