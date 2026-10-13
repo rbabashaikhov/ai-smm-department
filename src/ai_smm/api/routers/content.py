@@ -52,6 +52,7 @@ from ai_smm.application.content import (
     ContentLocked,
     ContentUnavailable,
     ContentVersionConflict,
+    DestinationRequired,
     InvalidContentTransition,
     NotDeliverable,
     PublicationNotEditable,
@@ -223,7 +224,10 @@ def add_revision(
     summary="draft -> in_review for the named revision (editor+)",
 )
 def submit(
-    payload: RevisionDecisionIn, db: DbSession, context: EditorContentItem
+    payload: RevisionDecisionIn,
+    db: DbSession,
+    settings: AppSettings,
+    context: EditorContentItem,
 ) -> ContentItemSummary:
     item = _run(
         lambda: submit_for_review(
@@ -234,6 +238,7 @@ def submit(
             actor_user=context.user,
             expected_item_version=payload.expected_item_version,
             note=payload.note,
+            legacy_projects=settings.legacy_threads_projects,
         )
     )
 
@@ -313,6 +318,7 @@ def materialize(
             actor_user=context.user,
             mutations_enabled=settings.api_mutations_enabled,
             revision_id=payload.revision_id,
+            legacy_projects=settings.legacy_threads_projects,
         )
     )
 
@@ -409,6 +415,13 @@ def _run(command):
             details={"reason": "content_locked"},
             headers={"Retry-After": "2"},
         ) from exc
+    except DestinationRequired as exc:
+        raise ApiError(
+            status_code=422,
+            code=ErrorCode.VALIDATION_ERROR,
+            message=str(exc),
+            details={"reason": "destination_required"},
+        ) from exc
     except ValueError as exc:
         raise ApiError(
             status_code=422,
@@ -429,6 +442,7 @@ def _revision_input(payload: RevisionIn) -> RevisionInput:
         source_ref=payload.source_ref,
         editor_score=payload.editor_score,
         editor_notes=payload.editor_notes,
+        social_account_id=payload.social_account_id,
     )
 
 
@@ -483,6 +497,7 @@ def _revision_out(row: ContentRevision) -> RevisionOut:
         content_hash=row.content_hash,
         created_by_user_id=row.created_by_user_id,
         created_at=row.created_at,
+        social_account_id=row.social_account_id,
     )
 
 

@@ -6,14 +6,18 @@ import { useAuth, useMe } from "../features/auth/AuthProvider";
 import { ActiveProjectProvider } from "../features/projects/hooks";
 import { ProjectScope } from "../features/projects/ProjectScope";
 import { AppLayout } from "../layouts/AppLayout";
+import { AccountsPage } from "../pages/AccountsPage";
 import { AttentionPage } from "../pages/AttentionPage";
 import { AuditPage } from "../pages/AuditPage";
 import { ContentDetailPage } from "../pages/ContentDetailPage";
 import { ContentListPage } from "../pages/ContentListPage";
 import { CreateContentPage } from "../pages/CreateContentPage";
+import { CreateProjectPage } from "../pages/CreateProjectPage";
+import { CredentialsPage } from "../pages/CredentialsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { LoginPage } from "../pages/LoginPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
+import { ProjectSettingsPage } from "../pages/ProjectSettingsPage";
 import { ProjectsPage } from "../pages/ProjectsPage";
 import { PublicationDetailPage } from "../pages/PublicationDetailPage";
 import { PublicationsPage } from "../pages/PublicationsPage";
@@ -69,6 +73,8 @@ export function AppRoutes() {
         <Route element={<AppLayout />}>
           <Route index element={<HomeRedirect />} />
           <Route path="/projects" element={<ProjectsPage />} />
+          {/* Static beats dynamic in React Router; "new" is also a reserved project id. */}
+          <Route path="/projects/new" element={<CreateProjectPage />} />
           <Route path="/projects/:projectId" element={<ProjectScope />}>
             <Route index element={<DashboardPage />} />
             <Route path="content" element={<ContentListPage />} />
@@ -76,6 +82,9 @@ export function AppRoutes() {
             <Route path="publications" element={<PublicationsPage />} />
             <Route path="attention" element={<AttentionPage />} />
             <Route path="audit" element={<AuditPage />} />
+            <Route path="settings" element={<ProjectSettingsPage />} />
+            <Route path="accounts" element={<AccountsPage />} />
+            <Route path="credentials" element={<CredentialsPage />} />
           </Route>
           <Route path="/content/:contentItemId" element={<ContentDetailPage />} />
           <Route path="/publications/:publicationId" element={<PublicationDetailPage />} />

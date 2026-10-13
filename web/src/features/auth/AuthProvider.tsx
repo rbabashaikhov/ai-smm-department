@@ -35,6 +35,8 @@ interface AuthContextValue {
   login: (email: string, password: string) => Promise<MeResponse>;
   logout: () => Promise<void>;
   retryBootstrap: () => void;
+  /** Re-read /auth/me in place (after a membership change), no loading screen. */
+  refreshMe: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -122,9 +124,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAttempt((n) => n + 1);
   }, []);
 
+  const refreshMe = useCallback(async () => {
+    const me = await api.auth.me();
+
+    setState((current) => (current.status === "authenticated" ? { status: "authenticated", me } : current));
+  }, [api]);
+
   const value = useMemo(
-    () => ({ state, login, logout, retryBootstrap }),
-    [state, login, logout, retryBootstrap],
+    () => ({ state, login, logout, retryBootstrap, refreshMe }),
+    [state, login, logout, retryBootstrap, refreshMe],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

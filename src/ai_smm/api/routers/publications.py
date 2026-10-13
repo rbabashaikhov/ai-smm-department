@@ -47,6 +47,7 @@ from ai_smm.application.publications import (
     InvalidTransition,
     PublicationLocked,
     PublicationUnavailable,
+    PublishingRouteNotReady,
     cancel_publication,
     list_attempts,
     list_publications_page,
@@ -185,6 +186,7 @@ def schedule(
             mutations_enabled=settings.api_mutations_enabled,
             note=payload.note,
             reset_attempts=payload.reset_attempts,
+            settings=settings,
         )
     )
 
@@ -210,6 +212,7 @@ def reschedule(
             mutations_enabled=settings.api_mutations_enabled,
             note=payload.note,
             reset_attempts=payload.reset_attempts,
+            settings=settings,
         )
     )
 
@@ -266,6 +269,13 @@ def _run_command(command) -> PublicationDetail:
                 "allowed_from": [status.value for status in exc.allowed],
             },
         ) from exc
+    except PublishingRouteNotReady as exc:
+        raise ApiError(
+            status_code=409,
+            code=ErrorCode.PUBLISHING_ROUTE_NOT_READY,
+            message=str(exc),
+            details={"reason": exc.code},
+        ) from exc
     except PublicationUnavailable as exc:
         # The row was deleted, or is not in the project authorisation
         # approved. Same answer as an id that never existed.
@@ -311,6 +321,7 @@ def _summary_fields(row: Publication) -> dict[str, object]:
         "body_chars": len(row.body or ""),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
+        "social_account_id": row.social_account_id,
     }
 
 

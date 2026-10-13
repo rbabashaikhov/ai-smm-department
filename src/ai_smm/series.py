@@ -143,6 +143,27 @@ def attach_publication(
             f"{series.project_id!r}."
         )
 
+    # A series is read as one narrative on one account; a reply_thread
+    # part is a reply, whose target exists only inside its own account.
+    # Mixing accounts would publish parts where the readers of the others
+    # never see them, or fail a reply outright.
+    other_account = session.execute(
+        select(Publication.id, Publication.social_account_id).where(
+            Publication.series_id == series.id,
+            Publication.id != publication.id,
+            Publication.social_account_id.is_distinct_from(
+                publication.social_account_id
+            ),
+        ).limit(1)
+    ).first()
+
+    if other_account is not None:
+        raise ValueError(
+            f"Publication {publication.id} is for a different social "
+            f"account than publication {other_account.id} already in "
+            f"series {series.id}; a series is published on one account."
+        )
+
     occupant = session.execute(
         select(Publication).where(
             Publication.series_id == series.id,
@@ -342,6 +363,16 @@ def check_series_readiness(
                 f"Parent publication {parent.id} is "
                 f"{parent.status.value}, not published; a reply cannot be "
                 "created until it is."
+            ),
+        )
+
+    if parent.social_account_id != publication.social_account_id:
+        # A reply id is only meaningful inside the parent's account.
+        return SeriesReadiness(
+            ready=False,
+            reason=(
+                f"Parent publication {parent.id} was published on another "
+                "social account; a reply must go to the parent's account."
             ),
         )
 

@@ -105,6 +105,9 @@ class World:
     in_review_revision: uuid.UUID
     approved_item: uuid.UUID
     approved_revision: uuid.UUID
+    account: uuid.UUID
+    disabled_account: uuid.UUID
+    credential: uuid.UUID
 
 
 @pytest.fixture
@@ -115,6 +118,7 @@ def world(
     make_content,
     make_user,
     make_membership,
+    make_account,
 ) -> World:
     """One row in every state a gated command could act on.
 
@@ -160,7 +164,20 @@ def world(
     )
     session.commit()
 
+    from ai_smm.db.models import SocialAccountCredential
+
+    account, _ = make_account()
+    disabled_account, _ = make_account(status="disabled", with_credential=False)
+    credential = session.scalars(
+        select(SocialAccountCredential.id).where(
+            SocialAccountCredential.social_account_id == account.id
+        )
+    ).one()
+
     return World(
+        account=account.id,
+        disabled_account=disabled_account.id,
+        credential=credential,
         approved_publication=approved_publication.id,
         scheduled_publication=scheduled_publication.id,
         draft_item=draft.id,
@@ -258,6 +275,72 @@ GATED: dict[str, tuple[str, str, Any]] = {
         lambda w, p: (
             f"/api/v1/publications/{w.scheduled_publication}/cancel",
             {"note": "not now"},
+        ),
+    ),
+    # SMM-025B: projects, accounts, credentials.
+    "create_project": (
+        "POST",
+        "/api/v1/projects",
+        lambda w, p: (
+            "/api/v1/projects",
+            {"id": "gated-project", "display_name": "Gated project"},
+        ),
+    ),
+    "patch_project": (
+        "PATCH",
+        "/api/v1/projects/{project_id}",
+        lambda w, p: (
+            f"/api/v1/projects/{p}",
+            {"expected_version": 1, "display_name": "Renamed"},
+        ),
+    ),
+    "create_account": (
+        "POST",
+        "/api/v1/projects/{project_id}/social-accounts",
+        lambda w, p: (
+            f"/api/v1/projects/{p}/social-accounts",
+            {"platform": "threads", "display_name": "New account"},
+        ),
+    ),
+    "rename_account": (
+        "PATCH",
+        "/api/v1/social-accounts/{account_id}",
+        lambda w, p: (
+            f"/api/v1/social-accounts/{w.account}",
+            {"expected_version": 1, "display_name": "Renamed account"},
+        ),
+    ),
+    "disable_account": (
+        "POST",
+        "/api/v1/social-accounts/{account_id}/disable",
+        lambda w, p: (
+            f"/api/v1/social-accounts/{w.account}/disable",
+            {"expected_version": 1},
+        ),
+    ),
+    "enable_account": (
+        "POST",
+        "/api/v1/social-accounts/{account_id}/enable",
+        lambda w, p: (
+            f"/api/v1/social-accounts/{w.disabled_account}/enable",
+            {"expected_version": 1},
+        ),
+    ),
+    "set_credential": (
+        "POST",
+        "/api/v1/social-accounts/{account_id}/credentials",
+        lambda w, p: (
+            f"/api/v1/social-accounts/{w.account}/credentials",
+            # verify off: the request needs no platform to succeed.
+            {"access_token": "THQgatedtesttoken0123456789", "verify": False},
+        ),
+    ),
+    "revoke_credential": (
+        "POST",
+        "/api/v1/social-account-credentials/{credential_id}/revoke",
+        lambda w, p: (
+            f"/api/v1/social-account-credentials/{w.credential}/revoke",
+            None,
         ),
     ),
 }

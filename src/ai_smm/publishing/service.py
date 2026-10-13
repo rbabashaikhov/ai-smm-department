@@ -24,7 +24,8 @@ from ai_smm.db.models import (
     PublicationStatus,
 )
 from ai_smm.logging_setup import get_logger
-from ai_smm.publishing.threads import ThreadsMediaFetchError
+from ai_smm.publishing.routing import RouteUnavailable, resolve_route
+from ai_smm.publishing.threads import CredentialRejected, ThreadsMediaFetchError
 from ai_smm.queue import (
     mark_dry_run,
     mark_needs_review,
@@ -36,6 +37,7 @@ from ai_smm.queue import (
     start_attempt,
     utcnow,
 )
+from ai_smm.security.credentials import CredentialOpener, SecretToken
 from ai_smm.series import check_series_readiness
 
 
@@ -80,6 +82,23 @@ AMBIGUOUS_NETWORK_ERRORS = (
     httpx.ReadError,
     httpx.WriteError,
 )
+
+
+def _default_account_publisher(token: SecretToken) -> Any:
+    from ai_smm.publishing.threads import ThreadsPublisher
+
+    # ThreadsPublisher() without a token reads the deployment token; an
+    # account route must never get there, whatever the caller passed.
+    if not isinstance(token, SecretToken) or not token.reveal():
+        raise RuntimeError("An account route needs that account's own token.")
+
+    return ThreadsPublisher(access_token=token)
+
+
+def _default_identity_fetcher(token: SecretToken) -> Any:
+    from ai_smm.publishing.threads import fetch_identity
+
+    return fetch_identity(token)
 
 
 class PublishBlocked(Exception):
@@ -222,8 +241,25 @@ def publish_claimed_publication(
     publisher_factory: Any,
     media_root: Path,
     require_human_review: bool = True,
+    account_publisher_factory: Any = None,
+    identity_fetcher: Any = None,
+    opener: CredentialOpener | None = None,
 ) -> PublishOutcome:
-    """Publish one claimed row, or record exactly why it was not published."""
+    """Publish one claimed row, or record exactly why it was not published.
+
+    publisher_factory() builds the **legacy** publisher (deployment token)
+    and is used only for a row without a social account, of a project
+    allowed to use it. An account-bound row is published with
+    account_publisher_factory(token) and that account's own token -- the
+    two factories are separate so that no code path can hand an account
+    row to the deployment publisher. identity_fetcher(token) proves the
+    token is still the account's before anything is sent.
+    """
+
+    account_publisher_factory = (
+        account_publisher_factory or _default_account_publisher
+    )
+    identity_fetcher = identity_fetcher or _default_identity_fetcher
 
     actor = f"worker:{settings.worker_id}"
 
@@ -295,6 +331,39 @@ def publish_claimed_publication(
         phase=AttemptPhase.PREFLIGHT,
     )
 
+    # --- Route -----------------------------------------------------------
+    # Which account, which token. A route that is not usable is a
+    # permanent failure: a person must fix the account or the credential
+    # and reschedule. Nothing else is tried.
+    try:
+        route = resolve_route(session, publication, settings, opener=opener)
+    except RouteUnavailable as exc:
+        reason = f"Publishing route unavailable ({exc.code}): {exc}"
+
+        mark_permanent_failure(
+            session,
+            publication,
+            attempt=attempt,
+            reason=reason,
+            actor=actor,
+            error_type="RouteUnavailable",
+        )
+        session.commit()
+
+        logger.error(
+            "Publication has no usable publishing route",
+            extra={"context": {**context, "reason": exc.code}},
+        )
+
+        return PublishOutcome(
+            publication_id=publication.id,
+            status="failed",
+            detail=reason,
+        )
+
+    context = {**context, **route.describe()}
+    attempt.details = {**(attempt.details or {}), **route.describe()}
+
     # --- Media preflight -------------------------------------------------
     # Everything here is safely retryable: no post can exist yet.
     try:
@@ -335,6 +404,7 @@ def publish_claimed_publication(
                 "characters": len(publication.body),
                 "images": len(images),
                 "would_publish_at": utcnow().isoformat(),
+                **route.describe(),
             },
         )
 
@@ -357,7 +427,98 @@ def publish_claimed_publication(
             detail="No external call was made.",
         )
 
-    publisher = publisher_factory()
+    if route.is_account and route.token is None:
+        # Not reachable through resolve_route; refused explicitly rather
+        # than asserted, so it holds under python -O as well.
+        reason = "Account route without a decrypted token. Nothing was sent."
+        mark_permanent_failure(
+            session,
+            publication,
+            attempt=attempt,
+            reason=reason,
+            actor=actor,
+            error_type="RouteUnavailable",
+        )
+        session.commit()
+
+        return PublishOutcome(
+            publication_id=publication.id, status="failed", detail=reason
+        )
+
+    if route.is_account:
+        # The account's identity, proven before any upload or publish.
+        try:
+            identity = identity_fetcher(route.token)
+        except CredentialRejected as exc:
+            reason = (
+                f"The credential of social account {route.social_account_id} "
+                f"was rejected by Threads ({exc}). Replace it, then "
+                "reschedule. Nothing was sent."
+            )
+            mark_permanent_failure(
+                session,
+                publication,
+                attempt=attempt,
+                reason=reason,
+                actor=actor,
+                error_type="CredentialRejected",
+            )
+            session.commit()
+
+            return PublishOutcome(
+                publication_id=publication.id, status="failed", detail=reason
+            )
+        except Exception as exc:
+            reason = (
+                "The account identity check could not complete "
+                f"({type(exc).__name__}). Nothing was sent."
+            )
+            mark_retryable_failure(
+                session,
+                publication,
+                attempt=attempt,
+                reason=reason,
+                actor=actor,
+                max_attempts=settings.max_attempts,
+                error_type=type(exc).__name__,
+            )
+            session.commit()
+
+            return PublishOutcome(
+                publication_id=publication.id,
+                status="retry_scheduled",
+                detail=reason,
+            )
+
+        if identity.account_id != route.expected_external_id:
+            reason = (
+                f"The credential of social account {route.social_account_id} "
+                "belongs to a different Threads account than the one this "
+                "account is bound to. Nothing was sent; replace the "
+                "credential with the right account's token."
+            )
+            mark_permanent_failure(
+                session,
+                publication,
+                attempt=attempt,
+                reason=reason,
+                actor=actor,
+                error_type="CredentialAccountMismatch",
+            )
+            session.commit()
+
+            logger.error(
+                "Credential identity does not match its account",
+                extra={"context": context},
+            )
+
+            return PublishOutcome(
+                publication_id=publication.id, status="failed", detail=reason
+            )
+
+        publisher = account_publisher_factory(route.token)
+    else:
+        publisher = publisher_factory()
 
     uploaded: list[dict[str, str]] = []
 
@@ -423,6 +584,7 @@ def publish_claimed_publication(
     attempt.details = {
         "uploaded_image_count": len(uploaded),
         "format": publication.format,
+        **route.describe(),
     }
     mark_publishing(session, publication)
     session.commit()

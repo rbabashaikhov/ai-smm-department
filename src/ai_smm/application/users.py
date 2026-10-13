@@ -38,6 +38,10 @@ class ProjectNotFoundError(ValueError):
     pass
 
 
+class ProjectAlreadyExistsError(ValueError):
+    pass
+
+
 def normalize_email(raw: str) -> str:
     """Trim and lowercase. Stored and compared in exactly this form.
 
@@ -69,12 +73,21 @@ def create_owner(
     display_name: str,
     project_id: str,
     password: str,
+    create_project_named: str | None = None,
 ) -> User:
     """Create a user and make them owner of an existing project.
 
     One transaction: the caller commits. A user without a membership
     would be able to sign in and see nothing, and a membership without a
     user cannot exist, so neither half is allowed to land alone.
+
+    create_project_named is the bootstrap of an empty installation: since
+    SMM-025B nothing else creates a project without an owner, and `ai-smm
+    project create` needs an existing user. With it, the project is
+    created in the same transaction, by the same service as everywhere
+    else (create_project): user, project, owner membership, settings and
+    audit land together or not at all. It is refused for a project that
+    already exists, so a typo cannot silently attach the owner elsewhere.
 
     The password is hashed here and never returned, printed or logged.
     """
@@ -89,7 +102,13 @@ def create_owner(
 
     project = db.get(Project, project_id)
 
-    if project is None:
+    if create_project_named is not None and project is not None:
+        raise ProjectAlreadyExistsError(
+            f"Project {project_id!r} already exists; omit --create-project "
+            "to make the new user its owner."
+        )
+
+    if project is None and create_project_named is None:
         raise ProjectNotFoundError(
             f"Project {project_id!r} does not exist."
         )
@@ -108,13 +127,25 @@ def create_owner(
     db.add(user)
     db.flush()
 
-    db.add(
-        ProjectMembership(
-            project_id=project.id,
-            user_id=user.id,
-            role=MembershipRole.OWNER,
+    if project is None:
+        from ai_smm.application.projects import ProjectInput, create_project
+
+        # Writes the owner membership itself.
+        project = create_project(
+            db,
+            actor_user=user,
+            actor=BOOTSTRAP_ACTOR,
+            require_existing_ownership=False,
+            data=ProjectInput(id=project_id, display_name=create_project_named),
+        ).project
+    else:
+        db.add(
+            ProjectMembership(
+                project_id=project.id,
+                user_id=user.id,
+                role=MembershipRole.OWNER,
+            )
         )
-    )
 
     record_audit(
         db,

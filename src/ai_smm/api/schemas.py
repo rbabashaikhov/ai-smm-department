@@ -87,6 +87,133 @@ class ProjectOut(BaseModel):
     updated_at: datetime
     #: The caller's own role, so a client can hide what it cannot do.
     role: MembershipRole
+    #: Account-less publications of this project may use the deployment
+    #: account (operator allow-list). False for every project created
+    #: through the Control Center.
+    legacy_publishing: bool = False
+
+
+class ProjectCreate(BaseModel):
+    """A new project. The caller becomes its owner; nothing else can be
+    named: no user, no role, no knowledge path, no platform."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=3, max_length=64)
+    display_name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=2000)
+    default_timezone: str | None = Field(default=None, max_length=64)
+    default_language: str | None = Field(default=None, max_length=16)
+    topics: list[str] | None = Field(default=None, max_length=10)
+    tone_of_voice: str | None = Field(default=None, max_length=4000)
+
+
+class ProjectPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=2000)
+    default_timezone: str | None = Field(default=None, max_length=64)
+    default_language: str | None = Field(default=None, max_length=16)
+
+    def changes(self) -> dict[str, str]:
+        return {
+            name: getattr(self, name)
+            for name in (
+                "display_name",
+                "description",
+                "default_timezone",
+                "default_language",
+            )
+            if getattr(self, name) is not None
+        }
+
+    @model_validator(mode="after")
+    def _something(self) -> ProjectPatch:
+        if not self.changes():
+            raise ValueError("Nothing to change.")
+
+        return self
+
+
+# -- social accounts and credentials ------------------------------------
+# Credentials are write-only. CredentialOut is metadata; no response model
+# in this API has a field that can carry a token, a ciphertext, a nonce or
+# key material (tests/test_api_social_accounts.py walks the schema).
+
+
+class SocialAccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: Literal["threads"] = "threads"
+    display_name: str = Field(min_length=1, max_length=120)
+
+
+class SocialAccountPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+    display_name: str = Field(min_length=1, max_length=120)
+
+
+class SocialAccountStatusIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_version: int = Field(ge=1)
+
+
+class CredentialIn(BaseModel):
+    """A token as a person pastes it. SecretStr: never printed or echoed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    access_token: SecretStr = Field(min_length=1, max_length=4096)
+    expires_at: datetime | None = None
+    #: Test the token against the platform before storing it. Off only
+    #: for an offline setup; an account is not publishable until a test
+    #: has bound it to its platform identity.
+    verify: bool = True
+
+
+class CredentialOut(BaseModel):
+    id: uuid.UUID
+    social_account_id: uuid.UUID
+    status: Literal["active", "superseded", "revoked"]
+    #: 12 hex characters of SHA-256 of the token. Not a part of it.
+    fingerprint: str
+    key_id: str
+    verification_status: Literal["unverified", "verified"]
+    verified_at: datetime | None
+    expires_at: datetime | None
+    created_by_user_id: uuid.UUID | None
+    created_at: datetime
+    superseded_at: datetime | None
+    revoked_at: datetime | None
+
+
+class SocialAccountOut(BaseModel):
+    id: uuid.UUID
+    project_id: str
+    platform: str
+    display_name: str
+    status: Literal["active", "disabled"]
+    external_account_id: str | None
+    external_username: str | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
+    disabled_at: datetime | None
+    #: The active credential, metadata only.
+    credential: CredentialOut | None
+    publishing_ready: bool
+    not_ready_reason: str | None
+    #: Rows of this account that the worker will try to publish.
+    scheduled_publications: int
+
+
+class SocialAccountDetailOut(SocialAccountOut):
+    credentials: list[CredentialOut]
 
 
 class ProjectSettingsOut(BaseModel):
@@ -174,6 +301,8 @@ class PublicationSummary(BaseModel):
     body_chars: int
     created_at: datetime
     updated_at: datetime
+    #: The account this row is published as; null for a legacy row.
+    social_account_id: uuid.UUID | None = None
 
 
 class PublicationList(PageMeta):
@@ -361,6 +490,10 @@ class RevisionIn(BaseModel):
     source_ref: str | None = Field(default=None, max_length=500)
     editor_score: float | None = Field(default=None, ge=0, le=10)
     editor_notes: str = Field(default="", max_length=5000)
+    #: Where this revision is to be published: an active account of the
+    #: item's project. Approved together with the text; choosing another
+    #: account is a new revision.
+    social_account_id: uuid.UUID | None = None
 
 
 class ContentItemCreate(BaseModel):
@@ -418,6 +551,7 @@ class RevisionOut(BaseModel):
     content_hash: str
     created_by_user_id: uuid.UUID | None
     created_at: datetime
+    social_account_id: uuid.UUID | None = None
 
 
 class RevisionList(PageMeta):

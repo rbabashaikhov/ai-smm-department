@@ -70,7 +70,7 @@ readonly CC_API_VERIFY_MIN_CHECKS=200
 # 2026-10-11 one gives smm-api control-center.env -- would start the API
 # on the owner URL whatever control-center.api.env says.
 readonly CC_PINNED_COMPOSE_SHA256=f894a9be7e00e020b677adaf1d16af26ad63fa9d5b0086e2663f05bee5c82ac6
-readonly CC_PINNED_VERIFY_SHA256=26a65b4b9b68520ff984dc63b5a2992fde9cdf76416ae8a1d539373c6071336c
+readonly CC_PINNED_VERIFY_SHA256=8e5561c1255ba09951f457a7be371d21828749f8b36f20930c071f7b541a10cc
 
 readonly CC_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
 readonly CC_UTC_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'

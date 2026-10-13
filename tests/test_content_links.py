@@ -470,6 +470,8 @@ def test_a_successful_materialisation_audits_exactly_the_agreed_fields(
         "revision_number": 1,
         "content_hash": revision.content_hash,
         "platform": "threads",
+        # SMM-025B: the destination is part of what was approved.
+        "social_account_id": None,
     }
 
 

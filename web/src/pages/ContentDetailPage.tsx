@@ -34,8 +34,10 @@ import {
   useContentItem,
   useRevisions,
 } from "../features/content/hooks";
+import { accountLabel, readinessLabel } from "../features/accounts/labels";
 import {
   useProject,
+  useProjectAccounts,
   useProjectPermissions,
   useReportActiveProject,
 } from "../features/projects/hooks";
@@ -45,6 +47,7 @@ import type {
   ContentItemDetail,
   MaterializeResult,
   Revision,
+  SocialAccount,
 } from "../types/api";
 
 type DialogKind = "submit" | "approve" | "reject" | "materialize";
@@ -74,6 +77,34 @@ const DIALOG_TEXT: Record<DialogKind, { title: string; confirm: string }> = {
   },
 };
 
+/** Where the current revision goes. Part of what an approval approves. */
+function DestinationLine({
+  accountId,
+  accounts,
+  legacy,
+}: {
+  accountId: string | null;
+  accounts: SocialAccount[] | undefined;
+  legacy: boolean;
+}) {
+  const account = accounts?.find((a) => a.id === accountId);
+  let text: string;
+
+  if (accountId === null) {
+    text = legacy ? "аккаунт развёртывания (legacy)" : "не выбран — отправка на согласование невозможна";
+  } else if (account) {
+    text = `${accountLabel(account)}${account.publishing_ready ? "" : ` — ${readinessLabel(account)}`}`;
+  } else {
+    text = accountId;
+  }
+
+  return (
+    <div className="destination" data-testid="destination">
+      <strong>Аккаунт публикации:</strong> {text}
+    </div>
+  );
+}
+
 export function ContentDetailPage() {
   const { contentItemId = "" } = useParams();
   const me = useMe();
@@ -84,6 +115,7 @@ export function ContentDetailPage() {
   useReportActiveProject(projectId);
 
   const project = useProject(projectId);
+  const accounts = useProjectAccounts(projectId);
   const can = useProjectPermissions(projectId);
   const revisions = useRevisions(contentItemId);
   const approvals = useApprovals(contentItemId);
@@ -239,6 +271,8 @@ export function ContentDetailPage() {
             initial={draftFromRevision(editing.base)}
             submitLabel="Save as new revision"
             pending={commands.createRevision.isPending}
+            accounts={accounts.data ?? []}
+            allowNoAccount={project.data?.legacy_publishing === true}
             onCancel={() => setEditing(null)}
             onSubmit={(input, draft) => {
               commands.createRevision.mutate(
@@ -263,6 +297,11 @@ export function ContentDetailPage() {
       <div className="grid-2 wide-left">
         <Card title={`Current revision #${current.revision_number}`}>
           <ApprovalState item={item} />
+          <DestinationLine
+            accountId={current.social_account_id ?? null}
+            accounts={accounts.data}
+            legacy={project.data?.legacy_publishing === true}
+          />
           <SnapshotView
             title={current.title}
             body={current.body}

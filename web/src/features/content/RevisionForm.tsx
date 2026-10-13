@@ -10,7 +10,9 @@ import {
   type JsonObject,
   type Revision,
   type RevisionInput,
+  type SocialAccount,
 } from "../../types/api";
+import { accountLabel } from "../accounts/labels";
 
 export interface RevisionDraft {
   title: string;
@@ -22,6 +24,8 @@ export interface RevisionDraft {
   source_ref: string;
   editor_score: string;
   editor_notes: string;
+  /** "" = no destination chosen (or the legacy deployment account). */
+  social_account_id: string;
 }
 
 export const emptyDraft = (): RevisionDraft => ({
@@ -34,6 +38,7 @@ export const emptyDraft = (): RevisionDraft => ({
   source_ref: "",
   editor_score: "",
   editor_notes: "",
+  social_account_id: "",
 });
 
 export const draftFromRevision = (revision: Revision): RevisionDraft => ({
@@ -46,6 +51,7 @@ export const draftFromRevision = (revision: Revision): RevisionDraft => ({
   source_ref: revision.source_ref ?? "",
   editor_score: revision.editor_score === null ? "" : String(revision.editor_score),
   editor_notes: revision.editor_notes,
+  social_account_id: revision.social_account_id ?? "",
 });
 
 function parseJson<T>(text: string, kind: "array" | "object", field: string): T {
@@ -81,6 +87,7 @@ export function draftToInput(draft: RevisionDraft): RevisionInput {
     source_ref: draft.source_ref.trim() || null,
     editor_score: score === "" ? null : Number(score),
     editor_notes: draft.editor_notes,
+    social_account_id: draft.social_account_id || null,
   };
 }
 
@@ -92,6 +99,8 @@ export function RevisionForm({
   onCancel,
   header,
   footer,
+  accounts,
+  allowNoAccount = false,
 }: {
   initial: RevisionDraft;
   submitLabel: string;
@@ -100,6 +109,10 @@ export function RevisionForm({
   onCancel?: () => void;
   header?: ReactNode;
   footer?: ReactNode;
+  /** Accounts of the item's project; the select shows only active ones. */
+  accounts?: SocialAccount[];
+  /** The project may still publish through the deployment account. */
+  allowNoAccount?: boolean;
 }) {
   const [draft, setDraft] = useState(initial);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -140,6 +153,34 @@ export function RevisionForm({
           </select>
         </label>
       </div>
+      {accounts ? (
+        <label>
+          Аккаунт публикации
+          <select
+            aria-label="Аккаунт публикации"
+            value={draft.social_account_id}
+            onChange={(e) => set("social_account_id", e.target.value)}
+          >
+            <option value="">
+              {allowNoAccount ? "— аккаунт развёртывания (legacy) —" : "— не выбран —"}
+            </option>
+            {accounts
+              .filter((a) => a.status === "active" || a.id === draft.social_account_id)
+              .map((a) => (
+                <option key={a.id} value={a.id}>
+                  {accountLabel(a)}
+                  {a.publishing_ready ? "" : " (не готов к публикации)"}
+                </option>
+              ))}
+          </select>
+          <span className="muted small">
+            Одобряется вместе с текстом: смена аккаунта — это новая ревизия и новое одобрение.
+            {!allowNoAccount && !draft.social_account_id
+              ? " Без аккаунта ревизию нельзя отправить на согласование."
+              : ""}
+          </span>
+        </label>
+      ) : null}
       <label>
         Body
         <textarea

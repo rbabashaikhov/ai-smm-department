@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from ai_smm.local_env import load_local_dotenv
+
+load_local_dotenv()
+
 from ai_smm.storage import StorageUploader
 
 

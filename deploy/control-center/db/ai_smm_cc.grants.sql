@@ -40,7 +40,8 @@ DECLARE
         'projects', 'project_memberships', 'project_settings',
         'publications', 'publication_attempts', 'content_series',
         'content_items', 'content_revisions', 'content_approvals',
-        'content_publication_links', 'audit_log', 'users', 'user_sessions'
+        'content_publication_links', 'audit_log', 'users', 'user_sessions',
+        'social_accounts', 'social_account_credentials'
     ];
     missing text[];
     owners text[];
@@ -140,8 +141,17 @@ GRANT SELECT ON
     publications, publication_attempts, content_series,
     content_items, content_revisions, content_approvals,
     content_publication_links,
-    audit_log, users, user_sessions
+    audit_log, users, user_sessions,
+    social_accounts
 TO ai_smm_cc;
+
+-- SMM-025B: credential METADATA only, column by column. Never
+-- ciphertext, nonce or ephemeral_public_key: the API holds no key that
+-- could open them, and it does not get to copy them either.
+GRANT SELECT (id, social_account_id, status, scheme, key_id, fingerprint,
+              verification_status, verified_at, expires_at,
+              created_by_user_id, created_at, superseded_at, revoked_at)
+    ON social_account_credentials TO ai_smm_cc;
 
 -- POST /auth/login opens a session; every authenticated request advances
 -- last_seen_at; POST /auth/logout sets revoked_at. Never DELETE. INSERT

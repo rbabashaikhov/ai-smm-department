@@ -347,6 +347,19 @@ def test_import_json_does_not_touch_the_file(
     path.write_text(json.dumps(document), encoding="utf-8")
     before = path.read_bytes()
 
+    # The importer needs an existing project (SMM-025B).
+    assert _run(["import-json", str(path)], settings) == 1
+
+    from ai_smm.queue import ensure_project
+
+    ensure_project(
+        session,
+        project_id="cli-project",
+        display_name="CLI project",
+        knowledge_path="knowledge/projects/cli-project",
+    )
+    session.commit()
+
     assert _run(["import-json", str(path)], settings) == 0
     assert path.read_bytes() == before
 

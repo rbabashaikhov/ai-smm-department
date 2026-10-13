@@ -98,7 +98,17 @@ class RedactingFilter(logging.Filter):
         )
 
     def refresh(self) -> None:
-        self._secret_values = collect_secret_values()
+        self._secret_values = sorted(
+            set(collect_secret_values()) | set(_runtime_secrets),
+            key=len,
+            reverse=True,
+        )
+
+    def add_secret(self, value: str) -> None:
+        if value and len(value) >= 8 and value not in self._secret_values:
+            self._secret_values = sorted(
+                [*self._secret_values, value], key=len, reverse=True
+            )
 
     def redact(self, text: str) -> str:
         for secret in self._secret_values:
@@ -190,6 +200,20 @@ class JsonFormatter(logging.Formatter):
 
 
 _redacting_filter: RedactingFilter | None = None
+
+#: Secrets learned at run time (a credential the worker decrypted). They
+#: are masked like the configured ones, for the life of the process.
+_runtime_secrets: set[str] = set()
+
+
+def register_runtime_secret(value: str) -> None:
+    """Mask this exact value in every later log record of this process."""
+
+    if not value or len(value) < 8:
+        return
+
+    _runtime_secrets.add(value)
+    get_redacting_filter().add_secret(value)
 
 
 def get_redacting_filter() -> RedactingFilter:

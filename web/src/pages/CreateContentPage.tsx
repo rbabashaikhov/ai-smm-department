@@ -7,7 +7,12 @@ import { qk } from "../api/queryKeys";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Card, PageHeader } from "../components/ui";
 import { RevisionForm, emptyDraft } from "../features/content/RevisionForm";
-import { useProjectPermissions, useReportActiveProject } from "../features/projects/hooks";
+import {
+  useProject,
+  useProjectAccounts,
+  useProjectPermissions,
+  useReportActiveProject,
+} from "../features/projects/hooks";
 import type { ContentItemCreate } from "../types/api";
 
 /** One request creates the item and its first revision, per the backend. */
@@ -17,6 +22,8 @@ export function CreateContentPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const can = useProjectPermissions(projectId);
+  const project = useProject(projectId);
+  const accounts = useProjectAccounts(projectId);
   useReportActiveProject(projectId);
 
   const [title, setTitle] = useState("");
@@ -56,6 +63,8 @@ export function CreateContentPage() {
           initial={emptyDraft()}
           submitLabel="Create Content"
           pending={create.isPending}
+          accounts={accounts.data ?? []}
+          allowNoAccount={project.data?.legacy_publishing === true}
           onSubmit={(revision) => {
             create.mutate({ title: title.trim(), content_type: contentType.trim(), revision });
           }}

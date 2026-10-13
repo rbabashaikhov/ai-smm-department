@@ -15,7 +15,8 @@ interface SwitcherOption {
 }
 
 /** Sections that exist in every project; "" is the dashboard. */
-const PROJECT_SECTION = /^\/projects\/[^/]+(?:\/(content|publications|attention|audit))?\/?$/;
+const PROJECT_SECTION =
+  /^\/projects\/[^/]+(?:\/(content|publications|attention|audit|settings|accounts|credentials))?\/?$/;
 
 /**
  * Where choosing another project leads: the same section when it exists
@@ -29,6 +30,7 @@ function switchTarget(pathname: string, projectId: string, role: Role): string {
 
   if (!section) return base;
   if (section === "audit" && !atLeast(role, "admin")) return base;
+  if (section === "credentials" && !atLeast(role, "owner")) return base;
 
   return `${base}/${section}`;
 }
@@ -94,6 +96,11 @@ export function AppLayout() {
               {atLeast(access?.role, "admin") ? (
                 <NavLink to={`${base}/audit`}>Audit</NavLink>
               ) : null}
+              <NavLink to={`${base}/accounts`}>Аккаунты</NavLink>
+              {atLeast(access?.role, "owner") ? (
+                <NavLink to={`${base}/credentials`}>Учётные данные</NavLink>
+              ) : null}
+              <NavLink to={`${base}/settings`}>Настройки</NavLink>
             </>
           ) : (
             <div className="muted small nav-hint">Выберите проект</div>

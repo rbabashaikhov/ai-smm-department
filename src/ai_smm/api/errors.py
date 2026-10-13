@@ -53,6 +53,21 @@ class ErrorCode:
     #: (AI_SMM_API_MUTATIONS_ENABLED=false). Not a role problem: no role
     #: can make this change on this deployment.
     MUTATIONS_DISABLED = "MUTATIONS_DISABLED"
+    PROJECT_ALREADY_EXISTS = "PROJECT_ALREADY_EXISTS"
+    PROJECT_NAME_TAKEN = "PROJECT_NAME_TAKEN"
+    PROJECT_LIMIT_REACHED = "PROJECT_LIMIT_REACHED"
+    ACCOUNT_LIMIT_REACHED = "ACCOUNT_LIMIT_REACHED"
+    #: The row has no usable publishing route: no account, a disabled
+    #: account, no credential, or a legacy row of a project that may not
+    #: use the deployment account.
+    PUBLISHING_ROUTE_NOT_READY = "PUBLISHING_ROUTE_NOT_READY"
+    #: The token proves a different platform identity than the account.
+    CREDENTIAL_ACCOUNT_MISMATCH = "CREDENTIAL_ACCOUNT_MISMATCH"
+    ACCOUNT_ALREADY_CONNECTED = "ACCOUNT_ALREADY_CONNECTED"
+    #: The platform refused the token itself.
+    CREDENTIAL_REJECTED = "CREDENTIAL_REJECTED"
+    #: The deployment has no credential public key configured.
+    CREDENTIALS_NOT_CONFIGURED = "CREDENTIALS_NOT_CONFIGURED"
 
 
 #: Fallback mapping for HTTPExceptions raised by the framework itself.

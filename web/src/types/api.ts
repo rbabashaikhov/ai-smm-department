@@ -127,6 +127,85 @@ export interface Project {
   created_at: string;
   updated_at: string;
   role: Role;
+  /** Account-less publications may use the deployment account (operator
+   *  allow-list). Always false for a project created in the Control Center. */
+  legacy_publishing?: boolean;
+}
+
+/** POST /projects. The caller becomes the owner; nothing else is named. */
+export interface ProjectCreate {
+  id: string;
+  display_name: string;
+  description?: string;
+  default_timezone?: string | null;
+  default_language?: string | null;
+  topics?: string[] | null;
+  tone_of_voice?: string | null;
+}
+
+export interface ProjectPatch {
+  expected_version: number;
+  display_name?: string;
+  description?: string;
+  default_timezone?: string;
+  default_language?: string;
+}
+
+export interface ProjectSettingsPatch {
+  expected_version: number;
+  content_config?: JsonObject;
+  publishing_config?: JsonObject;
+  brand_config?: JsonObject;
+}
+
+// -- social accounts and credentials -----------------------------------
+// Credentials are write-only: no type here can hold a token.
+
+export type CredentialStatus = "active" | "superseded" | "revoked";
+
+export interface Credential {
+  id: string;
+  social_account_id: string;
+  status: CredentialStatus;
+  /** 12 hex chars of SHA-256 of the token, not a part of it. */
+  fingerprint: string;
+  key_id: string;
+  verification_status: "unverified" | "verified";
+  verified_at: string | null;
+  expires_at: string | null;
+  created_by_user_id: string | null;
+  created_at: string;
+  superseded_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface SocialAccount {
+  id: string;
+  project_id: string;
+  platform: string;
+  display_name: string;
+  status: "active" | "disabled";
+  external_account_id: string | null;
+  external_username: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  disabled_at: string | null;
+  credential: Credential | null;
+  publishing_ready: boolean;
+  not_ready_reason: string | null;
+  scheduled_publications: number;
+}
+
+export interface SocialAccountDetail extends SocialAccount {
+  credentials: Credential[];
+}
+
+/** Sent once, never returned. */
+export interface CredentialInput {
+  access_token: string;
+  expires_at?: string | null;
+  verify?: boolean;
 }
 
 export interface ProjectSettings {
@@ -160,6 +239,8 @@ export interface PublicationSummary {
   body_chars: number;
   created_at: string;
   updated_at: string;
+  /** The account this row is published as; null for a legacy row. */
+  social_account_id?: string | null;
 }
 
 export interface PublicationDetail extends PublicationSummary {
@@ -275,6 +356,8 @@ export interface Revision {
   content_hash: string;
   created_by_user_id: string | null;
   created_at: string;
+  /** Where this revision is to be published; approved with the text. */
+  social_account_id?: string | null;
 }
 
 export interface ContentItemSummary {
@@ -319,6 +402,7 @@ export interface RevisionInput {
   source_ref?: string | null;
   editor_score?: number | null;
   editor_notes?: string;
+  social_account_id?: string | null;
 }
 
 export interface ContentItemCreate {

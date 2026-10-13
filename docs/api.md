@@ -279,6 +279,15 @@ subdomain.
 | `POST` | `/api/v1/content-items/{id}/approve` | editor+, CSRF |
 | `POST` | `/api/v1/content-items/{id}/reject` | editor+, CSRF |
 | `POST` | `/api/v1/content-items/{id}/materialize` | editor+, CSRF |
+| `POST` | `/api/v1/projects` | session + CSRF; caller must own a project; becomes owner (SMM-025B) |
+| `PATCH` | `/api/v1/projects/{id}` | admin+, CSRF, `expected_version` |
+| `GET` | `/api/v1/projects/{id}/social-accounts` | viewer+ (metadata, readiness) |
+| `POST` | `/api/v1/projects/{id}/social-accounts` | **owner**, CSRF |
+| `GET` | `/api/v1/social-accounts/{id}` | viewer+ (credential history, metadata only) |
+| `PATCH` | `/api/v1/social-accounts/{id}` | **owner**, CSRF, `expected_version` |
+| `POST` | `/api/v1/social-accounts/{id}/disable` · `/enable` | **owner**, CSRF, `expected_version` |
+| `POST` | `/api/v1/social-accounts/{id}/credentials` | **owner**, CSRF; write-only, the token is never returned |
+| `POST` | `/api/v1/social-account-credentials/{id}/revoke` | **owner**, CSRF |
 
 Every unsafe route except login and logout is additionally refused, for
 every role, while `AI_SMM_API_MUTATIONS_ENABLED` is `false` — the
@@ -385,6 +394,20 @@ ones below it.
 | schedule / reschedule / cancel | ❌ 403 | ❌ 403 | ✅ | ✅ |
 | read content items, revisions, approvals | ✅ | ✅ | ✅ | ✅ |
 | create item / revision, submit, approve, reject, materialize | ❌ 403 | ✅ | ✅ | ✅ |
+| `PATCH /projects/{id}` (name, description, timezone, language) | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| read social accounts and credential metadata | ✅ | ✅ | ✅ | ✅ |
+| create / rename / disable / enable accounts; set / revoke credentials | ❌ 403 | ❌ 403 | ❌ 403 | ✅ |
+| `POST /projects` | owner of at least one project | | | |
+
+SMM-025B: a revision carries `social_account_id`, the account it is to be
+published as. It is part of the revision's content hash, so an approval
+covers the text **and** the destination; choosing another account is a new
+revision. A revision without one cannot be submitted or materialised unless
+its project is listed in `AI_SMM_LEGACY_THREADS_PROJECTS` (operator
+configuration, empty by default). `schedule`/`reschedule` answer `409
+PUBLISHING_ROUTE_NOT_READY` when the row's account is disabled, unverified
+or has no credential, or when a legacy row's project is not allow-listed.
+See [the architecture](architecture/smm-025b-project-management.md).
 
 Approval is editor+ and scheduling is admin+, on purpose: deciding that a
 text is right and deciding when it goes out are different

@@ -37,6 +37,8 @@ from ai_smm.db.models import (
     MembershipRole,
     Project,
     Publication,
+    SocialAccount,
+    SocialAccountCredential,
     User,
 )
 from ai_smm.db.session import get_session_factory
@@ -471,4 +473,149 @@ EditorContentItem = Annotated[
 ]
 EditorProject = Annotated[
     ProjectContext, Depends(require_project_role(MembershipRole.EDITOR))
+]
+OwnerProject = Annotated[
+    ProjectContext, Depends(require_project_role(MembershipRole.OWNER))
+]
+
+
+# -- social accounts and credentials ----------------------------------------
+
+
+class SocialAccountContext:
+    """An account, its project and the caller's role there."""
+
+    def __init__(
+        self,
+        *,
+        account: SocialAccount,
+        project: Project,
+        role: MembershipRole,
+        authenticated: AuthenticatedSession,
+    ) -> None:
+        self.account = account
+        self.project = project
+        self.role = role
+        self.authenticated = authenticated
+
+    @property
+    def actor(self) -> str:
+        return actor_for(self.authenticated)
+
+    @property
+    def user(self) -> User:
+        return self.authenticated.user
+
+
+def _account_for(
+    db: Session,
+    *,
+    account_id: uuid.UUID,
+    authenticated: AuthenticatedSession,
+    minimum: MembershipRole,
+    not_found_message: str,
+) -> SocialAccountContext:
+    account = db.get(SocialAccount, account_id)
+
+    if account is None:
+        raise not_found(not_found_message)
+
+    try:
+        project, role = _authorise_project(
+            db,
+            project_id=account.project_id,
+            authenticated=authenticated,
+            minimum=minimum,
+        )
+    except ApiError as exc:
+        if exc.code == ErrorCode.NOT_FOUND:
+            raise not_found(not_found_message) from exc
+
+        raise
+
+    return SocialAccountContext(
+        account=account,
+        project=project,
+        role=role,
+        authenticated=authenticated,
+    )
+
+
+def require_social_account_role(
+    minimum: MembershipRole,
+) -> Callable[..., SocialAccountContext]:
+    """Load the account, then authorise against the project it is in."""
+
+    def dependency(
+        account_id: uuid.UUID,
+        db: DbSession,
+        authenticated: CurrentSession,
+    ) -> SocialAccountContext:
+        return _account_for(
+            db,
+            account_id=account_id,
+            authenticated=authenticated,
+            minimum=minimum,
+            not_found_message="Social account not found.",
+        )
+
+    return dependency
+
+
+class CredentialContext(SocialAccountContext):
+    def __init__(self, *, credential: SocialAccountCredential, **kwargs) -> None:
+        super().__init__(**kwargs)
+
+        self.credential = credential
+
+
+def require_credential_role(
+    minimum: MembershipRole,
+) -> Callable[..., CredentialContext]:
+    """Credential -> its account -> that account's project -> role."""
+
+    def dependency(
+        credential_id: uuid.UUID,
+        db: DbSession,
+        authenticated: CurrentSession,
+    ) -> CredentialContext:
+        from ai_smm.application.social_accounts import (
+            load_credential_metadata,
+        )
+
+        credential = load_credential_metadata(db, credential_id)
+
+        if credential is None:
+            raise not_found("Credential not found.")
+
+        context = _account_for(
+            db,
+            account_id=credential.social_account_id,
+            authenticated=authenticated,
+            minimum=minimum,
+            not_found_message="Credential not found.",
+        )
+
+        return CredentialContext(
+            credential=credential,
+            account=context.account,
+            project=context.project,
+            role=context.role,
+            authenticated=authenticated,
+        )
+
+    return dependency
+
+
+ViewerSocialAccount = Annotated[
+    SocialAccountContext,
+    Depends(require_social_account_role(MembershipRole.VIEWER)),
+]
+OwnerSocialAccount = Annotated[
+    SocialAccountContext,
+    Depends(require_social_account_role(MembershipRole.OWNER)),
+]
+OwnerCredential = Annotated[
+    CredentialContext,
+    Depends(require_credential_role(MembershipRole.OWNER)),
 ]

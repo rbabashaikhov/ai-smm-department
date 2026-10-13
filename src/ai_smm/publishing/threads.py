@@ -7,13 +7,21 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from dotenv import load_dotenv
 
 from ai_smm.logging_setup import get_logger
+from ai_smm.platform_identity import (  # noqa: F401  (re-exported)
+    CredentialRejected,
+    IdentityUnavailable,
+    ThreadsIdentity,
+    fetch_identity,
+    threads_api_base_url,
+)
+from ai_smm.security.credentials import SecretToken
 from ai_smm.storage import StorageUploader
 
 
-load_dotenv()
+# No load_dotenv() here: importing this module never reads a .env
+# (ai_smm.local_env; entry points opt in explicitly).
 
 logger = get_logger(__name__)
 
@@ -58,12 +66,25 @@ class ThreadsPublisher:
     MAX_ASPECT_RATIO = 10.0
     SUPPORTED_IMAGE_FORMATS = ("JPEG", "PNG")
 
-    def __init__(self) -> None:
-        self.access_token = os.getenv("THREADS_ACCESS_TOKEN")
-        self.base_url = os.getenv(
-            "THREADS_API_BASE_URL",
-            "https://graph.threads.net",
-        )
+    def __init__(self, access_token: SecretToken | None = None) -> None:
+        """Publish as one account.
+
+        access_token is that account's own token (an account route). When
+        it is given, the environment is never read for a token -- not even
+        if the given one is empty, which is refused. Only the legacy route
+        constructs ThreadsPublisher() without it and so uses the
+        deployment THREADS_ACCESS_TOKEN.
+        """
+
+        if access_token is not None:
+            if not access_token.reveal():
+                raise RuntimeError("The account credential is empty.")
+
+            self.access_token = access_token.reveal()
+        else:
+            self.access_token = os.getenv("THREADS_ACCESS_TOKEN")
+
+        self.base_url = threads_api_base_url()
 
         self.storage_prefix = os.getenv(
             "THREADS_STORAGE_PREFIX",

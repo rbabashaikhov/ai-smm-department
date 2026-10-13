@@ -5,6 +5,8 @@ import { useApi } from "../api/context";
 import { qk } from "../api/queryKeys";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Empty, Loading, PageHeader } from "../components/ui";
+import { useMe, useMutationsEnabled } from "../features/auth/AuthProvider";
+import { canCreateProject } from "../features/auth/rbac";
 import { useProjects } from "../features/projects/hooks";
 import { InactiveBadge } from "../features/projects/ProjectScope";
 import { formatDateTime } from "../lib/time";
@@ -84,10 +86,26 @@ function SummaryCells({ project }: { project: Project }) {
 
 export function ProjectsPage() {
   const projects = useProjects();
+  const me = useMe();
+  const mutationsEnabled = useMutationsEnabled();
+  const mayCreate = canCreateProject(
+    me.projects.map((p) => p.role),
+    mutationsEnabled,
+  );
 
   return (
     <>
-      <PageHeader title="Проекты" subtitle="Проекты, в которых у вас есть роль" />
+      <PageHeader
+        title="Проекты"
+        subtitle="Проекты, в которых у вас есть роль"
+        actions={
+          mayCreate ? (
+            <Link className="btn" to="/projects/new">
+              + Новый проект
+            </Link>
+          ) : null
+        }
+      />
       {projects.isPending ? <Loading /> : null}
       {projects.isError ? (
         <ErrorBanner error={projects.error} onRetry={() => projects.refetch()} />

@@ -42,11 +42,13 @@ from sqlalchemy import Select, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from ai_smm.account_routing import RouteUnavailable, check_route_ready
 from ai_smm.application.control_plane import (
     WorkerMode,
     observed_worker_mode,
     require_mutations_enabled,
 )
+from ai_smm.config import Settings, get_settings
 from ai_smm.db.models import (
     MANUAL_ONLY_STATUSES,
     TERMINAL_STATUSES,
@@ -87,6 +89,15 @@ class PublicationUnavailable(Exception):
 
 class PublicationLocked(Exception):
     """Something else holds the row and did not let go in time."""
+
+
+class PublishingRouteNotReady(Exception):
+    """The row has no usable account route (ai_smm.publishing.routing)."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+
+        self.code = code
 
 
 class InvalidTransition(Exception):
@@ -421,6 +432,7 @@ def schedule_publication(
     note: str | None = None,
     reset_attempts: bool = False,
     command: str = "schedule",
+    settings: Settings | None = None,
 ) -> Publication:
     """Put an approved or failed row on the schedule.
 
@@ -445,6 +457,15 @@ def schedule_publication(
     )
 
     _require_transition(command=command, publication=publication)
+
+    # Where would it go? Refused now, with the reason, rather than failed
+    # by the worker later. The worker checks again at publish time.
+    try:
+        check_route_ready(
+            db, publication, settings if settings is not None else get_settings()
+        )
+    except RouteUnavailable as exc:
+        raise PublishingRouteNotReady(exc.code, str(exc)) from exc
 
     if scheduled_at.tzinfo is None:
         # The CLI reads a naive time in the operator timezone; an API must
@@ -481,6 +502,7 @@ def reschedule_publication(
     mutations_enabled: bool,
     note: str | None = None,
     reset_attempts: bool = False,
+    settings: Settings | None = None,
 ) -> Publication:
     """Move the schedule of a row that is already scheduled, or retry a failure."""
 
@@ -494,6 +516,7 @@ def reschedule_publication(
         note=note,
         reset_attempts=reset_attempts,
         command="reschedule",
+        settings=settings,
     )
 
 

@@ -129,8 +129,16 @@ install -m 644 /path/to/queue.json /srv/ai-smm/data/queue.json
 
 docker compose --profile cli run --rm -T \
   -v /srv/ai-smm/data:/srv/ai-smm/data:ro \
-  cli import-json /srv/ai-smm/data/queue.json --display-name "Project name"
+  cli import-json /srv/ai-smm/data/queue.json
 ```
+
+Since SMM-025B the project must exist first (`ai-smm project create --id
+… --display-name … --owner-email …`, which writes the owner membership in
+the same transaction); `import-json` refuses an unknown project and no
+longer renames an existing one (`--display-name` is ignored with a
+warning). Imported rows are legacy rows: they are published with the
+deployment token only if their project is in
+`AI_SMM_LEGACY_THREADS_PROJECTS`.
 
 A record that already carries a `threads_post_id` is imported as `published`,
 which puts it permanently out of the worker's reach.

@@ -11,6 +11,9 @@ describe("auth bootstrap", () => {
     renderApp(server, "/projects");
 
     expect(await screen.findByRole("heading", { name: "Проекты" })).toBeInTheDocument();
+    // The page's own query starts after the heading renders; under load the
+    // gap was wide enough to read the call log before it (SMM-025B, FU-024B2-1).
+    await waitFor(() => expect(server.callsTo("GET", "/api/v1/projects").length).toBeGreaterThan(0));
 
     const order = server.calls.map((c) => `${c.method} ${c.path}`);
     const me = order.indexOf("GET /api/v1/auth/me");

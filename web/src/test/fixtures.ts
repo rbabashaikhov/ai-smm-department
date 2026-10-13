@@ -2,6 +2,7 @@ import type {
   Approval,
   ContentItemDetail,
   ContentStatus,
+  Credential,
   MeResponse,
   OperationsSummary,
   Project,
@@ -10,6 +11,7 @@ import type {
   PublicationStatus,
   Revision,
   Role,
+  SocialAccount,
 } from "../types/api";
 import { FakeApi, ok } from "./fakeApi";
 
@@ -274,9 +276,54 @@ export function createServer(
     .on("GET", "/api/v1/content-items/:id/approvals", ok(page([])))
     .on("GET", "/api/v1/publications/:id", ok(publication))
     .on("GET", "/api/v1/publications/:id/preview", ok(makePreview(publication)))
-    .on("GET", "/api/v1/publications/:id/attempts", ok(page([])));
+    .on("GET", "/api/v1/publications/:id/attempts", ok(page([])))
+    .on("GET", "/api/v1/projects/:projectId/social-accounts", ok([]));
 
   return api;
+}
+
+// -- social accounts (SMM-025B) ----------------------------------------------
+
+export const ACCOUNT_ID = "66666666-6666-4666-8666-666666666666";
+export const CREDENTIAL_ID = "77777777-7777-4777-8777-777777777777";
+
+export function makeCredential(overrides: Partial<Credential> = {}): Credential {
+  return {
+    id: CREDENTIAL_ID,
+    social_account_id: ACCOUNT_ID,
+    status: "active",
+    fingerprint: "3f9a1c0b77d2",
+    key_id: "5d7c821189bf3a82",
+    verification_status: "verified",
+    verified_at: T0,
+    expires_at: null,
+    created_by_user_id: USER_ID,
+    created_at: T0,
+    superseded_at: null,
+    revoked_at: null,
+    ...overrides,
+  };
+}
+
+export function makeAccount(overrides: Partial<SocialAccount> = {}): SocialAccount {
+  return {
+    id: ACCOUNT_ID,
+    project_id: PROJECT_ID,
+    platform: "threads",
+    display_name: "Личный блог",
+    status: "active",
+    external_account_id: "1789",
+    external_username: "travel_ru",
+    version: 1,
+    created_at: T0,
+    updated_at: T0,
+    disabled_at: null,
+    credential: makeCredential(),
+    publishing_ready: true,
+    not_ready_reason: null,
+    scheduled_publications: 0,
+    ...overrides,
+  };
 }
 
 // -- two projects (SMM-025A) -------------------------------------------------

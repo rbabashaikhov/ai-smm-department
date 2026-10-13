@@ -86,8 +86,35 @@ SELECT_TABLES = frozenset(
         "audit_log",
         "users",
         "user_sessions",
+        # SMM-025B: account metadata (labels, status, platform identity).
+        "social_accounts",
     }
 )
+
+#: Column-level SELECT: readable columns of a table the API may not read
+#: whole. Credentials are metadata only -- never the sealed token.
+COLUMN_SELECTS: dict[str, frozenset[str]] = {
+    "social_account_credentials": frozenset(
+        {
+            "id",
+            "social_account_id",
+            "status",
+            "scheme",
+            "key_id",
+            "fingerprint",
+            "verification_status",
+            "verified_at",
+            "expires_at",
+            "created_by_user_id",
+            "created_at",
+            "superseded_at",
+            "revoked_at",
+        }
+    ),
+}
+
+#: The columns that hold key material. Never readable by the API.
+KEY_MATERIAL_COLUMNS = frozenset({"ciphertext", "nonce", "ephemeral_public_key"})
 
 #: Column-level writes, and nothing else. No table-level INSERT, UPDATE,
 #: DELETE, TRUNCATE, REFERENCES or TRIGGER anywhere.
@@ -143,7 +170,7 @@ def owner_name(database_url: str) -> str:
 def test_every_model_table_has_a_privilege_decision() -> None:
     """A new table forces a decision here before the API can read it."""
 
-    decided = SELECT_TABLES | NO_ACCESS_TABLES
+    decided = SELECT_TABLES | NO_ACCESS_TABLES | set(COLUMN_SELECTS)
 
     assert set(Base.metadata.tables) <= decided, (
         "tables without a decision for ai_smm_cc: "
@@ -239,6 +266,25 @@ def test_effective_privileges_match_the_matrix(
     }
 
     assert actual_columns == expected_columns
+
+    readable = pg_roles.query_admin(
+        admin_database_url,
+        "SELECT c.relname, a.attname "
+        "  FROM pg_class c "
+        "  JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 "
+        "       AND NOT a.attisdropped "
+        " WHERE c.relnamespace = 'public'::regnamespace "
+        "   AND c.relkind IN ('r', 'p', 'v', 'm', 'f') "
+        "   AND NOT has_table_privilege('ai_smm_cc', c.oid, 'SELECT') "
+        "   AND has_column_privilege('ai_smm_cc', c.oid, a.attnum, 'SELECT')",
+    )
+    actual_selects: dict[str, set[str]] = {}
+
+    for table, column in readable:
+        actual_selects.setdefault(table, set()).add(column)
+
+    assert actual_selects == {t: set(c) for t, c in COLUMN_SELECTS.items()}
+    assert not (actual_selects["social_account_credentials"] & KEY_MATERIAL_COLUMNS)
 
     sequences = pg_roles.query_admin(
         admin_database_url,
@@ -531,6 +577,30 @@ DENIED = {
     "delete sessions": "DELETE FROM user_sessions",
     "extend session": "UPDATE user_sessions SET expires_at = now() + interval '1 year'",
     "steal session": "UPDATE user_sessions SET user_id = user_id",
+    # SMM-025B: accounts and sealed credentials
+    "read key material": "SELECT ciphertext, nonce FROM social_account_credentials",
+    "read whole credential rows": "SELECT * FROM social_account_credentials",
+    "repoint an account": "UPDATE social_accounts SET external_account_id = 'x'",
+    "insert account": (
+        "INSERT INTO social_accounts (id, project_id, platform, display_name) "
+        "VALUES (gen_random_uuid(), 'test-project', 'threads', 'x')"
+    ),
+    "swap credentials": (
+        "UPDATE social_account_credentials SET social_account_id = social_account_id"
+    ),
+    "plant a credential": (
+        "INSERT INTO social_account_credentials (id, social_account_id, status, "
+        "scheme, key_id, ephemeral_public_key, nonce, ciphertext, fingerprint) "
+        "SELECT gen_random_uuid(), id, 'superseded', 's', 'k', NULL, NULL, NULL, "
+        "'000000000000' FROM social_accounts LIMIT 1"
+    ),
+    "route a publication": (
+        "UPDATE publications SET social_account_id = NULL"
+    ),
+    "declare account routing": (
+        "UPDATE publications SET status = 'claimed' "
+        "WHERE social_account_id IS NOT NULL"
+    ),
     # the audit trail
     "update audit": "UPDATE audit_log SET action = 'x'",
     "delete audit": "DELETE FROM audit_log",
@@ -683,6 +753,9 @@ def _read_paths(seeded: World, project: str, session: Session) -> list[str]:
         f"/api/v1/projects/{project}/operations/attention",
         f"/api/v1/projects/{project}/audit",
         f"/api/v1/projects/{project}/audit?action=project.seeded",
+        # SMM-025B: account and credential metadata, never key material.
+        f"/api/v1/projects/{project}/social-accounts",
+        f"/api/v1/social-accounts/{seeded.account}",
     ]
 
 
@@ -779,8 +852,16 @@ def ungated_client(production_settings: Settings, restricted_session_factory):
     receives, not the exception the test client would re-raise.
     """
 
+    from ai_smm.security.credentials import encode_public_key, generate_key_pair
+
     app = create_app(
-        replace(production_settings, api_mutations_enabled=True),
+        replace(
+            production_settings,
+            api_mutations_enabled=True,
+            # So a credential request reaches the database instead of
+            # stopping at "not configured": the database must refuse it.
+            credentials_public_key=encode_public_key(generate_key_pair()[1]),
+        ),
         session_factory=restricted_session_factory,
         access_log=False,
     )
@@ -1487,7 +1568,8 @@ def test_migrations_run_as_the_owner_alongside_the_role(
     # which, and re-running the grants file is the repair.
     lost = pg_roles.failures(pg_roles.verify(admin_url))
 
-    assert "FAIL|table.content_items.select|granted" in lost
+    # The newest revision (a7c2e5f19b40) is the one dropped and recreated.
+    assert "FAIL|table.social_accounts.select|granted" in lost
     assert all(".select|granted" in line or "matrix." in line for line in lost)
 
     pg_roles.run_script(admin_url, pg_roles.GRANTS_SQL)

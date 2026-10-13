@@ -20,6 +20,23 @@ def _write_queue(tmp_path: Path, document: dict) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def existing_projects(session: Session) -> None:
+    """Since SMM-025B the importer adds to a project; it never creates one."""
+
+    from ai_smm.queue import ensure_project
+
+    for project_id in ("pilot", "ai-catalog-consultant"):
+        ensure_project(
+            session,
+            project_id=project_id,
+            display_name=f"{project_id} (by its owner)",
+            knowledge_path=f"knowledge/projects/{project_id}",
+        )
+
+    session.commit()
+
+
 @pytest.fixture
 def queue_document() -> dict:
     return {
@@ -243,3 +260,52 @@ def test_real_pilot_queue_imports_if_present(
 
     assert report.total >= 1
     assert session.query(Publication).count() == len(report.created)
+
+
+def test_an_unknown_project_is_refused_and_nothing_is_written(
+    session: Session, tmp_path: Path, queue_document: dict
+) -> None:
+    from ai_smm.db.models import Project
+    from ai_smm.importer import UnknownProjectError
+
+    queue_document["project_id"] = "never-created"
+    path = _write_queue(tmp_path, queue_document)
+
+    with pytest.raises(UnknownProjectError, match="ai-smm project create"):
+        import_json_queue(session, queue_path=path)
+
+    session.rollback()
+
+    assert session.get(Project, "never-created") is None
+    assert session.query(Publication).count() == 0
+
+
+def test_the_importer_never_renames_or_repaths_a_project(
+    session: Session, tmp_path: Path, queue_document: dict
+) -> None:
+    from ai_smm.db.models import Project
+
+    path = _write_queue(tmp_path, queue_document)
+
+    import_json_queue(
+        session,
+        queue_path=path,
+        project_display_name="pilot",
+        knowledge_path="somewhere/else",
+    )
+    session.commit()
+    session.expire_all()
+
+    project = session.get(Project, "pilot")
+
+    assert project.display_name == "pilot (by its owner)"
+    assert project.knowledge_path == "knowledge/projects/pilot"
+
+
+def test_imported_rows_are_legacy_rows(
+    session: Session, tmp_path: Path, queue_document: dict
+) -> None:
+    import_json_queue(session, queue_path=_write_queue(tmp_path, queue_document))
+    session.commit()
+
+    assert {p.social_account_id for p in session.query(Publication)} == {None}

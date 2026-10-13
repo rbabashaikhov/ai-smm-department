@@ -116,6 +116,20 @@ class Settings:
     #: neither stop nor start publishing.
     api_mutations_enabled: bool = False
 
+    # Social accounts (SMM-025B). See ai_smm.publishing.routing.
+    #: Projects whose account-less (legacy) publications may still be
+    #: published with the deployment THREADS_ACCESS_TOKEN. Empty -- the
+    #: default -- means none: a legacy row of any other project fails at
+    #: preflight instead of posting as the deployment account. A project
+    #: is never added here implicitly.
+    legacy_threads_projects: tuple[str, ...] = ()
+    #: Base64 X25519 public key. The API seals credentials with it and
+    #: can open none of them.
+    credentials_public_key: str | None = None
+    #: Private key files (PKCS#8 PEM, mode 600) of the worker and the
+    #: operator CLI. Several during a key rotation.
+    credentials_private_key_files: tuple[Path, ...] = ()
+
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
         default=(
@@ -192,7 +206,41 @@ def load_settings() -> Settings:
         api_mutations_enabled=_env_bool(
             "AI_SMM_API_MUTATIONS_ENABLED", False
         ),
+        legacy_threads_projects=_legacy_projects(),
+        credentials_public_key=_env("AI_SMM_CREDENTIALS_PUBLIC_KEY"),
+        credentials_private_key_files=tuple(
+            Path(item).expanduser()
+            for item in _env_list("AI_SMM_CREDENTIALS_PRIVATE_KEY_FILES")
+        ),
     )
+
+
+def _env_list(name: str) -> tuple[str, ...]:
+    raw = _env(name)
+
+    if raw is None:
+        return ()
+
+    return tuple(
+        item.strip() for item in raw.split(",") if item.strip()
+    )
+
+
+def _legacy_projects() -> tuple[str, ...]:
+    # Imported here: the id rule lives with the project service, which
+    # imports this module.
+    from ai_smm.application.project_ids import is_valid_project_id
+
+    values = _env_list("AI_SMM_LEGACY_THREADS_PROJECTS")
+
+    for value in values:
+        if not is_valid_project_id(value, allow_reserved=True):
+            raise ValueError(
+                "AI_SMM_LEGACY_THREADS_PROJECTS contains an invalid project "
+                f"id: {value!r}."
+            )
+
+    return values
 
 
 @lru_cache(maxsize=1)

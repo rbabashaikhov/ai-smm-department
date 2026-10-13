@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 
+from ai_smm.local_env import load_local_dotenv
+
+load_local_dotenv()
+
 from ai_smm.publishing.threads import ThreadsPublisher
 
 
