@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Proposed — documentation review.** The owner accepted the architectural direction (a separate `smm-auth` service with its own PostgreSQL role) with two mandatory corrections, both incorporated here (§3.2) |
+| Status | **Accepted.** The owner accepted the architectural direction (a separate `smm-auth` service with its own PostgreSQL role) with two mandatory corrections, both incorporated here (§3.2) |
 | Project | PRJ-013 AI SMM Department 2.0 |
 | Baseline | `main` at `dc2d54ee6d96a50cd7064a73f4cc7eaa8762efe4` (production release `0cbd641`) |
 | Addresses | [FU-024C2-1](../follow-ups.md#fu-024c2-1--session-forgery-through-the-apis-database-connection) (session forgery) in full for session creation; prepares [FU-024C2-2](../follow-ups.md#fu-024c2-2--authenticity-of-audit-actor-and-action) and [FU-024C2-3](../follow-ups.md#fu-024c2-3--a-privilege-model-for-business-mutations) |
