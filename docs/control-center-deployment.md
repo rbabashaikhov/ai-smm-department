@@ -4,13 +4,22 @@ SMM-024B.3. How the private Control Center (`smm-api` + `smm-web`) is
 added to the production host next to the live worker, read-only, reachable
 only through an SSH tunnel.
 
-> **Status (2026-10-12): executed once in production.** This runbook was
-> run step by step on **2026-10-11** for release
-> `8ccccda161c3a0b4bc3fd4a90d86dfd19dabd665` (SMM-024B.4B-2 … B.4B-5,
-> each step separately approved). Production is now at Alembic
-> `3d4ac1986f07` with the Control Center running read-only; the record of
-> that run, with its deviations, is
+> **Status (2026-10-13): executed once in production, then updated by
+> SMM-024C-2B.** This runbook was run step by step on **2026-10-11** for
+> release `8ccccda161c3a0b4bc3fd4a90d86dfd19dabd665` (SMM-024B.4B-2 …
+> B.4B-5, each step separately approved); the record of that run, with
+> its deviations, is
 > [production-acceptance-smm-024b.md](production-acceptance-smm-024b.md).
+> Since **2026-10-13** production runs release
+> `0cbd641074ad3bc0501e54f59dac90bd1ccc9006` with `smm-api` connected as
+> the least-privilege role `ai_smm_cc` (Alembic `3d4ac1986f07` unchanged,
+> read-only); that rollout followed
+> [least-privilege-role.md §7](least-privilege-role.md#7-production-rollout)
+> and is recorded in
+> [production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md).
+> The live files on the host are now that release's: `up` and `restart`
+> also run the API role gate, and `preflight` needs a current
+> `control-center.window`.
 >
 > The blocks below are kept as the **template for any future run**
 > (another release, a re-deployment): the marker
@@ -368,16 +377,17 @@ defend against a root operator who decides to bypass them.
 
 ### Database role
 
-**As deployed on 2026-10-11:** the API connects as the existing role
-`ai_smm` — the database owner, the same role the worker uses. This is what
+**As deployed on 2026-10-11 (until 2026-10-13):** the API connected as
+the existing role `ai_smm` — the database owner, the same role the worker
+uses. This is what
 SMM-024B.2 decided (§17.3 of the plan): it creates nothing on the shared
 instance. Its cost: the API's database credentials could do anything the
 worker's can, and the read-only guarantee rests on the application (the
 central mutation gate plus the service-level checks), not on database
 privileges.
 
-**From SMM-024C-2 on (designed and validated locally, not applied in
-production):** `smm-api` connects as `ai_smm_cc`, a role that can read
+**From SMM-024C-2 on (in production since 2026-10-13):** `smm-api`
+connects as `ai_smm_cc`, a role that can read
 and write only the session and audit rows of login/logout; PostgreSQL
 refuses every business change from it. `migrate` and `cli` keep the
 owner. The compose file and scripts of that release require
@@ -546,6 +556,19 @@ set -o pipefail
 ```
 
 ### Step 0 — Stage the artefacts (no runtime effect)
+
+> **File set from release `0cbd641` on.** The commands below are those of
+> the 2026-10-11 run (release `8ccccda`). From `0cbd641` on, the bundle
+> also carries `deploy/control-center/db/ai_smm_cc.verify.sql` (and the
+> role's other SQL files), and `control-center.api.env` must exist before
+> the first wrapper call: Compose cannot load the project without it, so
+> even `config` and `ps` refuse. The role must exist first (§2, Database
+> role). On a host that already runs the Control Center, never `scp` a new
+> release over the live directory: stage it next to it and install in the
+> order of
+> [least-privilege-role.md §7.4](least-privilege-role.md#74-r4--stage-the-new-compose-file-and-scripts-approval-a3)
+> — scripts and the verify file first, `compose.control-center.yml`
+> last.
 
 > **NOT EXECUTED — REQUIRES OWNER APPROVAL**
 
@@ -1048,7 +1071,7 @@ real daemon; the gate uses `range` (pinned by a test).
 | Risk | Mitigation / status |
 |---|---|
 | `smm-api` is on `<shared-network>`: it has outbound internet access, and every container on that network can reach `smm-api:8000` directly, bypassing nginx | API still requires a session and CSRF; no credentials in the API; unroutable Threads URL; no Traefik route. Removing it needs the database on a network of its own — a change to another project's stack, out of scope |
-| The API uses the database owner role `ai_smm` | Application-level gate only; FU-024B3-1 (least-privilege role) |
+| The API used the database owner role `ai_smm` (until 2026-10-13) | Closed for the read-only mode: `smm-api` connects as `ai_smm_cc`, business writes are refused by PostgreSQL (FU-024B3-1, [production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md)). Residual: session forgery and audit actor spoofing through the API's connection (FU-024C2-1, FU-024C2-2) |
 | A bare `docker compose` bypassing the wrapper | `name:` in the file, separate directory with no `.env`, runbook rule; the wrapper is the only documented entry point and `tests/test_control_center_wrapper.py` fails if a runbook calls Compose directly |
 | Root on the host can still do anything: retag another image and give it the same label, edit the wrapper or `control-center.target`, run `docker` by hand | Out of reach of any file on the host. The manifest check in step 0 and `diff` against the reviewed commit (rollback §6) detect a changed copy; the label check catches the accidental cases (wrong tag, wrong build, prefix collision) |
 | The wrapper reads `docker` from `PATH` and the Docker CLI's config (plugins, proxies) from `HOME` | Operator's own root shell; `DOCKER_HOST` is set explicitly, so no context in that config can redirect the daemon |

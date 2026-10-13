@@ -8,11 +8,21 @@ register below says which.
 
 ---
 
-## Register (as of 2026-10-12, SMM-024C-1)
+<a id="register-as-of-2026-10-12-smm-024c-1"></a>
+
+## Register
+
+**As of 2026-10-13 (SMM-024C-2B).** The heading stays the same when the
+register is updated, so links to `#register` keep working; the anchor of
+its first version (`#register-as-of-2026-10-12-smm-024c-1`) is kept too.
 
 Production state these priorities refer to: Control Center v1 deployed
-read-only on 2026-10-11 (release `8ccccda`, schema `3d4ac1986f07`), live
-worker unchanged — see
+read-only on 2026-10-11, since 2026-10-13 on release `0cbd641` with the
+API connected as the least-privilege role `ai_smm_cc` (schema
+`3d4ac1986f07`, mutations off); live worker unchanged, still on the owner
+role — see
+[production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md)
+and, for the first deployment,
 [production-acceptance-smm-024b.md](production-acceptance-smm-024b.md).
 
 Priorities as agreed in the SMM-024C-1 review (2026-10-12):
@@ -24,8 +34,7 @@ mandatory condition for a later step, named in its row.
 
 | FU | Title | Status | Priority | Blocks business mutations? |
 |---|---|---|---|---|
-| [FU-024B3-1](#fu-024b3-1--a-least-privilege-database-role-for-the-api) | Least-privilege PostgreSQL role for the API | designed and validated locally (SMM-024C-2A); production rollout pending owner approval | **P1** | **Yes** — today the read-only guarantee rests on application code only; with mutations on, the API would hold owner (DDL) rights |
-| [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open | **P1** | **Yes** — this is the check that precedes the switch |
+| [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open; its database-role part for the read-only mode is done (FU-024B3-1) | **P1** | **Yes** — this is the check that precedes the switch |
 | [FU-024C2-1](#fu-024c2-1--session-forgery-through-the-apis-database-connection) | Session forgery through the API's database connection | open, accepted for read-only mode | **P1** | **Yes** — a forged owner session could schedule a post the LIVE worker sends |
 | [FU-024C2-2](#fu-024c2-2--authenticity-of-audit-actor-and-action) | Authenticity of audit actor/action | open, accepted for read-only mode | **P1** | **Yes** — business actions must be attributable |
 | [FU-024C2-3](#fu-024c2-3--a-privilege-model-for-business-mutations) | Privilege model for business mutations (SMM-025) | open | **P1** | **Yes** — with `ai_smm_cc`, enabling mutations fails closed until it exists |
@@ -33,7 +42,7 @@ mandatory condition for a later step, named in its row.
 | [FU-024B4A-1](#fu-024b4a-1--the-gap-between-the-queue-gate-and-the-first-ddl-statement) | Queue gate → DDL gap (TOCTOU) | open | **migration gate** | No for the current read-only UI. **Mandatory before any further migration while the queue can be written** (mutations on, or any other writer active) |
 | [FU-024B2-2](#fu-024b2-2--validate-worker_mode_source-when-a-worker-heartbeat-is-introduced) | Source and reliability of the worker mode | open | P2 | No — the UI shows `UNKNOWN` with a warning; still wanted soon, as the worker is LIVE |
 | [FU-024C1-1](#fu-024c1-1--the-api-connects-to-postgresql-as-ai-smmworker-1) | API's `application_name` in PostgreSQL | open | P2 | No — observability only |
-| [FU-024C1-3](#fu-024c1-3--off-host-backup-encryption-and-off-host-copies-of-nightly-dumps) | Off-host backup encryption; nightly dumps off the host | open | P2 | No |
+| [FU-024C1-3](#fu-024c1-3--off-host-backup-encryption-and-off-host-copies-of-nightly-dumps) | Off-host backup encryption; nightly dumps off the host | open; one encrypted, restore-tested off-host copy made by hand (2026-10-12) | P2 | No |
 | [FU-024C1-2](#fu-024c1-2--historical-approval-provenance-of-publication-1) | Approval provenance of publication 1 | open, NOT VERIFIED | P2 | No — historical record only |
 | [FU-024B2-1](#fu-024b2-1--flaky-vitest-tests) | Flaky Vitest tests | open | P2 | No — but fix before UI work for mutations, so regressions are not masked |
 | [FU-024B3-4](#fu-024b3-4--atomic-finalisation-of-dump-and-checksum) | Atomic finalisation of dump and checksum | open | P2 | No (before the next migration preferably) |
@@ -42,6 +51,7 @@ mandatory condition for a later step, named in its row.
 | [FU-024B3-3](#fu-024b3-3--secure-session-cookie) | `Secure` session cookie | open, depends on HTTPS | P3 | No (SSH tunnel only) |
 | [FU-024B4A-2](#fu-024b4a-2--the-trust-model-of-backup-evidence-and-the-off-host-acknowledgement) | Trust model of backup evidence / off-host ack | accepted limitation | P3 | No |
 | [FU-024B2-3](#fu-024b2-3--documentation-read-only-means-business-operations-authentication-still-writes-session-state) | Read-only wording: auth still writes | docs and `web/README.md` aligned in SMM-024C-1 | P3 | No |
+| [FU-024B3-1](#fu-024b3-1--a-least-privilege-database-role-for-the-api) | Least-privilege PostgreSQL role for the API | **done** for the read-only mode (SMM-024C-2A design; production 2026-10-13, SMM-024C-2B) | — | No longer — the role for an editable API is FU-024C2-3 |
 | [FU-024B3-5](#fu-024b3-5--verify-the-postgresql-identity-before-the-production-run) | PostgreSQL identity before the production run | **done** (SMM-024B.4A-FIX; used in production 2026-10-11) | — | — |
 
 Switching on business mutations is in any case a reviewed change to
@@ -185,12 +195,19 @@ blocks the read-only deployment; each changes what a later step may do.
 
 ### FU-024B3-1 — A least-privilege database role for the API
 
-**Status:** designed and validated locally in SMM-024C-2A (2026-10-12):
-[least-privilege-role.md](least-privilege-role.md). **Still needs:** the
-production rollout there (§7) — a write to the shared PostgreSQL instance
-(creating a role), the credential, and the switch of `smm-api`, each
-requiring separate owner approval. The read-only grants below were
-refined: `users` and `user_sessions` writes are column-level, the
+**Status: done for the read-only mode.** Designed and validated locally
+in SMM-024C-2A (2026-10-12):
+[least-privilege-role.md](least-privilege-role.md). Rolled out in
+SMM-024C-2B: role and grants (A1) and credential (A2) on 2026-10-12, the
+switch of `smm-api` (A3) on 2026-10-13. In production the read-only smoke
+test passed (37/37) with the restricted role, and a direct
+`UPDATE publications` from the API's connection — like nine other
+business writes and a `CREATE TABLE` — is refused by PostgreSQL with
+42501; record:
+[production-acceptance-smm-024c2.md](production-acceptance-smm-024c2.md).
+The privileges an editable API needs are FU-024C2-3.
+
+The read-only grants below were refined: `users` and `user_sessions` writes are column-level, the
 `user_sessions` insert includes `revoked_at` (the ORM always sends it),
 and — after the SMM-024C-2A security review — **no** `UPDATE` on
 `users.password_hash`: the optional Argon2 upgrade at login now runs in a
@@ -199,10 +216,11 @@ therefore needs rebuilt images. Accepted residual risks (session creation
 for any user, unauthenticated audit actor/action) are listed in
 [least-privilege-role.md §4.1–4.2](least-privilege-role.md#41-sessions-what-is-and-is-not-guaranteed).
 
-The API connects as `ai_smm`, the database owner, the same role the
-worker and the migrations use. The read-only guarantee therefore rests on
-the application (central mutation gate plus service-level checks), not on
-privileges: a code path that escaped both could change anything.
+Before 2026-10-13 the API connected as `ai_smm`, the database owner,
+the same role the worker and the migrations use. The read-only guarantee
+therefore rested on the application (central mutation gate plus
+service-level checks), not on privileges: a code path that escaped both
+could change anything.
 
 Proposed: a role `ai_smm_cc` with `SELECT` on the queue and editorial
 tables and only the writes authentication needs (`INSERT`/`UPDATE` on
@@ -212,13 +230,14 @@ a second env file. Done when the read-only smoke test passes with the
 restricted role and a direct `UPDATE publications` from the API's
 connection is refused by PostgreSQL.
 
-**Production note (SMM-024C-1, 2026-10-12).** Since 2026-10-11 the
-deployed API connects as the owner role. With mutations on, the role
-needs more than the read-only grants above (content tables, the queue
-columns the three commands move), so the design must be redone for the
-editable control plane — still without DDL, ownership or access to
-`alembic_version`. **Priority P1; blocks business mutations.** Verifying
-the role together with the other safety gates is FU-024C1-5.
+**Production note (SMM-024C-1, 2026-10-12; historical).** From
+2026-10-11 to 2026-10-13 the deployed API connected as the owner role.
+With mutations on, the role needs more than the read-only grants above
+(content tables, the queue columns the three commands move), so the
+design must be redone for the editable control plane — still without
+DDL, ownership or access to `alembic_version`. That part is now
+FU-024C2-3 (P1, blocks business mutations). Verifying the role together
+with the other safety gates is FU-024C1-5.
 
 ### FU-024B3-2 — Take the API off the shared network
 
@@ -352,6 +371,12 @@ Consequences:
 - a future worker heartbeat attributed by `worker_id` (FU-024B2-2) could
   be confused with the API.
 
+**Production note (SMM-024C-2B, 2026-10-13).** Since the API connects as
+`ai_smm_cc`, `usename` tells its connections apart from the worker's
+(`ai_smm`) in `pg_stat_activity`; `application_name` is still
+`ai-smm/worker-1`. Queries that must find the API's sessions should
+filter on `usename = 'ai_smm_cc'` until this item is fixed.
+
 Done when the API and the operator CLI identify themselves distinctly
 (for example: `connect_args` omits `application_name` when `PGAPPNAME` is
 set, or the API factory passes its own name), a test asserts the
@@ -411,6 +436,15 @@ later annotation.
 ### FU-024C1-3 — Off-host backup encryption, and off-host copies of nightly dumps
 
 **Status:** open. **Priority:** P2. **Blocks mutations:** no.
+
+**Progress (SMM-024C-2B, 2026-10-12).** Before the role rollout the
+nightly dump of 2026-10-12 was restore-tested in a disposable,
+network-less PostgreSQL container (all foreign keys without orphans,
+Alembic `3d4ac1986f07`, data fingerprints equal to production), and its
+off-host copy was replaced by a symmetrically encrypted archive (GnuPG,
+AES-256) whose decryption was checked against the recorded sha256; the
+plaintext copy was securely deleted. This was done **by hand, once**: it
+is not yet a scheduled procedure, and the points below remain open.
 
 - The pre-migration dump of 2026-10-11 has a verified off-host copy on
   the owner's workstation (owner-only permissions). Runbook step 5b asks
@@ -494,8 +528,10 @@ separately.
 Recorded when SMM-024C-2A-FIX was accepted with follow-ups. Background,
 tests and evidence: [least-privilege-role.md](least-privilege-role.md)
 §4.1–4.3 and §6. None of them blocks switching the **read-only** API to
-`ai_smm_cc`: each risk below exists today, in a larger form, while the
-API connects as the owner. The first three block business mutations.
+`ai_smm_cc`: each risk below existed in a larger form while the API
+connected as the owner (until 2026-10-13); with the role in production
+(SMM-024C-2B) they are the accepted residual risks of the read-only
+mode. The first three block business mutations.
 
 ### FU-024C2-1 — Session forgery through the API's database connection
 

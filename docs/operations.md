@@ -30,8 +30,12 @@ architecture and the reasoning behind it, and
 for the publication-safety rules.
 
 > **The Control Center (API + web) is deployed** since 2026-10-11
-> (release `8ccccda`, schema `3d4ac1986f07`;
-> [acceptance record](production-acceptance-smm-024b.md)). It is
+> (schema `3d4ac1986f07`;
+> [acceptance record](production-acceptance-smm-024b.md)); since
+> 2026-10-13 it runs release `0cbd641` and its API connects to
+> PostgreSQL as the least-privilege role `ai_smm_cc`, while the worker
+> keeps the owner role
+> ([record](production-acceptance-smm-024c2.md)). It is
 > **read-only for business operations**
 > (`AI_SMM_API_MUTATIONS_ENABLED=false`): no content, approval, project
 > setting or queue change is accepted, for any role. Authentication still
