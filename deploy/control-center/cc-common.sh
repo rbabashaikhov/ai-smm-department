@@ -20,6 +20,12 @@ readonly CC_SECRET_FILE_NAME=control-center.env
 # smm-api only: the least-privilege role's URL (SMM-024C-2).
 readonly CC_API_SECRET_FILE_NAME=control-center.api.env
 readonly CC_API_ROLE=ai_smm_cc
+# Business-mutation mode (SMM-025C): its own role, URL file and compose
+# override, used only while the state file names the running release.
+readonly CC_RW_SECRET_FILE_NAME=control-center.api-rw.env
+readonly CC_RW_ROLE=ai_smm_cc_rw
+readonly CC_MUTATIONS_COMPOSE_FILE_NAME=compose.control-center.mutations.yml
+readonly CC_MUTATIONS_STATE_FILE_NAME=control-center.mutations
 readonly CC_TARGET_FILE_NAME=control-center.target
 readonly CC_REVISION_LABEL=org.opencontainers.image.revision
 
@@ -126,6 +132,48 @@ cc_load_api_secret() {
         || cc_die "$file is mode $mode; it holds the API's database password and must be 600"
 
     CC_API_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
+}
+
+# Sets CC_RW_DSN from control-center.api-rw.env, the mutation role's URL:
+# exactly one key, mode 600. Checked by the API role gate in mutation mode.
+cc_load_rw_secret() {
+    local file="$CC_DIR/$CC_RW_SECRET_FILE_NAME" mode
+
+    cc_require_file "$file"
+    cc_check_keys "$file" AI_SMM_DATABASE_URL
+
+    mode="$(stat -c '%a' "$file")"
+    (( (8#$mode & 8#077) == 0 )) \
+        || cc_die "$file is mode $mode; it holds the mutation role's database password and must be 600"
+
+    CC_RW_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
+}
+
+# Reads control-center.mutations, written only by `mutations enable`.
+# Sets CC_MUTATIONS_VERSION, CC_MUTATIONS_ENABLED_AT, CC_MUTATIONS_APPROVED_BY.
+# Refuses anything malformed: a state file that is not exactly what the
+# wrapper writes was written by someone else.
+cc_load_mutations_state() {
+    local file="$CC_DIR/$CC_MUTATIONS_STATE_FILE_NAME"
+    local name_re='^[A-Za-z0-9][A-Za-z0-9_.@ -]{0,127}$'
+
+    cc_require_file "$file"
+    cc_check_keys "$file" SMM_CC_MUTATIONS SMM_CC_MUTATIONS_VERSION \
+        SMM_CC_MUTATIONS_ENABLED_AT SMM_CC_MUTATIONS_APPROVED_BY
+
+    [[ "$(cc_value_of "$file" SMM_CC_MUTATIONS)" == on ]] \
+        || cc_die "$file: SMM_CC_MUTATIONS must be 'on'; run 'mutations disable' to go back to read-only"
+
+    CC_MUTATIONS_VERSION="$(cc_value_of "$file" SMM_CC_MUTATIONS_VERSION)"
+    CC_MUTATIONS_ENABLED_AT="$(cc_value_of "$file" SMM_CC_MUTATIONS_ENABLED_AT)"
+    CC_MUTATIONS_APPROVED_BY="$(cc_value_of "$file" SMM_CC_MUTATIONS_APPROVED_BY)"
+
+    [[ "$CC_MUTATIONS_VERSION" =~ ^[0-9a-f]{40}$ ]] \
+        || cc_die "$file: SMM_CC_MUTATIONS_VERSION is not a 40-hex commit"
+    [[ "$CC_MUTATIONS_ENABLED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] \
+        || cc_die "$file: SMM_CC_MUTATIONS_ENABLED_AT is not a UTC timestamp"
+    [[ "$CC_MUTATIONS_APPROVED_BY" =~ $name_re ]] \
+        || cc_die "$file: SMM_CC_MUTATIONS_APPROVED_BY is not a plain name"
 }
 
 # Sets CC_DOCKER_HOST and CC_ENGINE_ID; refuses an ambiguous caller.

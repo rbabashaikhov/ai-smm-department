@@ -91,6 +91,17 @@ usage: cc-compose.sh <verb> [options]
                                   ai-smm user create-owner; prompts for the
                                   password (reads it from stdin without a TTY);
                                   runs the identity gate first
+  mutations status                read-only or business-mutation mode, and what
+                                  the running smm-api actually has
+  mutations enable --approved-by NAME
+                                  business-mutation mode for THIS release:
+                                  checks the mutation role (ai_smm_cc_rw), then
+                                  recreates smm-api on it with mutations on.
+                                  Refused outright by a release that does not
+                                  permit mutations (CC_RELEASE_PERMITS_MUTATIONS)
+  mutations disable               back to read-only, always allowed: drops the
+                                  mode first, then recreates smm-api on
+                                  ai_smm_cc -- or stops it if that role fails
 EOF
 }
 
@@ -342,6 +353,40 @@ case "$verb" in
             "--email=$email" "--display-name=$display_name" "--project=$project")
         ;;
 
+    mutations)
+        [[ $# -ge 1 ]] || cc_die "mutations: status | enable --approved-by NAME | disable"
+        mutations_sub="$1"
+        shift
+
+        case "$mutations_sub" in
+            status)
+                [[ $# -eq 0 ]] || cc_die "mutations status takes no arguments"
+                ;;
+            enable)
+                [[ $# -eq 2 && "$1" == --approved-by ]] \
+                    || cc_die "mutations enable takes exactly --approved-by NAME"
+                [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_.@\ -]{0,127}$ ]] \
+                    || cc_die "mutations enable: --approved-by must be a plain name (letters, digits, . _ @ - space)"
+                approved_by="$2"
+                # Before anything is read or run: this release may not.
+                [[ "$CC_RELEASE_PERMITS_MUTATIONS" == yes ]] \
+                    || cc_die "mutations enable: this release does not permit business mutations (open: $CC_MUTATIONS_BLOCKED_BY); only a reviewed release can change that. Nothing was changed"
+                needs_images=true
+                gate_identity=true
+                gate_api_role=true
+                compose_args=(up --detach --wait --wait-timeout 180 --no-build --pull never --no-deps smm-api)
+                ;;
+            disable)
+                [[ $# -eq 0 ]] || cc_die "mutations disable takes no arguments"
+                needs_images=true
+                compose_args=(up --detach --wait --wait-timeout 180 --no-build --pull never --no-deps smm-api)
+                ;;
+            *)
+                cc_die "mutations: unsupported subcommand '$mutations_sub'"
+                ;;
+        esac
+        ;;
+
     *)
         cc_die "unsupported verb '$verb' (run without arguments for the list)"
         ;;
@@ -367,6 +412,59 @@ cc_load_api_secret
 
 version="$CC_VERSION"
 network="$CC_NETWORK"
+
+# -- read-only or business-mutation mode ------------------------------------
+#
+# Mutation mode exists only while control-center.mutations (written by
+# `mutations enable`, nothing else) names THIS release. Then, and only
+# then, every verb adds the pinned override and the API role gate checks
+# the mutation role. A state file for another release -- or any state
+# file, in a release that does not permit mutations -- is refused by every
+# verb that could start the API, so a new release always starts read-only.
+
+mutations_state="$CC_DIR/$CC_MUTATIONS_STATE_FILE_NAME"
+api_mode=read-only
+stale_mutations=false
+stale_reason=""
+
+if [[ "$verb" == mutations && "${mutations_sub:-}" == disable ]]; then
+    # First of all: whatever happens next, nothing can bring the mode back.
+    if [[ -e "$mutations_state" || -L "$mutations_state" ]]; then
+        rm -f -- "$mutations_state"
+        echo "mutations: mode file removed; the Control Center is read-only from here on"
+    fi
+elif [[ "$verb" == mutations && "${mutations_sub:-}" == enable ]]; then
+    api_mode=mutation
+elif [[ -e "$mutations_state" || -L "$mutations_state" ]]; then
+    cc_load_mutations_state
+
+    if [[ "$CC_RELEASE_PERMITS_MUTATIONS" != yes ]]; then
+        stale_mutations=true
+        stale_reason="this release does not permit business mutations (open: $CC_MUTATIONS_BLOCKED_BY); the mode file was not written by it: run 'mutations disable'"
+    elif [[ "$CC_MUTATIONS_VERSION" == "$version" ]]; then
+        api_mode=mutation
+    else
+        stale_mutations=true
+        stale_reason="mutation mode was enabled for release ${CC_MUTATIONS_VERSION:0:12}, this is ${version:0:12}; a new release starts read-only: run 'mutations disable' (and 'mutations enable' again once approved for this release)"
+    fi
+
+    if [[ "$stale_mutations" == true ]]; then
+        case "$verb" in
+            down|ps|logs|config|mutations) ;;
+            *) cc_die "$stale_reason" ;;
+        esac
+    fi
+fi
+
+compose_files=(--file "$compose_file")
+
+if [[ "$api_mode" == mutation ]]; then
+    cc_require_file "$CC_DIR/$CC_MUTATIONS_COMPOSE_FILE_NAME"
+    cc_load_rw_secret
+    compose_files+=(--file "$CC_DIR/$CC_MUTATIONS_COMPOSE_FILE_NAME")
+fi
+
+export CC_API_MODE="$api_mode"
 
 cc_load_target
 
@@ -396,12 +494,56 @@ if [[ "$needs_images" == true ]]; then
     done
 fi
 
+if [[ "$verb" == mutations && "$mutations_sub" == status ]]; then
+    if [[ "$api_mode" == mutation ]]; then
+        echo "mode: business-mutation (release ${version:0:12}, enabled $CC_MUTATIONS_ENABLED_AT, approved by $CC_MUTATIONS_APPROVED_BY)"
+    elif [[ "$stale_mutations" == true ]]; then
+        echo "mode: read-only -- a mode file for release ${CC_MUTATIONS_VERSION:0:12} is present and ignored: $stale_reason"
+    else
+        echo "mode: read-only"
+    fi
+
+    if [[ "$CC_RELEASE_PERMITS_MUTATIONS" != yes ]]; then
+        echo "release: does not permit business mutations (open: $CC_MUTATIONS_BLOCKED_BY)"
+    fi
+
+    running_env="$(cc_docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CC_PROJECT-smm-api-1" 2>/dev/null)" || running_env=""
+
+    if [[ -z "$running_env" ]]; then
+        echo "smm-api: not running"
+    else
+        running_flag="$(sed -n 's/^AI_SMM_API_MUTATIONS_ENABLED=//p' <<<"$running_env" | tail -n 1)"
+        running_user="$(cc_dsn_user "$(sed -n 's/^AI_SMM_DATABASE_URL=//p' <<<"$running_env" | tail -n 1)")" || running_user=""
+        echo "smm-api: AI_SMM_API_MUTATIONS_ENABLED=${running_flag:-<unset>} role=${running_user:-<unknown>}"
+    fi
+
+    exit 0
+fi
+
+# Stops smm-api, with the read-only project files: the fail-closed end of
+# `mutations enable` and `disable` when the API cannot be trusted to start.
+cc_stop_api() {
+    env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="$CC_DOCKER_HOST" \
+        docker compose --project-name "$CC_PROJECT" --project-directory "$CC_DIR" \
+            --file "$compose_file" --env-file "$interp_file" stop smm-api
+}
+
 # -- the gates (cc-gate.sh) ----------------------------------------------------
 #
 # Last, immediately before Compose: the API and the one-shot tools only
 # ever reach the recorded database, a schema change only a quiet queue,
 # an upgrade only a database with a verified, off-host-copied dump. Any
 # failure exits 2 here, and nothing below runs.
+
+if [[ "$verb" == mutations && "$mutations_sub" == disable ]]; then
+    # The read-only role must check out before smm-api is started on it.
+    # If it does not, the safe state is no API at all.
+    if ! ( cc_gate_identity "$network" && cc_gate_api_role ); then
+        echo "mutations disable: the read-only gates failed; stopping smm-api instead of starting it" >&2
+        cc_stop_api || cc_die "mutations disable: could not stop smm-api; stop it by hand"
+        cc_die "mutations disable: smm-api is stopped and the Control Center is read-only; fix the read-only role, then run 'up'"
+    fi
+fi
 
 if [[ "$gate_identity" == true ]]; then
     cc_gate_identity "$network"
@@ -430,11 +572,54 @@ fi
 
 # -- run ------------------------------------------------------------------------
 
+if [[ "$verb" == mutations && "$mutations_sub" == enable ]]; then
+    # The mode file first, written whole or not at all: from here on every
+    # verb includes the override, so a later `restart` cannot fall back to
+    # a half-configured state. Undone below if the API does not come up.
+    tmp_state="$(mktemp "$CC_DIR/.mutations.XXXXXX")"
+    {
+        echo "SMM_CC_MUTATIONS=on"
+        echo "SMM_CC_MUTATIONS_VERSION=$version"
+        echo "SMM_CC_MUTATIONS_ENABLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "SMM_CC_MUTATIONS_APPROVED_BY=$approved_by"
+    } > "$tmp_state"
+    chmod 644 "$tmp_state"
+    mv -f -- "$tmp_state" "$mutations_state"
+
+    if ! env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="$CC_DOCKER_HOST" \
+        ${TERM:+"TERM=$TERM"} \
+        docker compose \
+            --project-name "$CC_PROJECT" \
+            --project-directory "$CC_DIR" \
+            "${compose_files[@]}" \
+            --env-file "$interp_file" \
+            "${compose_args[@]}"; then
+        # It may be running half-started in mutation mode: stop it.
+        rm -f -- "$mutations_state"
+        cc_stop_api || cc_die "mutations enable: smm-api did not come up in mutation mode and could not be stopped; the mode file is removed -- stop smm-api by hand, then run 'mutations disable'"
+        cc_die "mutations enable: smm-api did not come up in mutation mode; the mode file is removed and smm-api is stopped -- run 'mutations disable' to start it read-only"
+    fi
+
+    # What the running container actually has: the role and the flag.
+    running_env="$(cc_docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$CC_PROJECT-smm-api-1" 2>/dev/null)" || running_env=""
+    running_flag="$(sed -n 's/^AI_SMM_API_MUTATIONS_ENABLED=//p' <<<"$running_env" | tail -n 1)"
+    running_user="$(cc_dsn_user "$(sed -n 's/^AI_SMM_DATABASE_URL=//p' <<<"$running_env" | tail -n 1)")" || running_user=""
+
+    if [[ "$running_flag" != true || "$running_user" != "$CC_RW_ROLE" ]]; then
+        rm -f -- "$mutations_state"
+        cc_stop_api || cc_die "mutations enable: smm-api runs with flag='${running_flag:-<unset>}' role='${running_user:-<unknown>}' and could not be stopped; the mode file is removed -- stop smm-api by hand, then run 'mutations disable'"
+        cc_die "mutations enable: smm-api ran with flag='${running_flag:-<unset>}' role='${running_user:-<unknown>}', not mutations on as $CC_RW_ROLE; the mode file is removed and smm-api is stopped -- run 'mutations disable' to start it read-only"
+    fi
+
+    echo "mutations enable: PASS -- smm-api runs as $CC_RW_ROLE with business mutations on (release ${version:0:12}, approved by $approved_by)"
+    exit 0
+fi
+
 exec env -i PATH="$PATH" HOME="${HOME:-/root}" DOCKER_HOST="$CC_DOCKER_HOST" \
     ${TERM:+"TERM=$TERM"} \
     docker compose \
         --project-name "$CC_PROJECT" \
         --project-directory "$CC_DIR" \
-        --file "$compose_file" \
+        "${compose_files[@]}" \
         --env-file "$interp_file" \
         "${compose_args[@]}"

@@ -152,7 +152,10 @@ Everything except the database URL is a **literal** in
 | `TZ`, `LOG_LEVEL`, `LOG_FORMAT` | `UTC`, `INFO`, `json` | |
 
 Turning mutations on is therefore a reviewed change to the compose file,
-not an environment edit.
+not an environment edit. From SMM-025C that change is shipped, pinned, as
+`compose.control-center.mutations.yml` and applied only by
+`cc-compose.sh mutations enable` (see *Business-mutation mode* below);
+the literal above stays `false`.
 
 ### Why a wrapper, and what it checks
 
@@ -394,6 +397,35 @@ owner. The compose file and scripts of that release require
 `control-center.api.env` and run the API role gate before `up` and
 `restart`. Design, permission matrix, rollout and rollback:
 [least-privilege-role.md](least-privilege-role.md) (FU-024B3-1).
+
+### Business-mutation mode (SMM-025C; not enabled in production)
+
+**Locked in this release** (`CC_RELEASE_PERMITS_MUTATIONS=no` in
+`cc-gate.sh`): `mutations enable` is refused before anything runs, and a
+mode file is never honoured. A normal deployment (`up`, `restart`,
+`migrate`, …) never loads the override or `control-center.api-rw.env`,
+even when both are present. What follows describes a later release that
+has lifted the lock.
+
+A second role, `ai_smm_cc_rw`, holds the column-level business writes
+the editable Control Center needs; `ai_smm_cc` is unchanged. The mode is
+switched only by the wrapper:
+
+```bash
+./cc-compose.sh mutations status                      # mode, and the running smm-api's flag and role
+./cc-compose.sh mutations enable --approved-by NAME   # gates on ai_smm_cc_rw, then smm-api with the override
+./cc-compose.sh mutations disable                     # mode file removed first; smm-api read-only (or stopped)
+```
+
+`enable` needs `control-center.api-rw.env` (mode 600, exactly
+`AI_SMM_DATABASE_URL` as `ai_smm_cc_rw`), `compose.control-center.mutations.yml`
+and `ai_smm_cc_rw.verify.sql` (both pinned in `cc-gate.sh`), and writes
+`control-center.mutations`, which binds the mode to the running
+`SMM_CC_VERSION`: a new release starts read-only, and `up`/`restart`/
+`preflight`/`migrate`/`create-owner` are refused until `mutations
+disable`. While the mode is on, every verb adds the override and the API
+role gate checks `ai_smm_cc_rw`. Design, matrix, residual risks and the
+checklist before the switch: [mutation-role.md](mutation-role.md).
 
 ---
 

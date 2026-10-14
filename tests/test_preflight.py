@@ -99,6 +99,23 @@ def test_a_fitting_configuration_passes(
     assert _by_name(checks)["schema.revision"].detail == EXPECTED_SCHEMA_REVISION
 
 
+def test_the_read_only_rollout_needs_no_private_key(
+    session: Session, migrated, account_settings: Settings, make_publication
+) -> None:
+    """Production before R7: legacy rows only, no credential, no key at all."""
+
+    make_publication()  # a scheduled legacy row of the allow-listed project
+    settings = replace(_fitting(account_settings), credentials_private_key_files=())
+
+    assert build_opener(settings) is None
+
+    checks = _run(session, settings, opener=None)
+
+    assert failures(checks) == []
+    assert _by_name(checks)["accounts.credential_keys"].status == "PASS"
+    assert _by_name(checks)["legacy.pending_rows_allowed"].status == "PASS"
+
+
 def test_a_forgotten_allow_list_with_pending_legacy_rows_fails(
     session: Session, migrated, account_settings: Settings, make_publication
 ) -> None:

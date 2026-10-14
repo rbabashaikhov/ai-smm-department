@@ -1,0 +1,30 @@
+# Control Center: BUSINESS-MUTATION mode (SMM-025C, FU-025B-1).
+#
+# Never used on its own and never by hand. cc-compose.sh adds it after
+# compose.control-center.yml only while control-center.mutations, which the
+# wrapper itself writes on `cc-compose.sh mutations enable`, names the
+# running release; `mutations disable` deletes that file, and every later
+# verb is read-only again. A new release (SMM_CC_VERSION) starts read-only
+# whatever the file says: mutation mode is approved per release.
+#
+# It changes exactly two things, on smm-api only:
+#
+#   * the database role: control-center.api-rw.env (ai_smm_cc_rw, the
+#     mutation role, ai_smm_cc_rw.grants.sql) instead of
+#     control-center.api.env (ai_smm_cc, read-only). `!override` replaces
+#     the list instead of appending to it, so the read-only role's file is
+#     not loaded at all;
+#   * AI_SMM_API_MUTATIONS_ENABLED, the application's own gate.
+#
+# Everything else -- no Threads token, no model keys, the unroutable
+# Threads URL, hardening, networks, limits -- stays as the base file sets
+# it. The pins of this file and of ai_smm_cc_rw.verify.sql are in
+# cc-gate.sh; the API role gate checks the mutation role before smm-api is
+# started on it.
+
+services:
+  smm-api:
+    env_file: !override
+      - control-center.api-rw.env
+    environment:
+      AI_SMM_API_MUTATIONS_ENABLED: "true"
