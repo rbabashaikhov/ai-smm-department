@@ -45,6 +45,9 @@ WRAPPER = DEPLOY_DIR / "cc-compose.sh"
 SECRET_EXAMPLE = DEPLOY_DIR / "control-center.env.example"
 API_SECRET_EXAMPLE = DEPLOY_DIR / "control-center.api.env.example"
 VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_cc.verify.sql"
+MUTATIONS_COMPOSE_PATH = ROOT / "compose.control-center.mutations.yml"
+RW_VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_cc_rw.verify.sql"
+RW_SECRET_EXAMPLE = DEPLOY_DIR / "control-center.api-rw.env.example"
 INTERP_EXAMPLE = DEPLOY_DIR / "control-center.compose.env.example"
 TARGET_EXAMPLE = DEPLOY_DIR / "control-center.target.example"
 BACKUP = DEPLOY_DIR / "cc-db-backup.sh"
@@ -238,6 +241,8 @@ def test_the_gate_pins_the_files_of_this_release() -> None:
     for name, path in (
         ("CC_PINNED_COMPOSE_SHA256", COMPOSE_PATH),
         ("CC_PINNED_VERIFY_SHA256", VERIFY_SQL),
+        ("CC_PINNED_MUTATIONS_COMPOSE_SHA256", MUTATIONS_COMPOSE_PATH),
+        ("CC_PINNED_RW_VERIFY_SHA256", RW_VERIFY_SQL),
     ):
         pinned = re.search(rf"^readonly {name}=([0-9a-f]{{64}})$", gate, re.M)
 
@@ -247,6 +252,76 @@ def test_the_gate_pins_the_files_of_this_release() -> None:
         )
 
 
+def test_the_mutations_override_changes_only_the_role_and_the_flag() -> None:
+    """The mutations override: smm-api's env file and flag, nothing else."""
+
+    text = MUTATIONS_COMPOSE_PATH.read_text(encoding="utf-8")
+    # `!override` is a Compose tag; PyYAML only needs to know it exists.
+    loader = type("Loader", (yaml.SafeLoader,), {})
+    loader.add_constructor("!override", lambda ld, node: ld.construct_sequence(node))
+    override = yaml.load(text, Loader=loader)  # noqa: S506 -- SafeLoader subclass
+
+    assert override == {
+        "services": {
+            "smm-api": {
+                "env_file": ["control-center.api-rw.env"],
+                "environment": {"AI_SMM_API_MUTATIONS_ENABLED": "true"},
+            },
+        },
+    }
+    # Replaces the read-only role's file instead of adding to it.
+    assert "env_file: !override" in text
+
+
+#: The release in production when SMM-025C was prepared (2026-10-14).
+DEPLOYED_RELEASE = "0cbd641074ad3bc0501e54f59dac90bd1ccc9006"
+GRANTS_IN_GIT = "deploy/control-center/db/ai_smm_cc.grants.sql"
+
+
+def _write_grants(sql: str) -> set[str]:
+    """GRANT INSERT/UPDATE/DELETE/TRUNCATE statements, whitespace-normalised."""
+
+    sql = re.sub(r"--[^\n]*", "", sql)
+
+    return {
+        " ".join(statement.split())
+        for statement in re.findall(
+            r"GRANT\s+(?:INSERT|UPDATE|DELETE|TRUNCATE)\b[^;]*;", sql
+        )
+    }
+
+
+def test_the_read_only_role_gains_no_write_over_the_deployed_release() -> None:
+    """SMM-025B/025C add only SELECTs to ai_smm_cc: its writes stay login's."""
+
+    if shutil.which("git") is None or not (ROOT / ".git").exists():
+        pytest.skip("not a git checkout")
+
+    deployed = subprocess.run(
+        ["git", "show", f"{DEPLOYED_RELEASE}:{GRANTS_IN_GIT}"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+
+    if deployed.returncode != 0:
+        pytest.skip(f"{DEPLOYED_RELEASE[:12]} is not in this clone")
+
+    current = (DEPLOY_DIR / "db" / "ai_smm_cc.grants.sql").read_text(encoding="utf-8")
+
+    assert _write_grants(current) == _write_grants(deployed.stdout)
+    assert _write_grants(current)  # the session and audit writes are found
+
+
+def test_the_read_only_release_needs_no_credential_key() -> None:
+    """Neither compose file passes or mounts a key: the read-only rollout
+    deploys API, UI and worker without one (FU-025C-2 adds it before R7)."""
+
+    for path in (COMPOSE_PATH, WORKER_COMPOSE_PATH, MUTATIONS_COMPOSE_PATH):
+        text = path.read_text(encoding="utf-8")
+
+        assert "AI_SMM_CREDENTIALS" not in text, path.name
+        assert ".pem" not in text, path.name
+
+
 def test_api_secret_example_names_the_api_role() -> None:
     assert _env_keys(API_SECRET_EXAMPLE) == ["AI_SMM_DATABASE_URL"]
 
@@ -254,6 +329,17 @@ def test_api_secret_example_names_the_api_role() -> None:
 
     assert (
         "AI_SMM_DATABASE_URL=postgresql+psycopg://ai_smm_cc:CHANGE_ME@"
+        "<postgres-container>:5432/ai_smm"
+    ) in text
+
+
+def test_rw_secret_example_names_the_mutation_role() -> None:
+    assert _env_keys(RW_SECRET_EXAMPLE) == ["AI_SMM_DATABASE_URL"]
+
+    text = RW_SECRET_EXAMPLE.read_text(encoding="utf-8")
+
+    assert (
+        "AI_SMM_DATABASE_URL=postgresql+psycopg://ai_smm_cc_rw:CHANGE_ME@"
         "<postgres-container>:5432/ai_smm"
     ) in text
 
@@ -336,10 +422,14 @@ def test_filled_env_files_are_ignored_by_git() -> None:
     for path in (
         "deploy/control-center/control-center.env",
         "deploy/control-center/control-center.api.env",
+        "deploy/control-center/control-center.api-rw.env",
+        "deploy/control-center/control-center.mutations",
         "deploy/control-center/control-center.compose.env",
         "deploy/control-center/control-center.target",
         "control-center.env",
         "control-center.api.env",
+        "control-center.api-rw.env",
+        "control-center.mutations",
         "control-center.compose.env",
         "control-center.target",
     ):
@@ -349,7 +439,10 @@ def test_filled_env_files_are_ignored_by_git() -> None:
 
         assert result.returncode == 0, f"{path} would be committable"
 
-    for path in (SECRET_EXAMPLE, API_SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE):
+    for path in (
+        SECRET_EXAMPLE, API_SECRET_EXAMPLE, RW_SECRET_EXAMPLE,
+        INTERP_EXAMPLE, TARGET_EXAMPLE, MUTATIONS_COMPOSE_PATH,
+    ):
         result = subprocess.run(
             ["git", "check-ignore", "--quiet", str(path.relative_to(ROOT))],
             cwd=ROOT,
@@ -373,6 +466,7 @@ def test_env_files_never_enter_an_image() -> None:
     [
         COMPOSE_PATH, WRAPPER, BACKUP, COMMON,
         SECRET_EXAMPLE, API_SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE,
+        RW_SECRET_EXAMPLE, MUTATIONS_COMPOSE_PATH,
         *sorted((DEPLOY_DIR / "db").glob("*.sql")),
     ],
 )

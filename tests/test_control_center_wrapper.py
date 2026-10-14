@@ -20,10 +20,13 @@ import pytest
 
 from tests.cc_stub import (
     BACKUP,
+    DEPLOY_DIR,
+    FIXTURE_API_DSN,
     FIXTURE_DSN,
     FIXTURE_ENGINE,
     FIXTURE_NETWORK,
     FIXTURE_PG_CONTAINER,
+    FIXTURE_REVISION,
     FIXTURE_VERSION,
     ROOT,
     WRAPPER,
@@ -42,6 +45,9 @@ pytestmark = pytest.mark.skipif(
 
 DEPLOY_DOC = ROOT / "docs" / "control-center-deployment.md"
 ROLLBACK_DOC = ROOT / "docs" / "control-center-rollback.md"
+#: The SMM-025B/025C rollout plan; it also drives the worker's own Compose
+#: project, so only its wrapper and backup invocations are checked here.
+PLAN_DOC = ROOT / "docs" / "reports" / "smm-025b" / "migration-rollback.md"
 
 
 @pytest.fixture
@@ -648,14 +654,17 @@ PLACEHOLDERS = {
     "<name>": "Owner Name",
     "<project-id>": "demo",
     "$PGC": FIXTURE_PG_CONTAINER,
+    "$PG": FIXTURE_PG_CONTAINER,
     "$s": "smm-api",
+    "NAME": "Owner Name",
+    "<owner>": "Owner Name",
 }
 
 
 def _documented(script: str) -> list[tuple[str, list[str]]]:
     found = []
 
-    for doc in (DEPLOY_DOC, ROLLBACK_DOC):
+    for doc in (DEPLOY_DOC, ROLLBACK_DOC, PLAN_DOC):
         text = doc.read_text(encoding="utf-8")
 
         blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
@@ -706,14 +715,46 @@ def test_every_documented_wrapper_invocation_is_accepted(
     invocations = _documented("cc-compose.sh")
 
     assert len(invocations) >= 15
+    assert {doc for doc, _ in invocations} == {
+        DEPLOY_DOC.name, ROLLBACK_DOC.name, PLAN_DOC.name,
+    }
+
+    # Everything `mutations enable` would need is present -- and this
+    # release refuses it anyway (CC_RELEASE_PERMITS_MUTATIONS=no).
+    rw_dsn = FIXTURE_API_DSN.replace("ai_smm_cc:fixture-api-pw", "ai_smm_cc_rw:rw-pw")
+    shutil.copy(ROOT / "compose.control-center.mutations.yml", deploy_dir)
+    shutil.copy(DEPLOY_DIR / "db" / "ai_smm_cc_rw.verify.sql", deploy_dir)
+    rw_env = deploy_dir / "control-center.api-rw.env"
+    rw_env.write_text(f"AI_SMM_DATABASE_URL={rw_dsn}\n", encoding="utf-8")
+    rw_env.chmod(0o600)
+    containers = dict(stub.state["containers"])
+    containers["ai-smm-control-center-smm-api-1"] = {
+        "id": "f" * 64,
+        "env": [f"AI_SMM_DATABASE_URL={rw_dsn}", "AI_SMM_API_MUTATIONS_ENABLED=true"],
+        "networks": {},
+    }
+    stub.update(containers=containers)
+    evidence = deploy_dir / "control-center.backup-evidence"
+    verified = evidence.read_bytes()
 
     for doc, tokens in invocations:
+        # Each one from the same starting point: read-only, with the
+        # evidence a documented downgrade voids.
+        (deploy_dir / "control-center.mutations").unlink(missing_ok=True)
+        evidence.write_bytes(verified)
         stub.reset_calls()
         result = _run(deploy_dir, stub, *tokens)
 
+        if tokens[:2] == ["mutations", "enable"]:
+            assert result.returncode == 2, (doc, tokens, result.stderr)
+            assert "does not permit business mutations" in result.stderr
+            assert stub.calls() == []
+            continue
+
         assert result.returncode == 0, (doc, tokens, result.stderr)
-        # preflight is the gates alone: it never reaches Compose.
-        expected = 0 if tokens == ["preflight"] else 1
+        # preflight is the gates alone, `mutations status` only reads:
+        # neither reaches Compose.
+        expected = 0 if tokens in (["preflight"], ["mutations", "status"]) else 1
         assert len(stub.compose_calls()) == expected, (doc, tokens)
 
 
@@ -724,12 +765,21 @@ def test_every_documented_backup_invocation_is_accepted(
     backups.mkdir(mode=0o700)
     dump = write_dump(backups)
 
-    PLACEHOLDERS.update({"$BK": str(backups), "$DUMP": str(dump)})
+    # The plan names the production revision; the fixture database is at
+    # FIXTURE_REVISION.
+    extra = {
+        "$BK": str(backups),
+        "$DUMP": str(dump),
+        "<dump>": str(dump),
+        "3d4ac1986f07": FIXTURE_REVISION,
+    }
+    PLACEHOLDERS.update(extra)
 
     try:
         invocations = _documented("cc-db-backup.sh")
     finally:
-        del PLACEHOLDERS["$BK"], PLACEHOLDERS["$DUMP"]
+        for key in extra:
+            del PLACEHOLDERS[key]
 
     assert {tokens[0] for _, tokens in invocations} == {"dump", "verify"}
 
@@ -737,6 +787,12 @@ def test_every_documented_backup_invocation_is_accepted(
         result = run_script(BACKUP, deploy_dir, *tokens, stub=stub)
 
         assert result.returncode == 0, (doc, tokens, result.stderr)
+
+        # A dump is named by the second it was taken: two documented
+        # dumps within one second must not meet.
+        for made in backups.iterdir():
+            if not made.name.startswith(dump.name):
+                made.unlink()
 
 
 def test_runbooks_never_call_compose_directly() -> None:

@@ -12,7 +12,7 @@ register below says which.
 
 ## Register
 
-**As of 2026-10-13 (SMM-024C-2B; SMM-025A review added FU-025A-1…4; SMM-025B review added FU-025B-1…9).** The heading stays the same when the
+**As of 2026-10-14 (SMM-024C-2B; SMM-025A review added FU-025A-1…4; SMM-025B review added FU-025B-1…9; SMM-025C closed FU-025B-1 locally and added FU-025C-1).** The heading stays the same when the
 register is updated, so links to `#register` keep working; the anchor of
 its first version (`#register-as-of-2026-10-12-smm-024c-1`) is kept too.
 
@@ -37,7 +37,9 @@ mandatory condition for a later step, named in its row.
 | [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open; its database-role part for the read-only mode is done (FU-024B3-1) | **P1** | **Yes** — this is the check that precedes the switch |
 | [FU-024C2-1](#fu-024c2-1--session-forgery-through-the-apis-database-connection) | Session forgery through the API's database connection | open, accepted for read-only mode | **P1** | **Yes** — a forged owner session could schedule a post the LIVE worker sends |
 | [FU-024C2-2](#fu-024c2-2--authenticity-of-audit-actor-and-action) | Authenticity of audit actor/action | open, accepted for read-only mode | **P1** | **Yes** — business actions must be attributable |
-| [FU-024C2-3](#fu-024c2-3--a-privilege-model-for-business-mutations) | Privilege model for business mutations (SMM-025) | open | **P1** | **Yes** — with `ai_smm_cc`, enabling mutations fails closed until it exists |
+| [FU-024C2-3](#fu-024c2-3--a-privilege-model-for-business-mutations) | Privilege model for business mutations (SMM-025) | **designed and validated locally** (SMM-025C, `ai_smm_cc_rw`); not in production, not yet part of an executed FU-024C1-5 checklist | **P1** | **Yes** — until the role is created in production and checked with FU-024C1-5 |
+| [FU-025C-1](#fu-025c-1--database-side-invariants-for-rows-the-mutation-role-inserts) | Database-side invariants for rows the mutation role inserts | open | **P1** | **Yes** — decide (implement or accept) before the switch |
+| [FU-025C-2](#fu-025c-2--packaging-of-the-credential-keys-and-the-legacy-allow-list) | Packaging of the credential keys and the legacy allow-list | open | **P1** | **Yes** — no credential can be saved or used without it |
 | [FU-024C2-4](#fu-024c2-4--flush-before-the-savepoint-of-the-optional-hash-upgrade) | Flush before the SAVEPOINT of the optional hash upgrade | open | P2 | No — fail-closed today; diagnostics and robustness |
 | [FU-024B4A-1](#fu-024b4a-1--the-gap-between-the-queue-gate-and-the-first-ddl-statement) | Queue gate → DDL gap (TOCTOU) | open | **migration gate** | No for the current read-only UI. **Mandatory before any further migration while the queue can be written** (mutations on, or any other writer active) |
 | [FU-024B2-2](#fu-024b2-2--validate-worker_mode_source-when-a-worker-heartbeat-is-introduced) | Source and reliability of the worker mode | open | P2 | No — the UI shows `UNKNOWN` with a warning; still wanted soon, as the worker is LIVE |
@@ -51,7 +53,7 @@ mandatory condition for a later step, named in its row.
 | [FU-025A-3](#fu-025a-3--diagnostics-of-a-failed-projects-overview-row) | Diagnostics of a failed Projects Overview row | open | P3 | No |
 | [FU-025A-4](#fu-025a-4--the-initial-route-uses-a-snapshot-of-meprojects) | Initial route uses a snapshot of `me.projects` | open | P3 | No |
 | [FU-025A-2](#fu-025a-2--module-global-navigateref-in-the-test-renderer) | Module-global `navigateRef` in the test renderer | open | P3 | No — test hygiene |
-| [FU-025B-1](#fu-025b-1--the-mutation-privilege-model-must-cover-the-smm-025b-tables) | Mutation privilege model must cover the SMM-025B tables | open | **P1** | **Yes** — part of FU-024C2-3 |
+| [FU-025B-1](#fu-025b-1--the-mutation-privilege-model-must-cover-the-smm-025b-tables) | Mutation privilege model must cover the SMM-025B tables | **done technically** (SMM-025C, local; production with FU-024C2-3) | — | Via FU-024C2-3 only |
 | [FU-025B-2](#fu-025b-2--a-gated-wrapper-verb-for-creating-a-project-in-production) | Gated wrapper verb for creating a project in production | open | P2 | No |
 | [FU-025B-3](#fu-025b-3--generation-does-not-read-topics-and-tone-of-voice-yet) | Generation does not read topics / tone of voice yet | open | P2 | No |
 | [FU-025B-4](#fu-025b-4--credential-key-rotation-without-re-entering-tokens) | Credential key rotation without re-entering tokens | open | P3 | No |
@@ -624,6 +626,15 @@ Done when that model is designed, validated locally like SMM-024C-2A,
 and part of FU-024C1-5's checklist for the release that enables
 mutations.
 
+**SMM-025C (2026-10-14):** designed and validated locally — the second
+role `ai_smm_cc_rw` (`deploy/control-center/db/ai_smm_cc_rw.*.sql`), a
+pinned compose override and `cc-compose.sh mutations status | enable |
+disable`; the business-command suites, command ↔ worker concurrency
+included, pass connected as the role. Design, matrix, residual risks:
+[mutation-role.md](mutation-role.md). Remaining: create it in production
+and run FU-024C1-5's checklist on the release that enables mutations;
+FU-024C2-1, FU-024C2-2 and FU-025C-1 decided first.
+
 ### FU-024C2-4 — Flush before the SAVEPOINT of the optional hash upgrade
 
 **Status:** open. **Priority:** P2. **Blocks mutations:** no.
@@ -716,6 +727,35 @@ Done when the initial route uses the same fresh source as the switcher
 (`GET /projects`, waiting for it), or the choice is documented as
 accepted.
 
+## From SMM-025C (production readiness, 2026-10-14)
+
+FU-025C-1 is recorded above, next to FU-025B-1.
+
+### FU-025C-2 — Packaging of the credential keys and the legacy allow-list
+
+**Status:** open. **Priority:** P1. **Blocks mutations:** yes.
+**Recorded in:** SMM-025C Phase 3, from the VPS inventory of 2026-10-14
+([reports/smm-025b/migration-rollback.md](reports/smm-025b/migration-rollback.md) §3.2, D2/D3).
+
+The SMM-025B code reads `AI_SMM_CREDENTIALS_PUBLIC_KEY` and
+`AI_SMM_LEGACY_THREADS_PROJECTS` in the API and
+`AI_SMM_CREDENTIALS_PRIVATE_KEY_FILES` in the worker, but no deployed
+file passes them: `compose.control-center.yml` sets every API variable
+as a literal and the wrapper allows only the database URL in
+`control-center.api.env`; the worker's `compose.yaml` mounts no key.
+Read-only, the only effect is that Project Settings shows legacy
+publishing as unused for the allow-listed project. With mutations on,
+saving a credential answers `CREDENTIALS_NOT_CONFIGURED` and content of
+an allow-listed project needs an account (both fail closed).
+
+Proposed: two non-secret keys in `control-center.compose.env`
+(interpolated into smm-api's `environment`, validated by the wrapper);
+in the worker's compose file a read-only bind of the key file (owner
+10001, mode 600) and the path in `ai-smm.env`; tests as for the existing
+packaging; the worker preflight (§3a) already fails closed on a missing
+key once a credential exists. Done when packaged, tested and part of the
+R7 steps.
+
 ## From the SMM-025B review (2026-10-13)
 
 The final independent review of SMM-025B (multi-project & multi-account
@@ -741,6 +781,39 @@ writing key material without being able to read it back.
 
 Done when FU-024C2-3's role, grants, verify matrix and tests include
 these, with the refusals of `tests/test_db_least_privilege.py` kept.
+
+**Done technically (SMM-025C, 2026-10-14), local only.** `ai_smm_cc_rw`
+grants all of the above except `UPDATE (verification_status,
+verified_at)` on credentials, which no command performs (they are written
+on `INSERT`); `ai_smm_cc` is unchanged and its refusals still pass.
+Tests: `tests/test_db_mutation_role.py`, `tests/mutation_role/`,
+`tests/test_control_center_mutations.py`. Design:
+[mutation-role.md](mutation-role.md). Production follows FU-024C2-3.
+
+### FU-025C-1 — Database-side invariants for rows the mutation role inserts
+
+**Status:** open. **Priority:** P1. **Blocks mutations:** yes (decide
+before the switch). **Recorded in:** SMM-025C Phase 2 (2026-10-14).
+
+`ai_smm_cc_rw` must `INSERT` every column the ORM sends, so whoever
+controls its connection can insert a publication already `scheduled`
+and `human_reviewed` with no approval or lineage row (the LIVE worker
+would publish it), store any sealed blob as a `verified` credential, and
+add any existing user to any project in any role. Proved by
+`test_residual_risk_the_role_can_insert_a_reviewed_scheduled_publication`
+and `test_residual_risk_the_role_can_store_a_credential_marked_verified`.
+Same trust class as FU-024C2-1 / FU-024C2-2: the database cannot tell a
+compromised API from a correct one.
+
+Proposed (migration): `BEFORE INSERT` triggers active for
+`current_user = 'ai_smm_cc_rw'` — on `publications`, `status =
+'approved'`, delivery and claim columns empty, `human_reviewed` only
+with an approval and lineage row for the same revision (or the lineage
+row inserted in the same transaction, checked by a deferred constraint
+trigger); on `project_memberships`, only for a project created in the
+same transaction. Done when implemented and tested on the role, or the
+remainder is accepted by the owner in writing for the release that
+enables mutations.
 
 ### FU-025B-2 — A gated wrapper verb for creating a project in production
 

@@ -51,7 +51,8 @@ from tests import pg_roles
 TEST_DB_ENV = "AI_SMM_TEST_DATABASE_URL"
 #: A superuser URL to the same test database: creates ai_smm_cc.
 ADMIN_DB_ENV = "AI_SMM_TEST_ADMIN_DATABASE_URL"
-#: owner (default) | restricted: the role the API under test connects as.
+#: owner (default) | restricted | mutation: the role the API under test
+#: connects as (ai_smm owner, ai_smm_cc, ai_smm_cc_rw).
 API_ROLE_ENV = "AI_SMM_TEST_API_ROLE"
 
 
@@ -210,6 +211,44 @@ def restricted_session_factory(
     return sessionmaker(
         bind=restricted_engine, expire_on_commit=False, future=True
     )
+
+
+# --- the API's business-mutation role (SMM-025C, FU-025B-1) ----------------
+
+
+@pytest.fixture(scope="session")
+def mutation_role(
+    api_role: pg_roles.ApiRole, admin_database_url: str, database_url: str
+) -> Iterator[pg_roles.ApiRole]:
+    """ai_smm_cc_rw, provisioned by the operator's grants file.
+
+    Depends on api_role so it is retired first: ai_smm_cc's teardown
+    asserts that every other role -- this one included -- is as it was.
+    """
+
+    role = pg_roles.provision_mutation(admin_database_url, database_url)
+
+    yield role
+
+    pg_roles.retire_mutation(admin_database_url)
+
+    assert pg_roles.snapshot_except_mutation(admin_database_url) == (
+        role.others_before
+    )
+
+
+@pytest.fixture(scope="session")
+def mutation_engine(mutation_role: pg_roles.ApiRole) -> Iterator[Engine]:
+    engine = create_db_engine(mutation_role.url, settings=_base_settings())
+
+    yield engine
+
+    engine.dispose()
+
+
+@pytest.fixture
+def mutation_session_factory(mutation_engine: Engine) -> sessionmaker[Session]:
+    return sessionmaker(bind=mutation_engine, expire_on_commit=False, future=True)
 
 
 @pytest.fixture
@@ -450,8 +489,13 @@ def api_session_factory(
     if mode == "restricted":
         return request.getfixturevalue("restricted_session_factory")
 
+    if mode == "mutation":
+        return request.getfixturevalue("mutation_session_factory")
+
     if mode != "owner":
-        pytest.fail(f"{API_ROLE_ENV} must be 'owner' or 'restricted'")
+        pytest.fail(
+            f"{API_ROLE_ENV} must be 'owner', 'restricted' or 'mutation'"
+        )
 
     return session_factory
 

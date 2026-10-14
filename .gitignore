@@ -24,6 +24,8 @@ control-center.window
 # Written during a deployment: backup evidence and the off-host attestation.
 control-center.backup-evidence*
 control-center.offhost-ack
+# Written by `cc-compose.sh mutations enable`: the business-mutation mode.
+control-center.mutations
 
 # Tool caches
 .ruff_cache/

@@ -71,6 +71,19 @@ readonly CC_API_VERIFY_MIN_CHECKS=200
 # on the owner URL whatever control-center.api.env says.
 readonly CC_PINNED_COMPOSE_SHA256=f894a9be7e00e020b677adaf1d16af26ad63fa9d5b0086e2663f05bee5c82ac6
 readonly CC_PINNED_VERIFY_SHA256=8e5561c1255ba09951f457a7be371d21828749f8b36f20930c071f7b541a10cc
+# Mutation mode (SMM-025C): the override that switches smm-api to the
+# mutation role, and the verify file of that role.
+readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
+readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
+readonly CC_PINNED_RW_VERIFY_SHA256=ff5e533dd7210d67633988a176a987d44aa81c1ab5b7a749ac0184a9b069d967
+# Whether THIS release may run business mutations at all. `no` in every
+# release until the owner has decided FU-025C-1 and closed FU-024C2-1,
+# FU-024C2-2, FU-025C-2 and FU-024C1-5 (docs/mutation-role.md §9): then a
+# reviewed release changes it. With `no`, `mutations enable` is refused
+# before anything runs and a mode file is never honoured. Not an
+# environment switch on purpose: only a new, reviewed release lifts it.
+readonly CC_RELEASE_PERMITS_MUTATIONS=no
+readonly CC_MUTATIONS_BLOCKED_BY='FU-025C-1, FU-024C2-1, FU-024C2-2, FU-025C-2, FU-024C1-5'
 
 readonly CC_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
 readonly CC_UTC_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
@@ -293,51 +306,77 @@ cc_dsn_user() {
 
 # Requires cc_gate_identity to have passed in this process (CC_DSN_*,
 # CC_PG_CONTAINER, CC_PG_USER), and CC_API_DSN (cc_load_api_secret).
+#
+# CC_API_MODE=mutation (cc-compose.sh, only while the mutation state names
+# the running release) checks the mutation role instead: CC_RW_DSN
+# (cc_load_rw_secret), ai_smm_cc_rw.verify.sql and the pinned override.
+# Every other check is the same, in both modes.
 cc_gate_api_role() {
     local owner_host="$CC_DSN_HOST" owner_port="$CC_DSN_PORT" owner_db="$CC_DSN_DB"
     local owner_user api_user verify answer line last="" count=0 fails=() info=()
     local re='^(PASS|FAIL|INFO)\|[a-z0-9_.]+\|[^|]*$' required
+    # The role being checked: the read-only one, or in mutation mode the
+    # mutation role. (Locals: the CC_API_* names are readonly constants.)
+    local gate_role="$CC_API_ROLE" gate_secret="$CC_API_SECRET_FILE_NAME"
+    local gate_dsn="$CC_API_DSN" gate_verify="$CC_API_VERIFY_FILE_NAME"
+    local verify_pin="$CC_PINNED_VERIFY_SHA256"
 
     cc_require_pinned "$CC_DIR/$CC_COMPOSE_FILE_NAME" "$CC_PINNED_COMPOSE_SHA256"
-    cc_require_pinned "$CC_DIR/$CC_API_VERIFY_FILE_NAME" "$CC_PINNED_VERIFY_SHA256"
+
+    if [[ "${CC_API_MODE:-read-only}" == mutation ]]; then
+        cc_require_pinned "$CC_DIR/$CC_MUTATIONS_COMPOSE_FILE_NAME" "$CC_PINNED_MUTATIONS_COMPOSE_SHA256"
+        # The read-only role's URL must still be distinct and correct: the
+        # way back (`mutations disable`) depends on it.
+        [[ "$(cc_dsn_user "$CC_API_DSN")" == "$CC_API_ROLE" ]] \
+            || cc_gate_die "$CC_API_SECRET_FILE_NAME does not connect as $CC_API_ROLE; the read-only mode would not start again"
+        [[ "$CC_RW_DSN" != "$CC_API_DSN" ]] \
+            || cc_gate_die "$CC_RW_SECRET_FILE_NAME and $CC_API_SECRET_FILE_NAME hold the same URL (neither is printed)"
+        gate_role="$CC_RW_ROLE"
+        gate_secret="$CC_RW_SECRET_FILE_NAME"
+        gate_dsn="$CC_RW_DSN"
+        gate_verify="$CC_RW_VERIFY_FILE_NAME"
+        verify_pin="$CC_PINNED_RW_VERIFY_SHA256"
+    fi
+
+    cc_require_pinned "$CC_DIR/$gate_verify" "$verify_pin"
 
     owner_user="$(cc_dsn_user "$CC_DSN")" \
         || cc_gate_die "$CC_SECRET_FILE_NAME: no user name in the database URL; it is not printed"
-    cc_parse_dsn "$CC_API_DSN" "$CC_API_SECRET_FILE_NAME"
-    api_user="$(cc_dsn_user "$CC_API_DSN")" \
-        || cc_gate_die "$CC_API_SECRET_FILE_NAME: no user name in the database URL; it is not printed"
+    cc_parse_dsn "$gate_dsn" "$gate_secret"
+    api_user="$(cc_dsn_user "$gate_dsn")" \
+        || cc_gate_die "$gate_secret: no user name in the database URL; it is not printed"
 
-    [[ "$CC_API_DSN" =~ ^postgresql(\+[a-z0-9]+)?://[^:@/?#]+:[^@/?#]+@ ]] \
-        || cc_gate_die "$CC_API_SECRET_FILE_NAME: the database URL carries no password; it is not printed"
-    [[ "$api_user" == "$CC_API_ROLE" ]] \
-        || cc_gate_die "$CC_API_SECRET_FILE_NAME connects as '$api_user', not the API role $CC_API_ROLE"
-    [[ "$owner_user" != "$CC_API_ROLE" ]] \
-        || cc_gate_die "$CC_SECRET_FILE_NAME connects as $CC_API_ROLE; it must keep the owner role (migrate, cli)"
-    [[ "$CC_API_DSN" != "$CC_DSN" ]] \
-        || cc_gate_die "$CC_API_SECRET_FILE_NAME and $CC_SECRET_FILE_NAME hold the same URL (neither is printed)"
+    [[ "$gate_dsn" =~ ^postgresql(\+[a-z0-9]+)?://[^:@/?#]+:[^@/?#]+@ ]] \
+        || cc_gate_die "$gate_secret: the database URL carries no password; it is not printed"
+    [[ "$api_user" == "$gate_role" ]] \
+        || cc_gate_die "$gate_secret connects as '$api_user', not the API role $gate_role"
+    [[ "$owner_user" != "$gate_role" && "$owner_user" != "$CC_RW_ROLE" ]] \
+        || cc_gate_die "$CC_SECRET_FILE_NAME connects as $owner_user; it must keep the owner role (migrate, cli)"
+    [[ "$gate_dsn" != "$CC_DSN" ]] \
+        || cc_gate_die "$gate_secret and $CC_SECRET_FILE_NAME hold the same URL (neither is printed)"
     [[ "${CC_DSN_HOST,,}" == "${owner_host,,}" && "$CC_DSN_PORT" == "$owner_port" && "$CC_DSN_DB" == "$owner_db" ]] \
-        || cc_gate_die "$CC_API_SECRET_FILE_NAME points at $CC_DSN_HOST:$CC_DSN_PORT/$CC_DSN_DB, not the recorded $owner_host:$owner_port/$owner_db"
+        || cc_gate_die "$gate_secret points at $CC_DSN_HOST:$CC_DSN_PORT/$CC_DSN_DB, not the recorded $owner_host:$owner_port/$owner_db"
 
     # Restore the owner's values for anything that runs after this gate.
     cc_parse_dsn "$CC_DSN" "$CC_SECRET_FILE_NAME"
 
-    verify="$CC_DIR/$CC_API_VERIFY_FILE_NAME"
+    verify="$CC_DIR/$gate_verify"
     cc_require_file "$verify"
 
     # Read-only, as the instance's superuser over the local socket (the
     # file reads pg_authid): the API's password is never handled here.
     answer="$(cc_pg_read "$CC_APP_DB" "$(cat "$verify")" 2>/dev/null)" \
-        || cc_gate_die "cannot run $CC_API_VERIFY_FILE_NAME in $CC_APP_DB (database unreachable, or the query failed)"
+        || cc_gate_die "cannot run $gate_verify in $CC_APP_DB (database unreachable, or the query failed)"
 
     while IFS= read -r line; do
-        [[ -z "$last" ]] || cc_gate_die "$CC_API_VERIFY_FILE_NAME: output continues after the END line"
+        [[ -z "$last" ]] || cc_gate_die "$gate_verify: output continues after the END line"
 
         if [[ "$line" =~ ^END\|checks\|([0-9]+)$ ]]; then
             last="${BASH_REMATCH[1]}"
             continue
         fi
 
-        [[ "$line" =~ $re ]] || cc_gate_die "$CC_API_VERIFY_FILE_NAME: unexpected output line"
+        [[ "$line" =~ $re ]] || cc_gate_die "$gate_verify: unexpected output line"
         count=$((count + 1))
 
         case "$line" in
@@ -347,11 +386,11 @@ cc_gate_api_role() {
     done <<<"$answer"
 
     [[ -n "$last" && "$last" == "$count" ]] \
-        || cc_gate_die "$CC_API_VERIFY_FILE_NAME: incomplete output ($count checks, END reports '${last:-none}')"
+        || cc_gate_die "$gate_verify: incomplete output ($count checks, END reports '${last:-none}')"
     (( count >= CC_API_VERIFY_MIN_CHECKS )) \
-        || cc_gate_die "$CC_API_VERIFY_FILE_NAME ran only $count checks; expected at least $CC_API_VERIFY_MIN_CHECKS"
+        || cc_gate_die "$gate_verify ran only $count checks; expected at least $CC_API_VERIFY_MIN_CHECKS"
     (( ${#fails[@]} == 0 )) \
-        || cc_gate_die "$CC_API_ROLE is not as designed: ${fails[*]}"
+        || cc_gate_die "$gate_role is not as designed: ${fails[*]}"
 
     for required in \
         'PASS|role.exists|' 'PASS|role.attributes|' 'PASS|role.password|set, SCRAM-SHA-256' \
@@ -359,14 +398,14 @@ cc_gate_api_role() {
         'PASS|schema.public.create|' 'PASS|table.publications.update|denied'; do
         # At the start of a line: the check ran, and passed.
         [[ $'\n'"$answer" == *$'\n'"$required"* ]] \
-            || cc_gate_die "$CC_API_VERIFY_FILE_NAME did not report '$required'"
+            || cc_gate_die "$gate_verify did not report '$required'"
     done
 
     for line in "${info[@]}"; do
         echo "gate api-role: INFO $line"
     done
 
-    echo "gate api-role: PASS -- smm-api connects as $CC_API_ROLE to $owner_host:$owner_port/$owner_db; $count checks, no FAIL"
+    echo "gate api-role: PASS -- smm-api connects as $gate_role to $owner_host:$owner_port/$owner_db; $count checks, no FAIL"
 }
 
 # Requires cc_gate_identity to have passed in this process.

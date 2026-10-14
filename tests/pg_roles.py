@@ -212,3 +212,56 @@ def uninstall_auth(admin_url: str) -> None:
 
     run_script(admin_url, AUTH_REVOKE_SQL)
     run_script(admin_url, AUTH_DROP_SQL)
+
+
+# -- the business-mutation role (SMM-025C, FU-025B-1) -------------------------
+MUTATION_ROLE = "ai_smm_cc_rw"
+MUTATION_GRANTS_SQL = DB_DIR / "ai_smm_cc_rw.grants.sql"
+MUTATION_VERIFY_SQL = DB_DIR / "ai_smm_cc_rw.verify.sql"
+MUTATION_REVOKE_SQL = DB_DIR / "ai_smm_cc_rw.revoke.sql"
+#: The privileges of every role but ai_smm_cc_rw -- ai_smm_cc included.
+MUTATION_SNAPSHOT_SQL = DB_DIR / "ai_smm_cc_rw.acl-snapshot.sql"
+
+
+def verify_mutation(admin_url: str) -> list[str]:
+    return [
+        row[0]
+        for row in query_admin(
+            admin_url, MUTATION_VERIFY_SQL.read_text(encoding="utf-8")
+        )
+    ]
+
+
+def snapshot_except_mutation(admin_url: str) -> list[str]:
+    return [
+        row[0]
+        for row in query_admin(
+            admin_url, MUTATION_SNAPSHOT_SQL.read_text(encoding="utf-8")
+        )
+    ]
+
+
+def provision_mutation(admin_url: str, database_url: str) -> ApiRole:
+    before = snapshot_except_mutation(admin_url)
+    run_script(admin_url, MUTATION_GRANTS_SQL)
+    after = snapshot_except_mutation(admin_url)
+    password = secrets.token_hex(24)
+
+    run_admin(
+        admin_url,
+        sql.SQL("ALTER ROLE ai_smm_cc_rw PASSWORD {}").format(
+            sql.Literal(password)
+        ),
+    )
+
+    return ApiRole(
+        url=make_url(database_url)
+        .set(username=MUTATION_ROLE, password=password)
+        .render_as_string(hide_password=False),
+        others_before=before,
+        others_after=after,
+    )
+
+
+def retire_mutation(admin_url: str) -> None:
+    run_script(admin_url, MUTATION_REVOKE_SQL)

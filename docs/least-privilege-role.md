@@ -938,6 +938,13 @@ others). What this changes there, and what it does not:
 
 ## 9. SMM-025: business mutations
 
+> **SMM-025C:** implemented and validated locally as a second role,
+> `ai_smm_cc_rw`, with its own grants, verify and revoke files, a pinned
+> compose override and the wrapper verb `cc-compose.sh mutations` —
+> [mutation-role.md](mutation-role.md). It follows the constraints below,
+> with one deliberate deviation: `INSERT` on `project_memberships` for
+> SMM-025B's project creation. This role is unchanged by it.
+
 Nothing here grants what the authoring commands will need, on purpose.
 With this role, turning `AI_SMM_API_MUTATIONS_ENABLED` on makes every
 business command fail in PostgreSQL (§4): flipping the flag alone can no
@@ -991,7 +998,7 @@ Constraints for that design, from what this stage established:
 | O4 | The migration runbook must re-run the grants file after any migration that creates or recreates a table (§7.9); to be added to the deployment runbook with the next migration |
 | O5 | Role-only dumps taken after R2 contain the role's SCRAM verifier: keep them at mode 600 |
 | O6 | Optional: `temp_file_limit` on the role |
-| O7 | SMM-025 needs its own privilege design before mutations are enabled (§9); with this role in place, enabling mutations without it fails closed |
+| O7 | SMM-025 needs its own privilege design before mutations are enabled (§9); with this role in place, enabling mutations without it fails closed. **Designed and validated locally in SMM-025C:** [mutation-role.md](mutation-role.md) |
 | O8 | Session plausibility check in `resolve_session` (lifetime, future timestamps) — no migration, a small application change; proposed, not implemented (§4.1) |
 | O9 | No CLI command sets a password; under the role, an outdated Argon2 hash is only upgraded by such a reset (§4.3) |
 | O10 | **Security risk, accepted for read-only mode:** a compromised API connection can create sessions for any user and write audit entries with any actor/action (§4.1, §4.2). Prevention needs migrations (session-creation function or trigger; `written_by` column + `CHECK` on `audit_log`) — an architectural decision, required before SMM-025. Registered as **FU-024C2-1**, **FU-024C2-2**; the mutation privilege model as **FU-024C2-3** ([follow-ups.md](follow-ups.md)) |
