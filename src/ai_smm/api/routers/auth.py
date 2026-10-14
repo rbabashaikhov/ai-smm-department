@@ -43,9 +43,13 @@ from ai_smm.queue import record_audit
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+#: POST /auth/login and /auth/logout. Mounted only when smm-api signs users
+#: in itself (Settings.api_auth_routes_enabled); in the packaged Control
+#: Center smm-auth serves both paths and this router is absent.
+session_router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post(
+@session_router.post(
     "/login",
     response_model=LoginResponse,
     summary="Open a server-side session and set the smm_session cookie",
@@ -107,7 +111,7 @@ def login(
     )
 
 
-@router.post(
+@session_router.post(
     "/logout",
     status_code=204,
     summary="Revoke the current session and clear the cookie",

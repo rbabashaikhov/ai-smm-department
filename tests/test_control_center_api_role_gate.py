@@ -62,7 +62,10 @@ def _verify_calls(stub: DockerStub) -> list[list[str]]:
         for call in stub.calls()
         if call["argv"][:1] == ["exec"]
         and "psql" in call["argv"]
-        and any("'checks'" in arg for arg in call["argv"])
+        # The API's verify file, not smm-auth's (its own gate and tests).
+        and any(
+            "'checks'" in arg and "'ai_smm_auth'" not in arg for arg in call["argv"]
+        )
     ]
 
 
@@ -463,7 +466,8 @@ def test_live_the_provisioned_role_passes(deploy_dir: Path, live: DockerStub) ->
             "table.publications.update|denied",
         ),
         ("GRANT DELETE ON audit_log TO PUBLIC", "table.audit_log.delete|denied"),
-        ("REVOKE SELECT ON users FROM ai_smm_cc", "table.users.select|granted"),
+        # G2 (SMM-025D): users is granted column by column.
+        ("REVOKE SELECT ON users FROM ai_smm_cc", "column.users.email.select|granted"),
         ("ALTER ROLE ai_smm_cc CREATEDB", "role.attributes|"),
         ("ALTER ROLE ai_smm_cc PASSWORD NULL", "role.password|not set"),
         ("GRANT pg_read_all_data TO ai_smm_cc", "role.member_of|pg_read_all_data"),

@@ -42,9 +42,12 @@ def _cols(spec: str) -> frozenset[str]:
     return frozenset(c.strip() for c in spec.split(","))
 
 
-#: Business writes, column by column. Session and audit writes are
-#: ai_smm_cc's (COLUMN_WRITES) and come on top.
+#: Business writes, column by column. ai_smm_cc's session write
+#: (COLUMN_WRITES) comes on top.
 BUSINESS_WRITES: dict[tuple[str, str], frozenset[str]] = {
+    # SMM-025D: business audit entries, guarded (as the bound user, business
+    # actions only); never id, at or written_by.
+    ("audit_log", "INSERT"): _cols("actor, action, subject, details"),
     ("projects", "INSERT"): _cols(
         "id, display_name, description, knowledge_path, default_platform,"
         " is_active, default_timezone, default_language, version, created_at,"
@@ -435,43 +438,29 @@ def test_the_old_worker_guard_holds_for_the_mutation_role(
     assert "only an account-routing worker" in str(raised.value)
 
 
-def test_residual_risk_the_role_can_insert_a_reviewed_scheduled_publication(
+def test_closed_risk_a_reviewed_scheduled_publication_cannot_be_forged(
     rw_engine: Engine, engine: Engine, project: str
 ) -> None:
-    """RISK: approval before scheduling is the API's rule, not PostgreSQL's.
+    """CLOSED by SMM-025D (FU-025C-1), was a residual risk of SMM-025C.
 
-    The role INSERTs publications (materialize) and may write every column
-    the ORM sends, so whoever controls its connection can insert a row
-    that is already `scheduled` and `human_reviewed` without any approval
-    or lineage row -- which the LIVE worker would publish. Same trust
-    class as FU-024C2-1 (a forged owner session can approve and schedule
-    through the API); a database-side insert invariant is FU-025C-1.
+    The forged row of the former residual-risk test -- already `scheduled`
+    and `human_reviewed`, with no approval or lineage -- is refused by
+    PostgreSQL. tests/test_db_guards.py covers every other way in, with
+    and without a bound owner session.
     """
 
-    with rw_engine.connect() as connection:
-        transaction = connection.begin()
+    with rw_engine.connect() as connection, pytest.raises(DBAPIError) as raised:
+        connection.execute(
+            text(
+                "INSERT INTO publications (project_id, ordinal, title, format,"
+                " body, status, scheduled_at, human_reviewed, idempotency_key)"
+                " VALUES (:project, 990001, 'forged', 'text', 'forged',"
+                " 'scheduled', now(), true, 'forged-990001')"
+            ),
+            {"project": project},
+        )
 
-        try:
-            forged = connection.execute(
-                text(
-                    "INSERT INTO publications (project_id, ordinal, title, format,"
-                    " body, status, scheduled_at, human_reviewed, idempotency_key)"
-                    " VALUES (:project, 990001, 'forged', 'text', 'forged',"
-                    " 'scheduled', now(), true, 'forged-990001') RETURNING id"
-                ),
-                {"project": project},
-            ).scalar_one()
-            approvals = connection.execute(
-                text(
-                    "SELECT count(*) FROM content_publication_links"
-                    " WHERE publication_id = :id"
-                ),
-                {"id": forged},
-            ).scalar_one()
-        finally:
-            transaction.rollback()
-
-    assert forged and approvals == 0
+    assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
 
     with engine.connect() as connection:
         assert connection.execute(
@@ -479,55 +468,36 @@ def test_residual_risk_the_role_can_insert_a_reviewed_scheduled_publication(
         ).scalar_one() == 0
 
 
-def test_residual_risk_the_role_can_store_a_credential_marked_verified(
+def test_closed_risk_a_credential_cannot_be_stored_without_an_owner_session(
     rw_engine: Engine, make_account
 ) -> None:
-    """RISK: `verified` is what the API says after GET /me, not a proof.
-
-    The role may INSERT verification_status and verified_at, so a
-    compromised API can store any sealed blob as a verified credential of
-    an account of the project. It still cannot read one back, move one to
-    another account, or claim a row for an account (claim guard). FU-025C-1.
-    """
+    """CLOSED by SMM-025D for a credential alone: without a transaction
+    bound to a live owner session, nothing is stored or retired. With one,
+    `verified` is still what the API concluded from GET /me -- the worker
+    re-checks the identity before every publish (ai_smm.publishing.service)
+    and a bound identity never changes (tests/test_db_guards.py)."""
 
     account, _ = make_account()
 
-    with rw_engine.connect() as connection:
-        transaction = connection.begin()
+    with rw_engine.connect() as connection, pytest.raises(DBAPIError) as raised:
+        connection.execute(
+            text(
+                "UPDATE social_account_credentials SET status = 'superseded',"
+                " superseded_at = now(), ciphertext = NULL, nonce = NULL,"
+                " ephemeral_public_key = NULL"
+                " WHERE social_account_id = :account AND status = 'active'"
+            ),
+            {"account": account.id},
+        )
 
-        try:
-            # The replace path the API itself takes: supersede, then insert.
-            connection.execute(
-                text(
-                    "UPDATE social_account_credentials SET status = 'superseded',"
-                    " superseded_at = now(), ciphertext = NULL, nonce = NULL,"
-                    " ephemeral_public_key = NULL"
-                    " WHERE social_account_id = :account AND status = 'active'"
-                ),
-                {"account": account.id},
-            )
-            stored = connection.execute(
-                text(
-                    "INSERT INTO social_account_credentials (id, social_account_id,"
-                    " status, scheme, key_id, ephemeral_public_key, nonce, ciphertext,"
-                    " fingerprint, verification_status, verified_at)"
-                    " VALUES (gen_random_uuid(), :account, 'active',"
-                    " 'x25519-hkdf-aesgcm-v1', 'forged', '\\x00', '\\x00',"
-                    " '\\x00', 'forgedforged', 'verified', now()) RETURNING id"
-                ),
-                {"account": account.id},
-            ).scalar_one()
-        finally:
-            transaction.rollback()
-
-    assert stored
+    assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
 
 
 def test_the_role_cannot_grant_what_it_holds(
     rw_engine: Engine, mutation_role, admin_database_url: str
 ) -> None:
     with rw_engine.connect() as connection:
-        connection.execute(text("GRANT SELECT ON users TO PUBLIC"))
+        connection.execute(text("GRANT SELECT ON projects TO PUBLIC"))
         connection.rollback()
 
     assert _q(
@@ -641,12 +611,15 @@ def test_on_a_migrated_database_the_role_neither_reads_nor_runs_migrations(
     # A table recreated by a migration carries no grant: fail closed until
     # the grants file is re-run.
     monkeypatch.setenv("AI_SMM_DATABASE_URL", owner_url)
-    command.downgrade(_alembic_config(owner_url), "-1")
+    monkeypatch.setenv("AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS", "yes")
+    command.downgrade(_alembic_config(owner_url), "3d4ac1986f07")
     command.upgrade(_alembic_config(owner_url), "head")
 
-    assert "FAIL|table.social_accounts.select|granted" in pg_roles.failures(
-        pg_roles.verify_mutation(admin_url)
-    )
+    lost = pg_roles.failures(pg_roles.verify_mutation(admin_url))
+
+    assert "FAIL|table.social_accounts.select|granted" in lost
+    # Recreated guard functions carry no EXECUTE either: fail closed.
+    assert "FAIL|function.guard_bind_session.execute|granted" in lost
 
     pg_roles.run_script(admin_url, pg_roles.MUTATION_GRANTS_SQL)
 

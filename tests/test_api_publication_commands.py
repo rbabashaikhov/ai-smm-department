@@ -32,13 +32,13 @@ def _post(client, publication_id: int, command: str, csrf: str, **body):
 # -- schedule ------------------------------------------------------------
 
 
-def test_admin_can_schedule_an_approved_publication(
+def test_the_owner_schedules_an_approved_publication(
     client, session: Session, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(
         status=PublicationStatus.APPROVED, scheduled_at=None
     )
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
     when = _when()
 
     response = _post(
@@ -63,17 +63,19 @@ def test_admin_can_schedule_an_approved_publication(
     assert publication.threads_post_id is None
 
 
-def test_owner_can_schedule_too(
+def test_an_admin_no_longer_schedules(
     client, login, member, project: str, make_publication
 ) -> None:
+    """Every business mutation is the owner's (SMM-025D)."""
+
     publication = make_publication(status=PublicationStatus.APPROVED)
-    csrf = login(member(MembershipRole.OWNER))
+    csrf = login(member(MembershipRole.ADMIN))
 
     assert (
         _post(
             client, publication.id, "schedule", csrf, scheduled_at=_when()
         ).status_code
-        == 200
+        == 403
     )
 
 
@@ -85,7 +87,7 @@ def test_scheduling_a_failed_row_clears_the_failure(
         attempt_count=3,
         last_error="HTTPError: 500",
     )
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client,
@@ -112,7 +114,7 @@ def test_a_naive_timestamp_is_refused(
     """An API must not guess a timezone; a wrong guess moves a publish."""
 
     publication = make_publication(status=PublicationStatus.APPROVED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client,
@@ -130,7 +132,7 @@ def test_an_unknown_body_field_is_refused(
     client, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.APPROVED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client,
@@ -151,7 +153,7 @@ def test_reschedule_moves_a_scheduled_row(
     client, session: Session, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.SCHEDULED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
     when = _when(120)
 
     response = _post(
@@ -178,7 +180,7 @@ def test_reschedule_refuses_an_approved_row(
     """Nothing to move yet: that is what schedule is for."""
 
     publication = make_publication(status=PublicationStatus.APPROVED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client, publication.id, "reschedule", csrf, scheduled_at=_when()
@@ -204,7 +206,7 @@ def test_cancel_takes_a_pending_row_out_of_the_queue(
     client, session: Session, login, member, project, make_publication, status
 ) -> None:
     publication = make_publication(status=status)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client, publication.id, "cancel", csrf, note="not needed"
@@ -225,7 +227,7 @@ def test_cancelling_twice_is_refused(
     client, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.CANCELLED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(client, publication.id, "cancel", csrf)
 
@@ -273,7 +275,7 @@ def test_no_command_touches_an_in_flight_or_finished_row(
 
     publication = make_publication(status=status, **extra)
     before = publication.status
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client,
@@ -304,7 +306,7 @@ def test_needs_review_is_pointed_at_the_operator_flow(
     """It must never be retried automatically."""
 
     publication = make_publication(status=PublicationStatus.NEEDS_REVIEW)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client, publication.id, "schedule", csrf, scheduled_at=_when()
@@ -328,7 +330,7 @@ def test_a_row_carrying_publish_metadata_is_refused(
         status=PublicationStatus.FAILED,
         threads_post_id="17900000000000003",
     )
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client, publication.id, "schedule", csrf, scheduled_at=_when()
@@ -351,7 +353,7 @@ def test_the_draft_hint_names_the_approval_step(
     client, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.DRAFT)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _post(
         client, publication.id, "schedule", csrf, scheduled_at=_when()
@@ -366,9 +368,9 @@ def test_the_draft_hint_names_the_approval_step(
 
 @pytest.mark.parametrize("command", ["schedule", "reschedule", "cancel"])
 @pytest.mark.parametrize(
-    "role", [MembershipRole.VIEWER, MembershipRole.EDITOR]
+    "role", [MembershipRole.VIEWER, MembershipRole.EDITOR, MembershipRole.ADMIN]
 )
-def test_viewer_and_editor_cannot_run_a_command(
+def test_only_the_owner_runs_a_command(
     client,
     session: Session,
     login,
@@ -396,7 +398,7 @@ def test_viewer_and_editor_cannot_run_a_command(
 
     assert error["code"] == "FORBIDDEN"
     assert error["details"] == {
-        "required_role": "admin",
+        "required_role": "owner",
         "your_role": role.value,
     }
 
@@ -411,7 +413,7 @@ def test_a_command_needs_the_csrf_token(
     client, login, member, project: str, make_publication, command: str
 ) -> None:
     publication = make_publication(status=PublicationStatus.SCHEDULED)
-    login(member(MembershipRole.ADMIN))
+    login(member(MembershipRole.OWNER))
 
     response = client.post(
         f"/api/v1/publications/{publication.id}/{command}",
@@ -493,7 +495,7 @@ def test_a_successful_schedule_is_audited_as_the_user(
     client, session: Session, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.APPROVED)
-    user = member(MembershipRole.ADMIN)
+    user = member(MembershipRole.OWNER)
     csrf = login(user)
 
     _post(
@@ -535,7 +537,7 @@ def test_a_refused_command_writes_no_audit_entry(
     client, session: Session, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.NEEDS_REVIEW)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     _post(client, publication.id, "schedule", csrf, scheduled_at=_when())
 

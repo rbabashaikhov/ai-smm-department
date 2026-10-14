@@ -256,7 +256,7 @@ subdomain.
 | `GET` | `/api/v1/projects` | session; only projects with a membership |
 | `GET` | `/api/v1/projects/{id}` | viewer+ |
 | `GET` | `/api/v1/projects/{id}/settings` | viewer+ |
-| `PATCH` | `/api/v1/projects/{id}/settings` | admin+, CSRF, `expected_version` |
+| `PATCH` | `/api/v1/projects/{id}/settings` | **owner**, CSRF, `expected_version` |
 | `GET` | `/api/v1/projects/{id}/publications` | viewer+, filtered, paginated |
 | `GET` | `/api/v1/projects/{id}/series` | viewer+, paginated |
 | `GET` | `/api/v1/projects/{id}/operations/summary` | viewer+ |
@@ -265,22 +265,22 @@ subdomain.
 | `GET` | `/api/v1/publications/{id}` | viewer+ |
 | `GET` | `/api/v1/publications/{id}/preview` | viewer+ |
 | `GET` | `/api/v1/publications/{id}/attempts` | viewer+, paginated |
-| `POST` | `/api/v1/publications/{id}/schedule` | admin+, CSRF |
-| `POST` | `/api/v1/publications/{id}/reschedule` | admin+, CSRF |
-| `POST` | `/api/v1/publications/{id}/cancel` | admin+, CSRF |
+| `POST` | `/api/v1/publications/{id}/schedule` | **owner**, CSRF |
+| `POST` | `/api/v1/publications/{id}/reschedule` | **owner**, CSRF |
+| `POST` | `/api/v1/publications/{id}/cancel` | **owner**, CSRF |
 | `GET` | `/api/v1/series/{id}` | viewer+ |
 | `GET` | `/api/v1/projects/{id}/content-items` | viewer+, paginated |
-| `POST` | `/api/v1/projects/{id}/content-items` | editor+, CSRF |
+| `POST` | `/api/v1/projects/{id}/content-items` | **owner**, CSRF |
 | `GET` | `/api/v1/content-items/{id}` | viewer+ |
 | `GET` | `/api/v1/content-items/{id}/revisions` | viewer+, paginated |
-| `POST` | `/api/v1/content-items/{id}/revisions` | editor+, CSRF, `expected_item_version` |
+| `POST` | `/api/v1/content-items/{id}/revisions` | **owner**, CSRF, `expected_item_version` |
 | `GET` | `/api/v1/content-items/{id}/approvals` | viewer+, paginated |
-| `POST` | `/api/v1/content-items/{id}/submit-review` | editor+, CSRF |
-| `POST` | `/api/v1/content-items/{id}/approve` | editor+, CSRF |
-| `POST` | `/api/v1/content-items/{id}/reject` | editor+, CSRF |
-| `POST` | `/api/v1/content-items/{id}/materialize` | editor+, CSRF |
+| `POST` | `/api/v1/content-items/{id}/submit-review` | **owner**, CSRF |
+| `POST` | `/api/v1/content-items/{id}/approve` | **owner**, CSRF; consumes a step-up grant from smm-auth (SMM-025D) |
+| `POST` | `/api/v1/content-items/{id}/reject` | **owner**, CSRF |
+| `POST` | `/api/v1/content-items/{id}/materialize` | **owner**, CSRF |
 | `POST` | `/api/v1/projects` | session + CSRF; caller must own a project; becomes owner (SMM-025B) |
-| `PATCH` | `/api/v1/projects/{id}` | admin+, CSRF, `expected_version` |
+| `PATCH` | `/api/v1/projects/{id}` | **owner**, CSRF, `expected_version` |
 | `GET` | `/api/v1/projects/{id}/social-accounts` | viewer+ (metadata, readiness) |
 | `POST` | `/api/v1/projects/{id}/social-accounts` | **owner**, CSRF |
 | `GET` | `/api/v1/social-accounts/{id}` | viewer+ (credential history, metadata only) |
@@ -292,6 +292,26 @@ subdomain.
 Every unsafe route except login and logout is additionally refused, for
 every role, while `AI_SMM_API_MUTATIONS_ENABLED` is `false` — the
 default.
+
+**smm-auth (SMM-025D).** In the packaged Control Center, sign-in, sign-out
+and the approval step-up are served by a separate process, smm-auth
+(`ai_smm.api.auth_service`, role `ai_smm_auth`); nginx routes them there and
+smm-api mounts no login or logout (`AI_SMM_API_AUTH_ROUTES=false`):
+
+| Method | Path (smm-auth) | Auth |
+|---|---|---|
+| `POST` | `/api/v1/auth/login` | none; failures rate-limited per e-mail (10 / 15 min) |
+| `POST` | `/api/v1/auth/logout` | session, CSRF |
+| `GET` | `/api/v1/auth/step-up/approvals/{revision_id}` | session, **owner** of the revision's project: what approving it would publish, and where (read by smm-auth from the database) |
+| `POST` | `/api/v1/auth/step-up/approvals` | session, CSRF, **owner**, `{revision_id, password}`: re-checks the password, issues a one-use grant valid 5 minutes for this session, revision, content and destination identity; `401 STEP_UP_FAILED` on a wrong password, `409 INVALID_STATE_TRANSITION` if the revision is not current, under review, with a ready destination |
+
+With mutations on, every unsafe request binds its transaction to the
+session in PostgreSQL (`guard_bind_session`); the database guards then
+refuse any business change that is not the project owner's, and an
+approval without an unused grant. A guard refusal answers `403
+APPROVAL_CONFIRMATION_REQUIRED` (approval without a grant) or `403
+GUARD_REFUSED` (anything else), never a 500 — see
+[ADR-025D](adr/ADR-025D-database-enforced-mutation-safety.md).
 
 ### Read-only mode
 
@@ -381,20 +401,22 @@ tooling or in readiness itself is left to SMM-024B.
 ### RBAC
 
 `viewer < editor < admin < owner`. Every role includes the rights of the
-ones below it.
+ones below it. **Since SMM-025D every business change is the owner's**:
+the API's dependencies and PostgreSQL's guards both refuse editor and
+admin, who read (admin also the audit trail).
 
 | Action | viewer | editor | admin | owner |
 |---|---|---|---|---|
 | see the project in `GET /projects` | ✅ | ✅ | ✅ | ✅ |
 | `GET /projects/{id}` | ✅ | ✅ | ✅ | ✅ |
 | `GET /projects/{id}/settings` | ✅ | ✅ | ✅ | ✅ |
-| `PATCH /projects/{id}/settings` | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| `PATCH /projects/{id}/settings` | ❌ 403 | ❌ 403 | ❌ 403 | ✅ |
 | read publications, preview, attempts, series, operations | ✅ | ✅ | ✅ | ✅ |
 | `GET /projects/{id}/audit` | ❌ 403 | ❌ 403 | ✅ | ✅ |
-| schedule / reschedule / cancel | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| schedule / reschedule / cancel | ❌ 403 | ❌ 403 | ❌ 403 | ✅ |
 | read content items, revisions, approvals | ✅ | ✅ | ✅ | ✅ |
-| create item / revision, submit, approve, reject, materialize | ❌ 403 | ✅ | ✅ | ✅ |
-| `PATCH /projects/{id}` (name, description, timezone, language) | ❌ 403 | ❌ 403 | ✅ | ✅ |
+| create item / revision, submit, approve (with step-up), reject, materialize | ❌ 403 | ❌ 403 | ❌ 403 | ✅ |
+| `PATCH /projects/{id}` (name, description, timezone, language) | ❌ 403 | ❌ 403 | ❌ 403 | ✅ |
 | read social accounts and credential metadata | ✅ | ✅ | ✅ | ✅ |
 | create / rename / disable / enable accounts; set / revoke credentials | ❌ 403 | ❌ 403 | ❌ 403 | ✅ |
 | `POST /projects` | owner of at least one project | | | |
@@ -409,10 +431,11 @@ PUBLISHING_ROUTE_NOT_READY` when the row's account is disabled, unverified
 or has no credential, or when a legacy row's project is not allow-listed.
 See [the architecture](architecture/smm-025b-project-management.md).
 
-Approval is editor+ and scheduling is admin+, on purpose: deciding that a
-text is right and deciding when it goes out are different
-responsibilities. `materialize` is editor+ because it only produces a
-Publication in `approved` — it neither schedules nor delivers.
+Until SMM-025D approval was editor+ and scheduling admin+. With a single
+human owner per project and a LIVE worker, every change that can lead to
+a post is now the owner's, enforced in PostgreSQL as well; an approval
+additionally needs the owner's password again (step-up). Separating the
+responsibilities again needs guards for those roles first.
 
 The flow is fixed: **project from the database → membership → role check
 → action**. A project id in a request body is never consulted; the id in

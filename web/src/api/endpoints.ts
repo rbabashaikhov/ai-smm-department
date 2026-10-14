@@ -7,6 +7,7 @@
 import type { ApiClient } from "./client";
 import type {
   Approval,
+  ApprovalPreview,
   Attempt,
   AuditEntry,
   CancelRequest,
@@ -40,6 +41,7 @@ import type {
   ScheduleRequest,
   SocialAccount,
   SocialAccountDetail,
+  StepUpGrant,
 } from "../types/api";
 
 const V1 = "/api/v1";
@@ -54,6 +56,15 @@ export function createEndpoints(client: ApiClient) {
       logout: () => client.post<void>(`${V1}/auth/logout`),
       me: () => client.get<MeResponse>(`${V1}/auth/me`),
       csrf: () => client.get<CsrfResponse>(`${V1}/auth/csrf`),
+      /** smm-auth: what approving the revision would publish (owner only). */
+      approvalPreview: (revisionId: string) =>
+        client.get<ApprovalPreview>(`${V1}/auth/step-up/approvals/${enc(revisionId)}`),
+      /** smm-auth: re-checks the password, issues the grant the approval consumes. */
+      stepUpApproval: (revisionId: string, password: string) =>
+        client.post<StepUpGrant>(`${V1}/auth/step-up/approvals`, {
+          revision_id: revisionId,
+          password,
+        }),
     },
 
     projects: {

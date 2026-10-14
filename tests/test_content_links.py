@@ -98,7 +98,7 @@ def _cancel(session: Session, publication_id: int) -> None:
 
 @pytest.fixture
 def csrf(login, member) -> str:
-    return login(member(MembershipRole.EDITOR))
+    return login(member(MembershipRole.OWNER))
 
 
 @pytest.fixture
@@ -584,7 +584,7 @@ def test_legacy_publications_have_no_link_and_keep_working(
 
     # The 022B commands still act on it...
     client.cookies.clear()
-    admin_csrf = login(member(MembershipRole.ADMIN))
+    admin_csrf = login(member(MembershipRole.OWNER))
     moved = client.post(
         f"/api/v1/publications/{legacy.id}/reschedule",
         json={
@@ -692,7 +692,7 @@ def test_the_full_snapshot_lifecycle(
 
     # 7. an admin cancels A through the queue command.
     client.cookies.clear()
-    admin_csrf = login(member(MembershipRole.ADMIN))
+    admin_csrf = login(member(MembershipRole.OWNER))
 
     assert (
         client.post(
@@ -755,14 +755,14 @@ def test_an_admin_always_schedules_exactly_what_they_read(
 
     # 1. the admin reads it.
     client.cookies.clear()
-    admin_csrf = login(member(MembershipRole.ADMIN))
+    admin_csrf = login(member(MembershipRole.OWNER))
     seen = client.get(f"/api/v1/publications/{publication_id}").json()
 
     assert seen["status"] == "approved"
 
     # 2. meanwhile an editor revises and approves B.
     client.cookies.clear()
-    editor_csrf = login(member(MembershipRole.EDITOR))
+    editor_csrf = login(member(MembershipRole.OWNER))
     _revise_and_approve(client, item.id, editor_csrf, "Тихая правка редактора.")
 
     # 3. materialising B is refused while A is live.
@@ -773,7 +773,7 @@ def test_an_admin_always_schedules_exactly_what_they_read(
 
     # 4. the admin's schedule goes through -- on the text they read.
     client.cookies.clear()
-    admin_csrf = login(member(MembershipRole.ADMIN))
+    admin_csrf = login(member(MembershipRole.OWNER))
     scheduled = client.post(
         f"/api/v1/publications/{publication_id}/schedule",
         json={

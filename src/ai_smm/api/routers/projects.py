@@ -12,11 +12,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Response
 
 from ai_smm.api.dependencies import (
-    AdminProject,
     AppSettings,
     CurrentSession,
     CurrentUser,
     DbSession,
+    OwnerProject,
     ViewerProject,
 )
 from ai_smm.api.errors import ApiError, ErrorCode
@@ -160,7 +160,7 @@ def patch_project(
     payload: ProjectPatch,
     db: DbSession,
     settings: AppSettings,
-    context: AdminProject,
+    context: OwnerProject,
 ) -> ProjectOut:
     try:
         require_mutations_enabled(
@@ -227,7 +227,7 @@ def get_project_settings(
 def patch_project_settings(
     payload: ProjectSettingsPatch,
     db: DbSession,
-    context: AdminProject,
+    context: OwnerProject,
 ) -> ProjectSettingsOut:
     try:
         view = update_settings(

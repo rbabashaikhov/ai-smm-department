@@ -26,7 +26,7 @@ def _patch_at(client, *, csrf: str | None, project: str, version: int):
 def test_missing_csrf_token_is_rejected(
     client, login, member, project: str
 ) -> None:
-    login(member(MembershipRole.ADMIN))
+    login(member(MembershipRole.OWNER))
 
     response = _patch(client, csrf=None, project=project)
 
@@ -37,7 +37,7 @@ def test_missing_csrf_token_is_rejected(
 def test_wrong_csrf_token_is_rejected(
     client, login, member, project: str
 ) -> None:
-    login(member(MembershipRole.ADMIN))
+    login(member(MembershipRole.OWNER))
 
     response = _patch(client, csrf="not-the-token", project=project)
 
@@ -48,7 +48,7 @@ def test_wrong_csrf_token_is_rejected(
 def test_correct_csrf_token_is_accepted(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _patch(client, csrf=csrf, project=project)
 
@@ -63,13 +63,13 @@ def test_another_sessions_csrf_token_is_rejected(
 
     stranger = make_user(email="stranger@example.com")
     make_membership(
-        user=stranger, project_id=project, role=MembershipRole.ADMIN
+        user=stranger, project_id=project, role=MembershipRole.OWNER
     )
 
     stranger_csrf = login(stranger)
     client.cookies.clear()
 
-    login(member(MembershipRole.ADMIN))
+    login(member(MembershipRole.OWNER))
 
     response = _patch(client, csrf=stranger_csrf, project=project)
 
@@ -87,7 +87,7 @@ def test_the_csrf_endpoint_requires_a_session(client) -> None:
 def test_the_csrf_endpoint_returns_a_usable_token(
     client, login, member, project: str
 ) -> None:
-    login(member(MembershipRole.ADMIN))
+    login(member(MembershipRole.OWNER))
 
     issued = client.get("/api/v1/auth/csrf")
 
@@ -104,7 +104,7 @@ def test_fetching_the_token_again_returns_the_same_one(
 ) -> None:
     """Regression: a second GET /csrf used to retire the first token."""
 
-    at_login = login(member(MembershipRole.ADMIN))
+    at_login = login(member(MembershipRole.OWNER))
 
     first = client.get("/api/v1/auth/csrf").json()["csrf_token"]
     second = client.get("/api/v1/auth/csrf").json()["csrf_token"]
@@ -123,7 +123,7 @@ def test_two_tabs_of_one_session_both_keep_working(
     and after the other tab has fetched again.
     """
 
-    login(member(MembershipRole.ADMIN))
+    login(member(MembershipRole.OWNER))
 
     tab_one = client.get("/api/v1/auth/csrf").json()["csrf_token"]
     tab_two = client.get("/api/v1/auth/csrf").json()["csrf_token"]
@@ -152,7 +152,7 @@ def test_a_token_from_an_earlier_session_stops_working(
 ) -> None:
     """Stability must not outlive the session it belongs to."""
 
-    user = member(MembershipRole.ADMIN)
+    user = member(MembershipRole.OWNER)
     first_session_token = login(user)
 
     client.post(
@@ -184,7 +184,7 @@ def test_a_revoked_session_invalidates_its_csrf_token(
 
     from ai_smm.db.models import UserSession
 
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     session.expire_all()
     row = session.scalars(select(UserSession)).one()

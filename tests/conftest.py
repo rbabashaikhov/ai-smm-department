@@ -352,8 +352,14 @@ def make_publication(session: Session, project: str):
         images: list[dict[str, str]] | None = None,
         human_reviewed: bool = True,
         commit: bool = True,
+        lineage: bool | None = None,
         **kwargs: object,
     ) -> Publication:
+        """lineage: give the row the content lineage materialisation gives
+        it -- an item, its revision, a human approval and the link. Default:
+        for an account-bound row, which in production only ever comes from
+        materialisation (the worker refuses one without, SMM-025D)."""
+
         counter["n"] += 1
         ordinal = counter["n"]
 
@@ -379,6 +385,10 @@ def make_publication(session: Session, project: str):
 
         session.add(publication)
 
+        if lineage if lineage is not None else bool(kwargs.get("social_account_id")):
+            session.flush()
+            _attach_lineage(session, publication, reviewers)
+
         if commit:
             session.commit()
         else:
@@ -386,7 +396,95 @@ def make_publication(session: Session, project: str):
 
         return publication
 
+    reviewers: list[User] = []
+
     return factory
+
+
+def _attach_lineage(
+    session: Session, publication: Publication, reviewers: list
+) -> None:
+    """The rows materialize_approved_revision leaves behind, as the owner."""
+
+    import uuid
+
+    from ai_smm.application.content import content_hash
+    from ai_smm.db.models import (
+        ApprovalDecision,
+        ContentApproval,
+        ContentItem,
+        ContentPublicationLink,
+        ContentRevision,
+        ContentStatus,
+        RevisionSource,
+    )
+    from ai_smm.security.passwords import hash_password
+
+    if not reviewers:
+        reviewer = User(
+            email=f"reviewer-{uuid.uuid4().hex[:10]}@example.com",
+            password_hash=hash_password(TEST_PASSWORD),
+            display_name="Reviewer",
+        )
+        session.add(reviewer)
+        session.flush()
+        reviewers.append(reviewer)
+
+    item_id, revision_id = uuid.uuid4(), uuid.uuid4()
+    item = ContentItem(
+        id=item_id,
+        project_id=publication.project_id,
+        title=publication.title,
+        content_type="post",
+        status=ContentStatus.DRAFT,
+        current_revision_id=revision_id,
+        version=1,
+    )
+    session.add(item)
+    session.flush()
+    session.add(
+        ContentRevision(
+            id=revision_id,
+            content_item_id=item_id,
+            revision_number=1,
+            title=publication.title,
+            body=publication.body,
+            format=publication.format,
+            images=list(publication.images or []),
+            items=list(publication.items or []),
+            content_hash=content_hash(
+                title=publication.title,
+                body=publication.body,
+                format=publication.format,
+                images=list(publication.images or []),
+                items=list(publication.items or []),
+                social_account_id=publication.social_account_id,
+            ),
+            social_account_id=publication.social_account_id,
+            source=RevisionSource.HUMAN,
+        )
+    )
+    session.flush()
+    item.status = ContentStatus.APPROVED
+    item.approved_revision_id = revision_id
+    session.add(
+        ContentApproval(
+            id=uuid.uuid4(),
+            content_item_id=item_id,
+            revision_id=revision_id,
+            decision=ApprovalDecision.APPROVED,
+            actor_user_id=reviewers[0].id,
+        )
+    )
+    session.add(
+        ContentPublicationLink(
+            content_item_id=item_id,
+            revision_id=revision_id,
+            platform=publication.platform,
+            publication_id=publication.id,
+        )
+    )
+    session.flush()
 
 
 @pytest.fixture
@@ -566,22 +664,38 @@ def make_membership(session: Session):
 
 
 @pytest.fixture
-def login(client, session: Session):
-    """Sign a user in and return the CSRF token for their session."""
+def open_session():
+    """How a test client signs in: through the API's login endpoint.
 
-    def do_login(user: User, password: str = TEST_PASSWORD) -> str:
-        response = client.post(
+    tests/mutation_role/conftest.py replaces it with what smm-auth does in
+    mutation mode, where smm-api serves no login.
+    """
+
+    def do(test_client, user: User, password: str = TEST_PASSWORD) -> str:
+        response = test_client.post(
             "/api/v1/auth/login",
             json={"email": user.email, "password": password},
         )
 
         assert response.status_code == 200, response.text
 
+        return response.json()["csrf_token"]
+
+    return do
+
+
+@pytest.fixture
+def login(client, session: Session, open_session):
+    """Sign a user in and return the CSRF token for their session."""
+
+    def do_login(user: User, password: str = TEST_PASSWORD) -> str:
+        csrf = open_session(client, user, password)
+
         # The test session must not keep a stale copy of the row the API
         # just updated (last_login_at, and the new session row).
         session.expire_all()
 
-        return response.json()["csrf_token"]
+        return csrf
 
     return do_login
 

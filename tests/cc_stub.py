@@ -15,6 +15,7 @@ deployment in control-center.identity on the host, never in Git.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -39,6 +40,11 @@ COMPOSE_PATH = ROOT / "compose.control-center.yml"
 FIXTURE_VERSION = "abc1234def5678abc1234def5678abc1234def56"
 FIXTURE_NETWORK = "cc-fixture-shared"
 FIXTURE_ENGINE = "fixture-engine-0001"
+#: Not a real key: 32 fixed bytes, base64 (control-center.compose.env).
+FIXTURE_PUBLIC_KEY = base64.b64encode(hashlib.sha256(b"fixture-key").digest()).decode()
+FIXTURE_PUBLIC_KEY_ID = hashlib.sha256(
+    hashlib.sha256(b"fixture-key").digest()
+).hexdigest()[:16]
 
 FIXTURE_PG_CONTAINER = "fixture-db"
 FIXTURE_PG_ID = hashlib.sha256(b"fixture-db").hexdigest()
@@ -54,7 +60,12 @@ FIXTURE_DSN = (
 FIXTURE_API_DSN = (
     f"postgresql+psycopg://ai_smm_cc:fixture-api-pw@{FIXTURE_PG_CONTAINER}:5432/ai_smm"
 )
+#: smm-auth's URL (SMM-025D): the sign-in role, same container, port, database.
+FIXTURE_AUTH_DSN = (
+    f"postgresql+psycopg://ai_smm_auth:fixture-auth-pw@{FIXTURE_PG_CONTAINER}:5432/ai_smm"
+)
 VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_cc.verify.sql"
+AUTH_VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_auth.verify.sql"
 FIXTURE_WINDOW = ("2026-10-11T10:00:00Z", "2026-10-11T12:00:00Z")
 FIXTURE_REVISION = "79731eadacd7"
 #: dump taken, restore-checked, off-host copy confirmed -- inside the window
@@ -95,6 +106,31 @@ def api_role_answer(*lines: str, checks: int = 240) -> str:
 
 
 API_ROLE_PASS = api_role_answer()
+
+
+def auth_role_answer(*lines: str, checks: int = 950) -> str:
+    """ai_smm_auth.verify.sql output as psql -tA prints it: a passing role."""
+
+    body = [
+        "INFO|database.temporary|may create temporary tables (PUBLIC default)",
+        "PASS|role.attributes|super=f createrole=f createdb=f",
+        "PASS|role.exists|ai_smm_auth",
+        "PASS|role.member_of|none",
+        "PASS|role.owns_nothing|0 owned objects",
+        "PASS|role.password|set, SCRAM-SHA-256",
+        "PASS|schema.public.create|",
+        "PASS|schema.smm_auth.objects|designed functions only",
+        *lines,
+    ]
+    body += [
+        f"PASS|column.fixture.c{n}.update|denied"
+        for n in range(checks - len(body))
+    ]
+
+    return "\n".join([*body, f"END|checks|{len(body)}"])
+
+
+AUTH_ROLE_PASS = auth_role_answer()
 
 #: A minimal "custom format" archive as far as the scripts can tell.
 STUB_DUMP = b"PGDMP" + b"\x00stub-archive\x00" * 8
@@ -184,6 +220,20 @@ if argv[:1] == ["exec"]:
 
     if tool == "psql":
         sql = command[command.index("-c") + 1]
+        if "'checks'" in sql and "'ai_smm_auth'" in sql:
+            # ai_smm_auth.verify.sql (SMM-025D).
+            if state.get("auth_role_rc"):
+                fail("psql: error: connection to server failed", state["auth_role_rc"])
+            if state.get("auth_sql_url"):
+                # The file itself, read-only, against the real test database.
+                import psycopg
+                options = " ".join(
+                    a.split("=", 1)[1] for a in argv if a.startswith("PGOPTIONS=")
+                )
+                with psycopg.connect(state["auth_sql_url"], options=options) as conn:
+                    rows = conn.execute(sql).fetchall()
+                out("".join(row[0] + "\n" for row in rows))
+            out(state.get("auth_role_answer", "") + "\n")
         if "'checks'" in sql and "ai_smm_cc" in sql:
             # ai_smm_cc.verify.sql. With role_sql_url: the file itself, run
             # read-only against a real test database as its superuser.
@@ -333,6 +383,7 @@ class DockerStub:
             "identity_answer": IDENTITY_ANSWER,
             "queue_answer": QUEUE_QUIET,
             "api_role_answer": API_ROLE_PASS,
+            "auth_role_answer": AUTH_ROLE_PASS,
         }
         self.save()
 
@@ -389,8 +440,11 @@ def write_deploy_dir(
     engine_id: str = FIXTURE_ENGINE,
     version: str = FIXTURE_VERSION,
     network: str = FIXTURE_NETWORK,
+    public_key: str = FIXTURE_PUBLIC_KEY,
+    legacy_projects: str = "",
     dsn: str = FIXTURE_DSN,
     api_dsn: str = FIXTURE_API_DSN,
+    auth_dsn: str = FIXTURE_AUTH_DSN,
     identity: dict[str, str] | None = None,
     window: tuple[str, str] = FIXTURE_WINDOW,
     evidence: bool = True,
@@ -401,7 +455,9 @@ def write_deploy_dir(
     shutil.copy(COMPOSE_PATH, directory / COMPOSE_PATH.name)
 
     (directory / "control-center.compose.env").write_text(
-        f"SMM_CC_VERSION={version}\nSMM_CC_SHARED_NETWORK={network}\n",
+        f"SMM_CC_VERSION={version}\nSMM_CC_SHARED_NETWORK={network}\n"
+        f"SMM_CC_CREDENTIALS_PUBLIC_KEY={public_key}\n"
+        f"SMM_CC_LEGACY_THREADS_PROJECTS={legacy_projects}\n",
         encoding="utf-8",
     )
 
@@ -413,7 +469,12 @@ def write_deploy_dir(
     api_secret.write_text(f"AI_SMM_DATABASE_URL={api_dsn}\n", encoding="utf-8")
     api_secret.chmod(0o600)
 
+    auth_secret = directory / "control-center.auth.env"
+    auth_secret.write_text(f"AI_SMM_DATABASE_URL={auth_dsn}\n", encoding="utf-8")
+    auth_secret.chmod(0o600)
+
     shutil.copy(VERIFY_SQL, directory / VERIFY_SQL.name)
+    shutil.copy(AUTH_VERIFY_SQL, directory / AUTH_VERIFY_SQL.name)
 
     (directory / "control-center.target").write_text(
         f"SMM_CC_DOCKER_HOST={docker_host}\n"

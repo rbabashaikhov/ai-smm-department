@@ -54,6 +54,23 @@ function describe(error: unknown): { title: string; message: string } {
       };
     case ErrorCode.NOT_FOUND:
       return { title: "Не найдено", message: error.message };
+    case ErrorCode.STEP_UP_FAILED:
+      return {
+        title: "Пароль не подтвердил одобрение",
+        message: "The password did not confirm the approval. Nothing was approved.",
+      };
+    case ErrorCode.APPROVAL_CONFIRMATION_REQUIRED:
+      return {
+        title: "Нужно подтверждение паролем",
+        message:
+          "Approving needs a fresh confirmation with your password (it is valid for 5 minutes, once). Nothing was approved.",
+      };
+    case ErrorCode.GUARD_REFUSED:
+      return {
+        title: "База данных отказала",
+        message:
+          "The database refused this change: only the project owner may make it, and only as approved. Nothing was changed.",
+      };
     case ErrorCode.NETWORK_ERROR:
       return { title: "Нет соединения с API", message: error.message };
     default:

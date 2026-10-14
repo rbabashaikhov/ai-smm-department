@@ -113,7 +113,7 @@ describe("create a project", () => {
 
 describe("project settings", () => {
   it("saves the editorial profile and keeps keys it does not edit", async () => {
-    const server = createServer("admin");
+    const server = createServer("owner");
     server.on("PATCH", "/api/v1/projects/:projectId/settings", (req) =>
       ok({ project_id: PROJECT_ID, ...(req.body as object), publishing_config: {}, version: 3, updated_at: null }),
     );
@@ -131,7 +131,7 @@ describe("project settings", () => {
   });
 
   it("a version conflict offers a re-read instead of overwriting", async () => {
-    const server = createServer("admin");
+    const server = createServer("owner");
     server.on(
       "PATCH",
       "/api/v1/projects/:projectId",
@@ -288,7 +288,7 @@ describe("destination on content", () => {
   it("the revision form sends the chosen account and the detail shows it", async () => {
     const revision = makeRevision({ social_account_id: ACCOUNT_ID });
     const item = makeItem("draft", { current_revision: revision });
-    const server = createServer("editor", { item });
+    const server = createServer("owner", { item });
     server
       .on("GET", "/api/v1/projects/:projectId/social-accounts", ok([makeAccount()]))
       .on("POST", "/api/v1/content-items/:id/revisions", (req) =>

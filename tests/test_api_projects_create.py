@@ -320,7 +320,7 @@ def test_creation_is_refused_on_a_read_only_deployment(
 def test_an_admin_edits_the_project_record_with_a_version(
     client, login, member, session: Session
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
     current = client.get("/api/v1/projects/test-project").json()
 
     response = client.patch(
@@ -354,8 +354,10 @@ def test_an_admin_edits_the_project_record_with_a_version(
     assert entry.details["changed"]["display_name"] == ["Test Project", "Renamed"]
 
 
-@pytest.mark.parametrize("role", [MembershipRole.VIEWER, MembershipRole.EDITOR])
-def test_below_admin_cannot_edit(client, login, member, role) -> None:
+@pytest.mark.parametrize(
+    "role", [MembershipRole.VIEWER, MembershipRole.EDITOR, MembershipRole.ADMIN]
+)
+def test_below_owner_cannot_edit(client, login, member, role) -> None:
     csrf = login(member(role))
 
     response = client.patch(
@@ -409,7 +411,7 @@ def test_immutable_or_invalid_fields_are_refused(client, login, member, body) ->
 def test_topics_and_tone_are_validated_and_other_keys_kept(
     client, login, member
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     ok = client.patch(
         "/api/v1/projects/test-project/settings",

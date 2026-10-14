@@ -67,7 +67,12 @@ designed_functions(signature, secdef, volatility, granted, body_md5) AS (
         ('smm_auth.record_login_failure(text)', true, 'v', true,
          '67605c5e640b83ce786068f54c6bc55a'),
         ('smm_auth.recent_login_failures(text)', true, 's', true,
-         'd7ced661a6f4e7912831fb9598367e73')
+         'd7ced661a6f4e7912831fb9598367e73'),
+        -- SMM-025D: the step-up approval
+        ('smm_auth.approval_preview(text,uuid)', true, 's', true,
+         '0ea560184506b745d4e68d7a355f477c'),
+        ('smm_auth.approval_grant_issue(text,uuid)', true, 'v', true,
+         'c988d723ac4269856205f320b0fad238')
 ),
 tables AS (
     SELECT c.oid, c.relname
@@ -290,7 +295,7 @@ checks(status, name, detail) AS (
      CROSS JOIN role
       LEFT JOIN designed_functions d ON d.signature = f.signature
     UNION ALL
-    -- raw ACL, in every schema: no routine names ai_smm_auth but the five
+    -- raw ACL, in every schema: no routine names ai_smm_auth but the seven
     -- contracts (a grant in a schema the role cannot use is still a grant)
     SELECT CASE WHEN count(*) = 0 THEN 'PASS' ELSE 'FAIL' END,
            'acl.routines.unexpected',

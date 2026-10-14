@@ -37,6 +37,7 @@ from tests.cc_stub import (
     FIXTURE_OTHER_ID,
     FIXTURE_PG_CONTAINER,
     FIXTURE_PG_ID,
+    FIXTURE_PUBLIC_KEY_ID,
     FIXTURE_SYSTEM_ID,
     FIXTURE_WORKER,
     IDENTITY_ANSWER,
@@ -1052,3 +1053,70 @@ def test_network_templates_do_not_use_join_on_container_lists() -> None:
 
     assert "join ." not in gate
     assert "{{range .DNSNames}}" in gate and "{{range .Aliases}}" in gate
+
+
+# -- the legacy allow-list and the public key (FU-025C-2) ----------------------
+
+
+def _with_worker_legacy(stub: DockerStub, value: str | None) -> None:
+    worker = stub.container(FIXTURE_WORKER)
+    worker["env"] = [e for e in worker["env"] if not e.startswith("AI_SMM_LEGACY_")]
+
+    if value is not None:
+        worker["env"].append(f"AI_SMM_LEGACY_THREADS_PROJECTS={value}")
+
+    stub.save()
+
+
+@pytest.mark.parametrize(
+    ("ours", "workers"),
+    [
+        ("", None),
+        ("", ""),
+        ("ai-catalog-consultant", "ai-catalog-consultant"),
+        # Compared as sets: order, repeats and spaces in the worker's value.
+        ("b,a", " a , b ,a"),
+    ],
+)
+def test_the_allow_list_equals_the_workers(
+    tmp_path: Path, stub: DockerStub, ours: str, workers: str | None
+) -> None:
+    with docker_socket() as host:
+        directory = write_deploy_dir(
+            tmp_path / "cc", docker_host=host, legacy_projects=ours
+        )
+        _with_worker_legacy(stub, workers)
+
+        result = run_script(WRAPPER, directory, "preflight", stub=stub)
+
+    output = result.stdout + result.stderr
+
+    assert result.returncode == 0, output
+    assert "legacy allow-list" in output
+    assert f"credential public key id {FIXTURE_PUBLIC_KEY_ID}" in output
+
+
+@pytest.mark.parametrize(
+    ("ours", "workers"),
+    [
+        ("ai-catalog-consultant", None),
+        ("", "ai-catalog-consultant"),
+        ("a,b", "a"),
+        ("a", "a,b"),
+    ],
+)
+def test_an_allow_list_unlike_the_workers_closes_the_gate(
+    tmp_path: Path, stub: DockerStub, ours: str, workers: str | None
+) -> None:
+    with docker_socket() as host:
+        directory = write_deploy_dir(
+            tmp_path / "cc", docker_host=host, legacy_projects=ours
+        )
+        _with_worker_legacy(stub, workers)
+
+        for args in (("up",), ("preflight",)):
+            result = run_script(WRAPPER, directory, *args, stub=stub)
+
+            assert result.returncode == 2, args
+            assert "differs from the running worker's" in result.stderr, args
+            assert stub.compose_calls() == []

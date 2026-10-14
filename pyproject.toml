@@ -85,6 +85,9 @@ ignore = [
 # reads the environment at import time. That ordering is deliberate, so the
 # import-position rule does not apply to them.
 "scripts/*.py" = ["E402", "E501"]
+# PL/pgSQL bodies: a guard's refusal message is one source line, so that the
+# SQL a reviewer reads is the SQL PostgreSQL runs.
+"src/ai_smm/db/guards.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ai_smm"]

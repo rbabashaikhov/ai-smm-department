@@ -41,6 +41,10 @@ def create_db_engine(
     url = database_url or settings.require_database_url()
 
     options: dict[str, object] = {
+        # Never put bound parameters into an error or a log line: they can be
+        # a raw session token (guard_bind_session, smm_auth.*) or content
+        # (ADR-024C-3A §10, amendment A3).
+        "hide_parameters": True,
         "pool_pre_ping": True,
         "pool_size": 5,
         "max_overflow": 2,

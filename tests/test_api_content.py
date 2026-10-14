@@ -86,10 +86,10 @@ def _audit_actions(session: Session, item_id) -> list[str]:
 # -- create --------------------------------------------------------------
 
 
-def test_an_editor_creates_an_item_with_its_first_revision(
+def test_the_owner_creates_an_item_with_its_first_revision(
     client, session: Session, login, member, project: str
 ) -> None:
-    user = member(MembershipRole.EDITOR)
+    user = member(MembershipRole.OWNER)
     csrf = login(user)
 
     response = _create(client, project, csrf)
@@ -120,7 +120,7 @@ def test_the_item_itself_holds_no_text(
 ) -> None:
     """The body lives only in revisions."""
 
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item_id = _create(client, project, csrf).json()["id"]
 
     columns = set(ContentItem.__table__.columns.keys())
@@ -132,7 +132,7 @@ def test_the_item_itself_holds_no_text(
 def test_create_cannot_name_another_project_in_the_body(
     client, login, member, project: str, make_other_project
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _create(client, project, csrf, project_id=make_other_project)
 
@@ -143,7 +143,7 @@ def test_create_cannot_name_another_project_in_the_body(
 def test_an_empty_body_is_refused(
     client, login, member, project: str, bad: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _create(
         client, project, csrf, revision={"body": bad, "format": "text"}
@@ -155,7 +155,7 @@ def test_an_empty_body_is_refused(
 def test_an_unknown_format_is_refused(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _create(
         client, project, csrf, revision={"body": "x", "format": "video"}
@@ -167,11 +167,16 @@ def test_an_unknown_format_is_refused(
 # -- RBAC ----------------------------------------------------------------
 
 
-def test_a_viewer_reads_but_cannot_write(
-    client, login, member, project: str, make_content
+@pytest.mark.parametrize(
+    "role", [MembershipRole.VIEWER, MembershipRole.EDITOR, MembershipRole.ADMIN]
+)
+def test_members_below_owner_read_but_cannot_write(
+    client, login, member, project: str, make_content, role: MembershipRole
 ) -> None:
+    """Every business mutation is the owner's (SMM-025D)."""
+
     item, revision = make_content()
-    csrf = login(member(MembershipRole.VIEWER))
+    csrf = login(member(role))
 
     assert client.get(f"/api/v1/content-items/{item.id}").status_code == 200
     assert (
@@ -196,17 +201,13 @@ def test_a_viewer_reads_but_cannot_write(
         _post(client, item.id, "materialize", csrf),
     ):
         assert response.status_code == 403, response.text
-        assert response.json()["error"]["details"]["required_role"] == "editor"
+        assert response.json()["error"]["details"]["required_role"] == "owner"
 
 
-@pytest.mark.parametrize(
-    "role",
-    [MembershipRole.EDITOR, MembershipRole.ADMIN, MembershipRole.OWNER],
-)
-def test_editor_and_above_run_the_whole_editorial_flow(
-    client, login, member, project: str, role: MembershipRole
+def test_the_owner_runs_the_whole_editorial_flow(
+    client, login, member, project: str
 ) -> None:
-    csrf = login(member(role))
+    csrf = login(member(MembershipRole.OWNER))
     item_id = _create(client, project, csrf).json()["id"]
 
     approved = _approve_current(client, item_id, csrf)
@@ -221,7 +222,7 @@ def test_editor_and_above_run_the_whole_editorial_flow(
 def test_writes_need_the_csrf_token(
     client, login, member, project: str
 ) -> None:
-    login(member(MembershipRole.EDITOR))
+    login(member(MembershipRole.OWNER))
 
     response = client.post(
         f"/api/v1/projects/{project}/content-items",
@@ -285,7 +286,7 @@ def test_a_revision_of_another_item_cannot_be_approved(
 
     first, _ = make_content()
     _, other_revision = make_content()
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
 
     _post(
         client,
@@ -308,7 +309,7 @@ def test_a_revision_of_another_item_cannot_be_approved(
 def test_revisions_are_numbered_without_gaps(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item_id = _create(client, project, csrf).json()["id"]
 
     for version in (1, 2, 3):
@@ -327,7 +328,7 @@ def test_revisions_are_numbered_without_gaps(
 def test_a_stale_item_version_is_refused(
     client, session: Session, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item_id = _create(client, project, csrf).json()["id"]
 
     assert _revise(client, item_id, csrf, 1).status_code == 201
@@ -403,7 +404,7 @@ def test_the_database_refuses_to_delete_a_revision(
 def test_an_earlier_revision_is_unchanged_by_a_new_one(
     client, session: Session, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     created = _create(client, project, csrf).json()
     first = created["current_revision"]
 
@@ -419,7 +420,7 @@ def test_an_earlier_revision_is_unchanged_by_a_new_one(
 def test_the_content_hash_tracks_the_deliverable_snapshot(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
     first_hash = item["current_revision"]["content_hash"]
 
@@ -446,7 +447,7 @@ def test_the_content_hash_tracks_the_deliverable_snapshot(
 def test_an_agent_can_be_recorded_as_the_source(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
 
     body = _create(
         client,
@@ -472,7 +473,7 @@ def test_an_agent_can_be_recorded_as_the_source(
 def test_submit_moves_draft_to_in_review(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
 
     response = _post(
@@ -488,7 +489,7 @@ def test_submit_moves_draft_to_in_review(
 def test_submitting_twice_is_refused(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
     revision_id = item["current_revision_id"]
 
@@ -502,7 +503,7 @@ def test_submitting_twice_is_refused(
 def test_a_draft_cannot_be_approved_without_review(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
 
     response = _post(
@@ -517,7 +518,7 @@ def test_a_draft_cannot_be_approved_without_review(
 def test_approval_names_and_records_the_exact_revision(
     client, session: Session, login, member, project: str
 ) -> None:
-    user = member(MembershipRole.EDITOR)
+    user = member(MembershipRole.OWNER)
     csrf = login(user)
     item = _create(client, project, csrf).json()
     revision_id = item["current_revision_id"]
@@ -549,7 +550,7 @@ def test_approving_a_stale_revision_is_refused(
 ) -> None:
     """The reviewer read revision 1; revision 2 now exists."""
 
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
     read_by_reviewer = item["current_revision_id"]
 
@@ -583,7 +584,7 @@ def test_approving_a_stale_revision_is_refused(
 def test_reject_records_the_decision(
     client, login, member, project: str
 ) -> None:
-    user = member(MembershipRole.EDITOR)
+    user = member(MembershipRole.OWNER)
     csrf = login(user)
     item = _create(client, project, csrf).json()
     revision_id = item["current_revision_id"]
@@ -607,7 +608,7 @@ def test_reject_records_the_decision(
 def test_a_rejected_revision_is_not_resubmitted(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
     revision_id = item["current_revision_id"]
 
@@ -630,7 +631,7 @@ def test_a_new_revision_ends_the_approval(
 ) -> None:
     """Approval of revision 1 says nothing about revision 2."""
 
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
     approved = _approve_current(client, item["id"], csrf)
 
@@ -695,7 +696,7 @@ def test_the_database_will_not_hold_an_approval_of_an_old_revision(
 def test_the_approval_history_is_append_only(
     client, session: Session, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
 
     # reject r1, revise, approve r2: two decisions, both kept.
@@ -762,7 +763,7 @@ def test_an_approval_requires_a_human_actor(
 def test_every_editorial_step_is_audited(
     client, session: Session, login, member, project: str
 ) -> None:
-    user = member(MembershipRole.EDITOR)
+    user = member(MembershipRole.OWNER)
     csrf = login(user)
     item = _create(client, project, csrf).json()
     _revise(client, item["id"], csrf, 1)
@@ -788,7 +789,7 @@ def test_every_editorial_step_is_audited(
 
 
 def test_rejection_is_audited(client, session: Session, login, member, project) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
     revision_id = item["current_revision_id"]
     _post(client, item["id"], "submit-review", csrf, revision_id=revision_id)
@@ -800,7 +801,7 @@ def test_rejection_is_audited(client, session: Session, login, member, project) 
 def test_content_entries_appear_in_the_project_audit_view(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
     item = _create(client, project, csrf).json()
 
     actions = [
@@ -821,7 +822,7 @@ def test_content_entries_appear_in_the_project_audit_view(
 def test_items_can_be_filtered_by_status_and_paginated(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
     ids = [_create(client, project, csrf, title=f"t{i}").json()["id"] for i in range(3)]
     _approve_current(client, ids[0], csrf)
 

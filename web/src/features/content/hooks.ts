@@ -35,6 +35,40 @@ export function useApprovals(itemId: string) {
 }
 
 /**
+ * What smm-auth says approving `revisionId` would publish, read for the
+ * confirmation dialog only: fetched when it opens, never cached, never
+ * retried (a 404 means "not yours, or gone").
+ */
+export function useApprovalPreview(revisionId: string | null) {
+  const api = useApi();
+
+  return useQuery({
+    queryKey: qk.approvalPreview(revisionId ?? ""),
+    queryFn: () => api.auth.approvalPreview(revisionId ?? ""),
+    enabled: revisionId !== null,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  });
+}
+
+/** A password that never prints itself: not in devtools, logs or errors. */
+export interface StepUpPassword {
+  reveal: () => string;
+  toString: () => string;
+  toJSON: () => string;
+}
+
+export const stepUpPassword = (value: string): StepUpPassword =>
+  Object.freeze({
+    reveal: () => value,
+    toString: () => "[password]",
+    toJSON: () => "[password]",
+  });
+
+export type ApproveInput = RevisionDecision & { password: StepUpPassword };
+
+/**
  * The editorial commands. None is optimistic: the page shows what the
  * server answered, after it answered. Each success invalidates the item
  * (and with it its revisions and approvals) and the project's content
@@ -62,8 +96,17 @@ export function useContentCommands(itemId: string, projectId: string | undefined
     onSuccess: refreshItem,
   });
 
+  // Two requests, in this order (ADR-025D §4.3): smm-auth re-checks the
+  // password and issues a grant for exactly this revision; the approval
+  // then consumes it in the database. No grant, no approval -- whatever
+  // this code does. gcTime 0: the password does not outlive the attempt.
   const approve = useMutation({
-    mutationFn: (body: RevisionDecision) => api.content.approve(itemId, body),
+    gcTime: 0,
+    mutationFn: async ({ password, ...body }: ApproveInput) => {
+      await api.auth.stepUpApproval(body.revision_id, password.reveal());
+
+      return api.content.approve(itemId, body);
+    },
     onSuccess: refreshItem,
   });
 

@@ -186,7 +186,7 @@ def test_a_concurrent_reschedule_refuses_a_claimed_row(
 ) -> None:
     publication = make_publication(status=PublicationStatus.SCHEDULED)
     publication_id = publication.id
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     claimed = _claim_on_its_own_connection(session_factory)
 
@@ -229,7 +229,7 @@ def test_a_concurrent_cancel_refuses_a_claimed_row(
 ) -> None:
     publication = make_publication(status=PublicationStatus.SCHEDULED)
     publication_id = publication.id
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     _claim_on_its_own_connection(session_factory)
 
@@ -544,7 +544,7 @@ def test_a_command_that_cannot_get_the_lock_answers_503(
     monkeypatch.setattr(publications_module, "LOCK_TIMEOUT_MS", 150)
 
     publication = make_publication(status=PublicationStatus.SCHEDULED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     holder = session_factory()
 

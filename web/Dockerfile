@@ -38,6 +38,7 @@ FROM nginxinc/nginx-unprivileged@sha256:15c994d10d6d78658721c3bcafff14cb281fba2a
 # Replaces the stock server block (and its directory of sample pages).
 COPY --chown=root:root nginx/default.conf /etc/nginx/conf.d/default.conf
 COPY --chown=root:root nginx/smm-proxy.inc /etc/nginx/snippets/smm-proxy.inc
+COPY --chown=root:root nginx/smm-auth-proxy.inc /etc/nginx/snippets/smm-auth-proxy.inc
 COPY --from=builder --chown=root:root /web/dist /srv/smm-web
 
 # Fails the build, not the deployment, on a config error. The API host is

@@ -230,6 +230,17 @@ Not part of SMM-025C; listed so the switch has one checklist
    first token is saved (the API seals with the public key; without it
    `POST …/credentials` refuses with `CREDENTIALS_NOT_CONFIGURED`).
 
+**Status after SMM-025D (2026-10-14, local):** items 1, 2 and 6 are
+implemented in code — database guards, smm-auth with step-up approval,
+grants G2, audit provenance, key packaging
+([ADR-025D](adr/ADR-025D-database-enforced-mutation-safety.md),
+[credential-keys.md](credential-keys.md)). Under the guards this role also
+needs EXECUTE on the six guard functions and its writes are accepted only
+in a transaction bound to the owner's live session. Items 3–5 and the
+production steps are in
+[reports/smm-025d/rollout-rollback.md](reports/smm-025d/rollout-rollback.md)
+(§4 R7, §5 the FU-024C1-5 checklist).
+
 Rollback at any point: `mutations disable` (API read-only on `ai_smm_cc`
 within one container recreate); the role itself is removed with
 `ai_smm_cc_rw.revoke.sql`, which refuses while a session of the role is

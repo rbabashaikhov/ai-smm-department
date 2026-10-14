@@ -58,6 +58,8 @@ BEGIN
         'smm_auth.session_revoke(text)',
         'smm_auth.record_login_failure(text)',
         'smm_auth.recent_login_failures(text)',
+        'smm_auth.approval_preview(text, uuid)',
+        'smm_auth.approval_grant_issue(text, uuid)',
         'smm_auth.failure_subject(text)',
         'smm_auth.token_digest(text)']
     LOOP

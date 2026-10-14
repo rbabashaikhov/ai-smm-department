@@ -7,6 +7,7 @@ machine that has no Threads or OpenAI credentials.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -115,6 +116,16 @@ class Settings:
     #: the API process only -- the worker never reads it, so it can
     #: neither stop nor start publishing.
     api_mutations_enabled: bool = False
+    #: Whether smm-api itself serves POST /auth/login and /auth/logout.
+    #: On for local development and the test suite; the packaged Control
+    #: Center turns it off: smm-auth signs users in (ADR-024C-3A, grants G2
+    #: take session-creating rights from the API's roles).
+    api_auth_routes_enabled: bool = True
+    #: smm-auth only: the networks a request may come from (CIDR). Empty
+    #: -- local development and tests -- accepts any peer; the packaged
+    #: service names its own cc-auth subnet, so that even a wider bind
+    #: would not serve the shared network (ADR-024C-3A §9.2).
+    auth_allowed_peers: tuple[str, ...] = ()
 
     # Social accounts (SMM-025B). See ai_smm.publishing.routing.
     #: Projects whose account-less (legacy) publications may still be
@@ -206,6 +217,8 @@ def load_settings() -> Settings:
         api_mutations_enabled=_env_bool(
             "AI_SMM_API_MUTATIONS_ENABLED", False
         ),
+        api_auth_routes_enabled=_env_bool("AI_SMM_API_AUTH_ROUTES", True),
+        auth_allowed_peers=_networks("AI_SMM_AUTH_ALLOWED_PEERS"),
         legacy_threads_projects=_legacy_projects(),
         credentials_public_key=_env("AI_SMM_CREDENTIALS_PUBLIC_KEY"),
         credentials_private_key_files=tuple(
@@ -224,6 +237,18 @@ def _env_list(name: str) -> tuple[str, ...]:
     return tuple(
         item.strip() for item in raw.split(",") if item.strip()
     )
+
+
+def _networks(name: str) -> tuple[str, ...]:
+    networks = []
+
+    for item in _env_list(name):
+        try:
+            networks.append(str(ipaddress.ip_network(item, strict=True)))
+        except ValueError as exc:
+            raise ValueError(f"{name}: {item!r} is not a network (CIDR).") from exc
+
+    return tuple(networks)
 
 
 def _legacy_projects() -> tuple[str, ...]:

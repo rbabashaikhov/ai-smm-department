@@ -2,9 +2,17 @@
 #
 #   operator laptop --ssh -L 8088:127.0.0.1:8088--> host loopback
 #     -> 127.0.0.1:8088 (the only published port)
-#     -> smm-web   nginx: React build + reverse proxy        [cc-edge, cc-internal]
+#     -> smm-web   nginx: React build + reverse proxy   [cc-edge, cc-internal, cc-auth]
+#          ├── sign-in, sign-out, step-up -> smm-auth  [cc-auth (bind), shared (outbound)]
 #          └── /api/*, /health/* -> smm-api (FastAPI)          [cc-internal, shared]
 #                                     -> <postgres-container>  [shared, external]
+#
+# smm-auth (SMM-025D, ADR-024C-3A): the same API image, another application
+# (ai_smm.api.auth_service), connected as ai_smm_auth. It verifies passwords
+# and opens, closes and step-up-confirms sessions through the smm_auth
+# functions; smm-api cannot (grants G2). It listens only on its fixed
+# address in cc-auth, a network smm-api is not on: neither can reach the
+# other, and nothing on the shared network reaches smm-auth's port.
 #
 # A compose project of its own, "ai-smm-control-center", next to -- never
 # inside -- the worker's project "ai-smm" (compose.yaml). Nothing here
@@ -57,9 +65,13 @@ x-logging: &logging
 # Only AI_SMM_DATABASE_URL comes from the env files.
 x-app-env: &app-env
   TZ: UTC
-  # Business mutations off for every role. Login/logout still write the
-  # session and audit rows (docs/api.md, Read-only mode).
+  # Business mutations off for every role. Signing in and out are
+  # smm-auth's (SMM-025D); they write session and audit rows through the
+  # smm_auth functions.
   AI_SMM_API_MUTATIONS_ENABLED: "false"
+  # smm-api serves no login or logout of its own: nginx sends both to
+  # smm-auth, and the API's roles may not create or revoke a session.
+  AI_SMM_API_AUTH_ROUTES: "false"
   # No /docs, /redoc, /openapi.json.
   AI_SMM_API_DOCS_ENABLED: "false"
   # The only transport is an SSH tunnel to plain-HTTP loopback; a Secure
@@ -101,18 +113,25 @@ services:
     user: "10001:10001"
     tmpfs:
       - /tmp:size=64m,mode=1777
-    # The API's own least-privilege role, ai_smm_cc: reads, plus only the
-    # session and audit writes login/logout need. PostgreSQL refuses every
-    # business change from it, whatever the application does
-    # (docs/least-privilege-role.md). `up` and `restart` refuse unless the
-    # role checks out (cc-gate.sh, ai_smm_cc.verify.sql). Never the owner
-    # URL of control-center.env.
+    # The API's own least-privilege role, ai_smm_cc: reads, plus advancing
+    # a session's last_seen_at (grants G2, SMM-025D). PostgreSQL refuses
+    # every business change, session creation and audit write from it,
+    # whatever the application does (docs/least-privilege-role.md). `up`
+    # and `restart` refuse unless the role checks out (cc-gate.sh,
+    # ai_smm_cc.verify.sql). Never the owner URL of control-center.env.
     env_file:
       - control-center.api.env
     environment:
       <<: *app-env
       # Visible in pg_stat_activity on the shared instance.
       PGAPPNAME: ai-smm-control-center-api
+      # FU-025C-2 (docs/credential-keys.md). Neither is secret; both are
+      # validated by cc-compose.sh, and the allow-list must equal the
+      # running worker's. The public key seals tokens an owner pastes in;
+      # the private key that opens them is the worker's alone. smm-api
+      # only: no other service here handles tokens.
+      AI_SMM_CREDENTIALS_PUBLIC_KEY: ${SMM_CC_CREDENTIALS_PUBLIC_KEY:?set SMM_CC_CREDENTIALS_PUBLIC_KEY to the credential public key (docs/credential-keys.md)}
+      AI_SMM_LEGACY_THREADS_PROJECTS: ${SMM_CC_LEGACY_THREADS_PROJECTS?set SMM_CC_LEGACY_THREADS_PROJECTS to the worker's legacy allow-list, empty for none}
     # cc-internal: reached by smm-web only. shared: the one path to the
     # existing PostgreSQL. No host port on either.
     networks:
@@ -131,6 +150,43 @@ services:
     memswap_limit: 320m
     pids_limit: 128
 
+  smm-auth:
+    <<: *hardening
+    image: ai-smm-api:${SMM_CC_VERSION:?set SMM_CC_VERSION to the full git commit the images were built from}
+    user: "10001:10001"
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    # The auth application, bound to its cc-auth address ONLY: there is no
+    # listening socket on the shared network (ADR-024C-3A §9.2).
+    entrypoint: ["/app/.venv/bin/uvicorn", "ai_smm.api.auth_service:create_auth_app", "--factory", "--host", "10.231.18.2", "--port", "8000", "--no-access-log", "--no-server-header"]
+    # ai_smm_auth: column SELECT on users (password_hash included) and the
+    # smm_auth functions; nothing else (ai_smm_auth.grants.sql).
+    env_file:
+      - control-center.auth.env
+    environment:
+      <<: *app-env
+      PGAPPNAME: ai-smm-control-center-auth
+      # Second layer: a peer outside cc-auth is refused by the application
+      # even if the bind were ever widened.
+      AI_SMM_AUTH_ALLOWED_PEERS: 10.231.18.0/29
+    networks:
+      cc-auth:
+        ipv4_address: 10.231.18.2
+      shared: {}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://10.231.18.2:8000/health/live', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    cpus: 0.5
+    # Argon2 costs 64 MiB per verification, two at a time.
+    mem_limit: 320m
+    memswap_limit: 320m
+    pids_limit: 64
+
   smm-web:
     <<: *hardening
     image: ai-smm-web:${SMM_CC_VERSION:?set SMM_CC_VERSION to the full git commit the images were built from}
@@ -143,12 +199,15 @@ services:
     # an operator machine through an SSH tunnel; never from the internet.
     ports:
       - "127.0.0.1:8088:8080"
-    # cc-edge carries the published port; cc-internal reaches the API.
-    # Not on the shared network: the web tier cannot see the database or
-    # any other project's service.
+    # cc-edge carries the published port; cc-internal reaches the API;
+    # cc-auth reaches smm-auth. Not on the shared network: the web tier
+    # cannot see the database or any other project's service.
     networks:
       - cc-edge
       - cc-internal
+      - cc-auth
+    # Not on smm-auth: if it is down, signing in answers a JSON 502 and
+    # browsing with an existing session goes on.
     depends_on:
       smm-api:
         condition: service_healthy
@@ -231,6 +290,15 @@ networks:
   # Carries the loopback port. Only smm-web is attached.
   cc-edge:
     name: ai-smm-cc-edge
+  # smm-web <-> smm-auth only, no route out. A fixed /29 so that smm-auth
+  # can bind its one address; it must overlap no network on the host
+  # (checked before the first `up`, docs/reports/smm-025d).
+  cc-auth:
+    name: ai-smm-cc-auth
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.231.18.0/29
   # The existing bridge the database lives on. External: this project
   # never creates, changes or removes it.
   shared:

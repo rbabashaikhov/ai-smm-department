@@ -34,7 +34,7 @@ function ConflictPanel({ onReload }: { onReload: () => void }) {
   );
 }
 
-/** Name, description, timezone, language: the project record, admin+. */
+/** Name, description, timezone, language: the project record, owner only. */
 function RecordCard({ project, editable }: { project: Project; editable: boolean }) {
   const api = useApi();
   const queryClient = useQueryClient();
@@ -135,7 +135,7 @@ function RecordCard({ project, editable }: { project: Project; editable: boolean
   );
 }
 
-/** Topics and tone of voice: typed keys of the settings JSON, admin+.
+/** Topics and tone of voice: typed keys of the settings JSON, owner only.
  *  The whole section is sent back, so keys this page does not edit stay. */
 function ProfileCard({
   projectId,

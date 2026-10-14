@@ -37,6 +37,7 @@ from ai_smm.api.routers import projects as projects_router
 from ai_smm.api.routers import publications as publications_router
 from ai_smm.api.routers import series as series_router
 from ai_smm.api.routers import social_accounts as social_accounts_router
+from ai_smm.api.session_binding import session_binding
 from ai_smm.config import Settings, get_settings
 from ai_smm.logging_setup import setup_logging
 
@@ -104,9 +105,17 @@ def create_app(
     # first, then the gate refuses whatever is not on its allowlist.
     v1 = APIRouter(
         prefix=API_V1_PREFIX,
-        dependencies=[Depends(csrf_guard), Depends(mutation_gate)],
+        dependencies=[
+            Depends(csrf_guard),
+            Depends(mutation_gate),
+            # SMM-025D: with mutations on, the transaction is bound to the
+            # session in SQL before any route touches the database.
+            Depends(session_binding),
+        ],
     )
     v1.include_router(auth_router.router)
+    if settings.api_auth_routes_enabled:
+        v1.include_router(auth_router.session_router)
     v1.include_router(projects_router.router)
     v1.include_router(publications_router.router)
     v1.include_router(series_router.router)

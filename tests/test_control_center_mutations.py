@@ -160,7 +160,8 @@ def _verify_sqls(stub: DockerStub) -> list[str]:
         if argv[:1] == ["exec"] and "psql" in argv:
             sql = argv[argv.index("-c") + 1]
 
-            if "'checks'" in sql:
+            # smm-auth's verify file has its own gate and tests.
+            if "'checks'" in sql and "'ai_smm_auth'" not in sql:
                 roles.append("ai_smm_cc_rw" if "ai_smm_cc_rw" in sql else "ai_smm_cc")
 
     return roles
@@ -874,7 +875,9 @@ def test_this_release_refuses_enable_before_anything_runs(
     )
 
     _assert_refused(result, stub, "this release does not permit business mutations")
-    assert "FU-025C-1" in result.stderr
+    # What is still open for this release (SMM-025D closed the code items).
+    assert "owner review of SMM-025D" in result.stderr
+    assert "FU-024C1-5" in result.stderr
     assert stub.calls() == []
     assert not (deploy_dir / STATE).exists()
 

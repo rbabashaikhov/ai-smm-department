@@ -29,6 +29,7 @@ from sqlalchemy import (
     Uuid,
     event,
     func,
+    text,
 )
 from sqlalchemy import (
     Enum as SAEnum,
@@ -661,6 +662,13 @@ class AuditLog(Base):
     details: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default="{}"
     )
+    #: The database role that wrote the row (session_user), set by a trigger
+    #: whatever the writer sends (SMM-025D, FU-024C2-2). Inside a SECURITY
+    #: DEFINER function it is the role that called it, e.g. ai_smm_auth.
+    #: NULL only for rows written before the column existed.
+    written_by: Mapped[str | None] = mapped_column(
+        String(63), server_default=text("SESSION_USER")
+    )
 
 
 # --- control plane ------------------------------------------------------
@@ -689,7 +697,11 @@ class User(Base):
     )
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     #: Argon2id, produced by ai_smm.security.passwords. Never a raw password.
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Deferred (SMM-025D, grants G2): smm-api's roles may not SELECT it, so
+    #: nothing loads it unless asked (application.auth.authenticate does).
+    password_hash: Mapped[str] = mapped_column(
+        Text, nullable=False, deferred=True
+    )
     display_name: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="true"
@@ -1431,6 +1443,98 @@ class ContentPublicationLink(Base):
     )
 
 
+# --- business-mutation guards (SMM-025D) -----------------------------------
+# ai_smm.db.guards: who a guarded transaction acts for, and the step-up
+# grants that an approval by a guarded role consumes. No guarded role may
+# read or write either table directly.
+
+
+class MutationContext(Base):
+    """Transaction -> authenticated user, written only by guard_bind_session."""
+
+    __tablename__ = "mutation_contexts"
+    __table_args__ = (Index("ix_mutation_contexts_bound_at", "bound_at"),)
+
+    #: pg_current_xact_id() of the bound transaction.
+    txid: Mapped[int] = mapped_column(
+        BigInteger, primary_key=True, autoincrement=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "users.id", ondelete="CASCADE", name="fk_mutation_contexts_user"
+        ),
+        nullable=False,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    bound_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ApprovalGrant(Base):
+    """A step-up confirmation: this owner re-entered their password for this
+    revision, in this session, shortly ago. Issued only by
+    smm_auth.approval_grant_issue (smm-auth); consumed by the approval it
+    authorises (guard_consume_approval_grant)."""
+
+    __tablename__ = "approval_grants"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["content_item_id", "revision_id"],
+            ["content_revisions.content_item_id", "content_revisions.id"],
+            name="fk_approval_grants_revision",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "expires_at > created_at", name="ck_approval_grants_expiry"
+        ),
+        CheckConstraint(
+            "(consumed_at IS NULL) = (approval_id IS NULL)",
+            name="ck_approval_grants_consumed",
+        ),
+        CheckConstraint(
+            "length(content_hash) = 64", name="ck_approval_grants_hash"
+        ),
+        UniqueConstraint("approval_id", name="uq_approval_grants_approval"),
+        Index("ix_approval_grants_revision", "revision_id"),
+        Index("ix_approval_grants_user", "user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "users.id", ondelete="RESTRICT", name="fk_approval_grants_user"
+        ),
+        nullable=False,
+    )
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    content_item_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    revision_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    social_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "social_accounts.id",
+            ondelete="RESTRICT",
+            name="fk_approval_grants_social_account",
+        ),
+    )
+    #: The destination's bound Threads identity when the owner confirmed.
+    external_account_id: Mapped[str | None] = mapped_column(String(120))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The approval that consumed it (no foreign key: the grant is consumed
+    #: in the approval's own BEFORE INSERT trigger, before the row exists).
+    approval_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+
+
 # Append-only enforcement. The same function and triggers are created by
 # migration 3d4ac1986f07; these listeners give a schema built with
 # Base.metadata.create_all (the test suite) the identical guarantee, so
@@ -1605,6 +1709,34 @@ event.listen(
         f"DROP FUNCTION IF EXISTS {ACCOUNT_CLAIM_GUARD_FUNCTION}()"
     ).execute_if(dialect="postgresql"),
 )
+
+
+# Business-mutation guards (SMM-025D): the current version of
+# ai_smm.db.guards, so that a schema built with create_all (the test suite)
+# is guarded exactly like a migrated one. Everything after the last table
+# exists -- %ROWTYPE declarations are resolved when a function is created
+# -- in the migration's order: functions, PUBLIC's default EXECUTE taken
+# away, then the triggers.
+from ai_smm.db import guards as _guards  # noqa: E402  (after the models)
+
+
+for _statement in (
+    [_function.ddl for _function in _guards.FUNCTIONS_V1]
+    + _guards.revoke_public_statements(_guards.FUNCTIONS_V1)
+    + [_trigger.ddl for _trigger in _guards.TRIGGERS_V1]
+):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+for _statement in _guards.drop_function_statements(_guards.FUNCTIONS_V1):
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement + " CASCADE").execute_if(dialect="postgresql"),
+    )
 
 
 def credential_metadata_only():

@@ -12,7 +12,7 @@ register below says which.
 
 ## Register
 
-**As of 2026-10-14 (SMM-024C-2B; SMM-025A review added FU-025A-1…4; SMM-025B review added FU-025B-1…9; SMM-025C closed FU-025B-1 locally and added FU-025C-1).** The heading stays the same when the
+**As of 2026-10-14 (SMM-024C-2B; SMM-025A review added FU-025A-1…4; SMM-025B review added FU-025B-1…9; SMM-025C closed FU-025B-1 locally and added FU-025C-1; SMM-025D closed FU-025C-1, FU-024C2-1, FU-024C2-2 and FU-025C-2 locally and added FU-025D-1…5).** The heading stays the same when the
 register is updated, so links to `#register` keep working; the anchor of
 its first version (`#register-as-of-2026-10-12-smm-024c-1`) is kept too.
 
@@ -34,12 +34,17 @@ mandatory condition for a later step, named in its row.
 
 | FU | Title | Status | Priority | Blocks business mutations? |
 |---|---|---|---|---|
-| [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open; its database-role part for the read-only mode is done (FU-024B3-1) | **P1** | **Yes** — this is the check that precedes the switch |
-| [FU-024C2-1](#fu-024c2-1--session-forgery-through-the-apis-database-connection) | Session forgery through the API's database connection | open, accepted for read-only mode | **P1** | **Yes** — a forged owner session could schedule a post the LIVE worker sends |
-| [FU-024C2-2](#fu-024c2-2--authenticity-of-audit-actor-and-action) | Authenticity of audit actor/action | open, accepted for read-only mode | **P1** | **Yes** — business actions must be attributable |
+| [FU-024C1-5](#fu-024c1-5--verify-the-safety-gates-before-publication-mutations-are-switched-on) | Verify the safety gates before publication mutations are switched on | open; its database-role part for the read-only mode is done (FU-024B3-1); the SMM-025D checklist is [rollout-rollback.md §5](reports/smm-025d/rollout-rollback.md#5-fu-024c1-5-checklist-on-the-exact-release) | **P1** | **Yes** — this is the check that precedes the switch |
+| [FU-024C2-1](#fu-024c2-1--session-forgery-through-the-apis-database-connection) | Session forgery through the API's database connection | **done technically** (SMM-025D, local: smm-auth + grants G2 + session binding); production with the smm-auth rollout | **P1** | Via the rollout only |
+| [FU-024C2-2](#fu-024c2-2--authenticity-of-audit-actor-and-action) | Authenticity of audit actor/action | **done technically** (SMM-025D, local: `written_by`, actor forced to the bound user) | **P1** | Via the rollout only |
 | [FU-024C2-3](#fu-024c2-3--a-privilege-model-for-business-mutations) | Privilege model for business mutations (SMM-025) | **designed and validated locally** (SMM-025C, `ai_smm_cc_rw`); not in production, not yet part of an executed FU-024C1-5 checklist | **P1** | **Yes** — until the role is created in production and checked with FU-024C1-5 |
-| [FU-025C-1](#fu-025c-1--database-side-invariants-for-rows-the-mutation-role-inserts) | Database-side invariants for rows the mutation role inserts | open | **P1** | **Yes** — decide (implement or accept) before the switch |
-| [FU-025C-2](#fu-025c-2--packaging-of-the-credential-keys-and-the-legacy-allow-list) | Packaging of the credential keys and the legacy allow-list | open | **P1** | **Yes** — no credential can be saved or used without it |
+| [FU-025C-1](#fu-025c-1--database-side-invariants-for-rows-the-mutation-role-inserts) | Database-side invariants for rows the mutation role inserts | **done technically** (SMM-025D, local: guards, lineage, step-up grants; ADR-025D) | **P1** | Via the rollout only |
+| [FU-025C-2](#fu-025c-2--packaging-of-the-credential-keys-and-the-legacy-allow-list) | Packaging of the credential keys and the legacy allow-list | **done technically** (SMM-025D, local: compose env + wrapper checks, worker read-only key mount, [credential-keys.md](credential-keys.md)) | **P1** | Via the rollout only (keys generated on the host) |
+| [FU-025D-1](#fu-025d-1--session-resolution-for-reads-stays-in-python) | Session resolution for reads stays in Python | open, accepted | P3 | No |
+| [FU-025D-2](#fu-025d-2--smm-auth-reaches-smm-api-over-the-shared-network) | smm-auth reaches smm-api over the shared network | open (part of FU-024B3-2) | P2 | No |
+| [FU-025D-3](#fu-025d-3--editor-and-admin-have-no-business-rights) | Editor and admin have no business rights | open, accepted | P3 | No |
+| [FU-025D-4](#fu-025d-4--the-public-key-is-not-matched-against-the-workers-private-key-automatically) | Public key not matched against the worker's private key automatically | open | P2 | No — a wrong key fails closed |
+| [FU-025D-5](#fu-025d-5--the-deployed-worker-refuses-the-new-schema) | The deployed worker refuses the new schema | open, by design | **migration gate** | No — the rollout ships worker N with the migration |
 | [FU-024C2-4](#fu-024c2-4--flush-before-the-savepoint-of-the-optional-hash-upgrade) | Flush before the SAVEPOINT of the optional hash upgrade | open | P2 | No — fail-closed today; diagnostics and robustness |
 | [FU-024B4A-1](#fu-024b4a-1--the-gap-between-the-queue-gate-and-the-first-ddl-statement) | Queue gate → DDL gap (TOCTOU) | open | **migration gate** | No for the current read-only UI. **Mandatory before any further migration while the queue can be written** (mutations on, or any other writer active) |
 | [FU-024B2-2](#fu-024b2-2--validate-worker_mode_source-when-a-worker-heartbeat-is-introduced) | Source and reliability of the worker mode | open | P2 | No — the UI shows `UNKNOWN` with a warning; still wanted soon, as the worker is LIVE |
@@ -550,8 +555,12 @@ mode. The first three block business mutations.
 
 ### FU-024C2-1 — Session forgery through the API's database connection
 
-**Status:** open, accepted for the read-only mode. **Priority:** P1.
-**Blocks mutations:** yes.
+**Status:** done technically in SMM-025D (local, not deployed): smm-auth
+opens sessions through SECURITY DEFINER functions, grants G2 take every
+session-creating right from both API roles, and every business write is
+bound in SQL to a live session (`guard_bind_session`). Production: with
+the smm-auth rollout. Was: open, accepted for the read-only mode.
+**Priority:** P1. **Blocks mutations:** via the rollout only.
 
 Login needs `INSERT` on `user_sessions`, so whoever controls the API's
 database connection (code execution in the API, injected SQL) can create
@@ -583,8 +592,11 @@ the decision on the inherent remainder is recorded before mutations.
 
 ### FU-024C2-2 — Authenticity of audit actor and action
 
-**Status:** open, accepted for the read-only mode. **Priority:** P1.
-**Blocks mutations:** yes.
+**Status:** done technically in SMM-025D (local, not deployed):
+`audit_log.written_by` is forced to `session_user` by trigger; a business
+role writes business actions only, as the bound user; sign-in rows come
+from `ai_smm_auth`. Historical rows keep NULL. Was: open, accepted for the
+read-only mode. **Priority:** P1. **Blocks mutations:** via the rollout only.
 
 Guaranteed today towards `ai_smm_cc`: existing audit entries cannot be
 changed or removed (no `UPDATE`/`DELETE`/`TRUNCATE`), `at` is the
@@ -733,7 +745,9 @@ FU-025C-1 is recorded above, next to FU-025B-1.
 
 ### FU-025C-2 — Packaging of the credential keys and the legacy allow-list
 
-**Status:** open. **Priority:** P1. **Blocks mutations:** yes.
+**Status:** done technically in SMM-025D (local, not deployed); see
+[credential-keys.md](credential-keys.md). Was: open. **Priority:** P1.
+**Blocks mutations:** via the rollout only.
 **Recorded in:** SMM-025C Phase 3, from the VPS inventory of 2026-10-14
 ([reports/smm-025b/migration-rollback.md](reports/smm-025b/migration-rollback.md) §3.2, D2/D3).
 
@@ -792,8 +806,11 @@ Tests: `tests/test_db_mutation_role.py`, `tests/mutation_role/`,
 
 ### FU-025C-1 — Database-side invariants for rows the mutation role inserts
 
-**Status:** open. **Priority:** P1. **Blocks mutations:** yes (decide
-before the switch). **Recorded in:** SMM-025C Phase 2 (2026-10-14).
+**Status:** done technically in SMM-025D (local, not deployed): implemented
+as database guards, publication lineage and step-up approval grants
+([ADR-025D](adr/ADR-025D-database-enforced-mutation-safety.md)). Was: open.
+**Priority:** P1. **Blocks mutations:** via the rollout only.
+**Recorded in:** SMM-025C Phase 2 (2026-10-14).
 
 `ai_smm_cc_rw` must `INSERT` every column the ORM sends, so whoever
 controls its connection can insert a publication already `scheduled`
@@ -885,3 +902,62 @@ a harmless but noisy restart loop. Done when monitoring alerts on it.
 The editorial layer confines revision images to the project's own
 `assets/`; rows written by `import-json` or the CLI are only confined to
 the shared media root. Done when the importer applies the same rule.
+
+## From SMM-025D (production mutations & security hardening, 2026-10-14)
+
+### FU-025D-1 — Session resolution for reads stays in Python
+
+**Status:** open, accepted. **Priority:** P3. **Blocks mutations:** no.
+
+ADR-024C-3A §12 wanted every session resolved in SQL. SMM-025D resolves
+the identity of every **write** in SQL (`guard_bind_session`), but reads
+still resolve the cookie in Python, so `ai_smm_cc` and `ai_smm_cc_rw`
+keep `SELECT` on `user_sessions` and `UPDATE (last_seen_at)` (RS-1, RS-2).
+The raw token is never stored; a compromised API can read session hashes
+and keep sessions it already sees alive, nothing more. Done when reads go
+through `smm_auth.session_resolve` and the two grants are dropped.
+
+### FU-025D-2 — smm-auth reaches smm-api over the shared network
+
+**Status:** open; part of FU-024B3-2. **Priority:** P2. **Blocks mutations:** no.
+
+The network rehearsal (T-N4, reverse direction) shows smm-auth can open
+a TCP connection to `smm-api:8000` over `<shared-network>`, as every
+container there can (smm-api listens on `0.0.0.0`). ADR-024C-3A accepted
+this with FU-024B3-2; the forward direction (smm-api → smm-auth) is
+closed. Done with FU-024B3-2, or by binding smm-api to a fixed
+`cc-internal` address the way smm-auth is bound.
+
+### FU-025D-3 — Editor and admin have no business rights
+
+**Status:** open, accepted. **Priority:** P3. **Blocks mutations:** no.
+
+SMM-025D made every business change owner-only, in the API and in the
+database guards; editor and admin read (admin also the audit). Giving
+them rights back (an editor drafting, an admin scheduling) needs guard
+rules per role and a decision on who may approve. Done when decided.
+
+### FU-025D-4 — The public key is not matched against the worker's private key automatically
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no.
+
+The wrapper validates the shape of `SMM_CC_CREDENTIALS_PUBLIC_KEY` and
+prints its key id; the operator compares it with the id recorded at
+generation. A wrong key is not detected until the worker preflight sees
+an active credential it cannot open (it then refuses to start) — fail
+closed, but late. Done when the worker reports its key ids somewhere the
+wrapper can compare (a heartbeat, FU-024B2-2) or the key id is part of
+the deployment record the identity gate checks.
+
+### FU-025D-5 — The deployed worker refuses the new schema
+
+**Status:** open, by design. **Priority:** migration gate. **Blocks mutations:** no.
+
+The worker `5f32b50` running in production checks `alembic_version ==
+a7c2e5f19b40` at start; after `c4d81e2a9f63` it would refuse to start
+(exit 78) — publishing nothing and failing nothing. The rollout therefore
+switches the worker to the release of the migration in the same window
+([reports/smm-025d/rollout-rollback.md](reports/smm-025d/rollout-rollback.md)).
+No older worker (`5f32b50`, `706b383`, …) may be started on the new
+schema, also not as a rollback: a worker rollback below that release needs
+the schema downgrade first.

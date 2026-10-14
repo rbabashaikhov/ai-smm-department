@@ -35,27 +35,22 @@ table_grants(relname, privilege) AS (
         ('content_items', 'SELECT'), ('content_revisions', 'SELECT'),
         ('content_approvals', 'SELECT'),
         ('content_publication_links', 'SELECT'),
-        ('audit_log', 'SELECT'), ('users', 'SELECT'),
+        ('audit_log', 'SELECT'),
         ('user_sessions', 'SELECT'),
         ('social_accounts', 'SELECT')
 ),
 column_grants(relname, attname, privilege) AS (
     VALUES
-        ('user_sessions', 'id', 'INSERT'),
-        ('user_sessions', 'user_id', 'INSERT'),
-        ('user_sessions', 'token_hash', 'INSERT'),
-        ('user_sessions', 'expires_at', 'INSERT'),
-        ('user_sessions', 'last_seen_at', 'INSERT'),
-        ('user_sessions', 'created_at', 'INSERT'),
-        ('user_sessions', 'revoked_at', 'INSERT'),
+        -- G2 (SMM-025D): sessions are smm-auth's; the read check only
+        -- advances last_seen_at. users column by column, no password_hash.
         ('user_sessions', 'last_seen_at', 'UPDATE'),
-        ('user_sessions', 'revoked_at', 'UPDATE'),
-        ('users', 'last_login_at', 'UPDATE'),
-        ('users', 'updated_at', 'UPDATE'),
-        ('audit_log', 'actor', 'INSERT'),
-        ('audit_log', 'action', 'INSERT'),
-        ('audit_log', 'subject', 'INSERT'),
-        ('audit_log', 'details', 'INSERT'),
+        ('users', 'id', 'SELECT'),
+        ('users', 'email', 'SELECT'),
+        ('users', 'display_name', 'SELECT'),
+        ('users', 'is_active', 'SELECT'),
+        ('users', 'last_login_at', 'SELECT'),
+        ('users', 'created_at', 'SELECT'),
+        ('users', 'updated_at', 'SELECT'),
         ('social_account_credentials', 'id', 'SELECT'),
         ('social_account_credentials', 'social_account_id', 'SELECT'),
         ('social_account_credentials', 'status', 'SELECT'),
@@ -207,19 +202,30 @@ checks(status, name, detail) AS (
        AND cg.privilege = p.privilege
      WHERE EXISTS (SELECT 1 FROM role)
 
-    -- every sequence: USAGE on audit_log's only
+    -- every sequence: none (G2, SMM-025D: this role writes no audit entry)
     UNION ALL
     SELECT CASE WHEN has_sequence_privilege('ai_smm_cc', s.oid, p.privilege)
-                     = (p.privilege = 'USAGE'
-                        AND s.oid = pg_get_serial_sequence('public.audit_log', 'id')::regclass)
-                THEN 'PASS' ELSE 'FAIL' END,
+                THEN 'FAIL' ELSE 'PASS' END,
            format('sequence.%s.%s', s.relname, lower(p.privilege)),
-           CASE WHEN p.privilege = 'USAGE'
-                 AND s.oid = pg_get_serial_sequence('public.audit_log', 'id')::regclass
-                THEN 'granted' ELSE 'denied' END
+           'denied'
       FROM pg_class s
      CROSS JOIN (VALUES ('USAGE'), ('SELECT'), ('UPDATE')) AS p(privilege)
      WHERE s.relnamespace = 'public'::regnamespace AND s.relkind = 'S'
+       AND EXISTS (SELECT 1 FROM role)
+
+    -- SMM-025D: no function of the application owner in schema public is
+    -- executable -- in particular none of the business-mutation guards
+    -- (trigger functions cannot be called, so they are not listed)
+    UNION ALL
+    SELECT CASE WHEN has_function_privilege('ai_smm_cc', p.oid, 'EXECUTE')
+                THEN 'FAIL' ELSE 'PASS' END,
+           format('function.%s.execute', p.proname), 'denied'
+      FROM pg_proc p
+     WHERE p.pronamespace = 'public'::regnamespace
+       AND p.prokind = 'f'
+       AND p.prorettype <> 'trigger'::regtype
+       AND p.proowner = (SELECT c.relowner FROM pg_class c
+                          WHERE c.oid = 'public.publications'::regclass)
        AND EXISTS (SELECT 1 FROM role)
 
     -- every designed grant names a table that exists (a renamed table would

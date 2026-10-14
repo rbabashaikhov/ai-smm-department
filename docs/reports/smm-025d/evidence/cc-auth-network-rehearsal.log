@@ -1,0 +1,135 @@
+
+== daemon: ruslan-MACHCREATOR-E engine 08f81a67-b300-43f7-b842-04b5abe65e1a at unix:///var/run/docker.sock
+Docker Compose version v5.4.0
+
+== T-N5 (facts): the cc-auth subnet against every route and Docker network here
+checked: 10.0.3.0/24 169.254.0.0/16 172.17.0.0/16 172.18.0.0/16 172.19.0.0/16 172.20.0.0/16 172.21.0.0/16 172.22.0.0/16 172.23.0.0/16 172.24.0.0/16 172.25.0.0/16 172.26.0.0/16 172.27.0.0/16 192.168.0.0/20 192.168.48.0/20 192.168.88.0/24
+PASS T-N5a: 10.231.18.0/29 overlaps no route or Docker network on this host
+
+== stand-ins: shared network, database, worker
+
+== schema and roles (outside the runbook: P2-P4 of ADR-024C-3A are not under test here)
+grants, publication lineage and audit provenance (SMM-025D)
+applied ai_smm_cc.grants.sql
+applied smm_auth.functions.sql
+applied ai_smm_auth.grants.sql
+
+== deployment directory, laid out as on the host
+
+== the gates, through the wrapper (real verify files on the real roles)
+gate identity: PASS -- ai_smm (oid 16385) in ai-smm-cc-authrh-postgres (49f7cc53c49a, system 7696553519496486950); worker ai-smm-cc-authrh-worker and control-center.env use the same URL; 'ai-smm-cc-authrh-postgres' unique on ai-smm-cc-authrh-shared
+gate identity: legacy allow-list '<none>' as the worker's; credential public key id efb00d89977c89de (compare with the deployment record)
+gate api-role: INFO database.temporary|may create temporary tables (PUBLIC default)
+gate api-role: INFO instance.other_database_connect|postgres
+gate api-role: INFO instance.other_database_connect|template1
+gate api-role: PASS -- smm-api connects as ai_smm_cc to ai-smm-cc-authrh-postgres:5432/ai_smm; 930 checks, no FAIL
+gate auth-role: INFO database.temporary|may create temporary tables (PUBLIC default)
+gate auth-role: INFO function.trigger_functions|21 trigger or event trigger functions (not callable directly)
+gate auth-role: INFO instance.other_database_connect|postgres
+gate auth-role: INFO instance.other_database_connect|template1
+gate auth-role: PASS -- smm-auth connects as ai_smm_auth to ai-smm-cc-authrh-postgres:5432/ai_smm; 960 checks, no FAIL
+gate queue: PASS -- at 2026-10-14T15:58:37Z nothing publishing, leased, due or retried in 2026-10-14T15:48:36Z .. 2026-10-14T17:48:36Z +/- 60m; nothing published or attempted in the margin before; none needs review
+preflight: PASS
+
+== owner and start (the wrapper's up: all gates, then the three HTTP services)
+gate identity: PASS -- ai_smm (oid 16385) in ai-smm-cc-authrh-postgres (49f7cc53c49a, system 7696553519496486950); worker ai-smm-cc-authrh-worker and control-center.env use the same URL; 'ai-smm-cc-authrh-postgres' unique on ai-smm-cc-authrh-shared
+gate identity: legacy allow-list '<none>' as the worker's; credential public key id efb00d89977c89de (compare with the deployment record)
+gate api-role: INFO database.temporary|may create temporary tables (PUBLIC default)
+gate api-role: INFO instance.other_database_connect|postgres
+gate api-role: INFO instance.other_database_connect|template1
+gate api-role: PASS -- smm-api connects as ai_smm_cc to ai-smm-cc-authrh-postgres:5432/ai_smm; 930 checks, no FAIL
+gate auth-role: INFO database.temporary|may create temporary tables (PUBLIC default)
+gate auth-role: INFO function.trigger_functions|21 trigger or event trigger functions (not callable directly)
+gate auth-role: INFO instance.other_database_connect|postgres
+gate auth-role: INFO instance.other_database_connect|template1
+gate auth-role: PASS -- smm-auth connects as ai_smm_auth to ai-smm-cc-authrh-postgres:5432/ai_smm; 960 checks, no FAIL
+ Network ai-smm-cc-edge Creating
+ Network ai-smm-cc-edge Creating
+ Network ai-smm-cc-internal Creating
+ Network ai-smm-cc-internal Creating
+ Network ai-smm-cc-auth Creating
+ Network ai-smm-cc-auth Creating
+ Network ai-smm-cc-edge Created
+ Network ai-smm-cc-edge Created
+ Network ai-smm-cc-auth Created
+ Network ai-smm-cc-auth Created
+ Container ai-smm-control-center-smm-auth-1 Creating
+ Network ai-smm-cc-internal Created
+ Network ai-smm-cc-internal Created
+ Container ai-smm-control-center-smm-api-1 Creating
+ Container ai-smm-control-center-smm-auth-1 Created
+ Container ai-smm-control-center-smm-api-1 Created
+ Container ai-smm-control-center-smm-web-1 Creating
+ Container ai-smm-control-center-smm-web-1 Created
+ Container ai-smm-control-center-smm-api-1 Starting
+ Container ai-smm-control-center-smm-auth-1 Starting
+ Container ai-smm-control-center-smm-api-1 Started
+ Container ai-smm-control-center-smm-api-1 Waiting
+ Container ai-smm-control-center-smm-auth-1 Started
+ Container ai-smm-control-center-smm-api-1 Healthy
+ Container ai-smm-control-center-smm-web-1 Starting
+ Container ai-smm-control-center-smm-web-1 Started
+ Container ai-smm-control-center-smm-web-1 Waiting
+ Container ai-smm-control-center-smm-api-1 Waiting
+ Container ai-smm-control-center-smm-auth-1 Waiting
+ Container ai-smm-control-center-smm-auth-1 Healthy
+ Container ai-smm-control-center-smm-api-1 Healthy
+ Container ai-smm-control-center-smm-web-1 Healthy
+/ai-smm-control-center-smm-api-1: ai-smm-cc-authrh-shared=172.28.0.4 ai-smm-cc-internal=172.30.0.2
+/ai-smm-control-center-smm-auth-1: ai-smm-cc-auth=10.231.18.2 ai-smm-cc-authrh-shared=172.28.0.5
+/ai-smm-control-center-smm-web-1: ai-smm-cc-auth=10.231.18.3 ai-smm-cc-edge=172.29.0.2 ai-smm-cc-internal=172.30.0.3
+
+== T-N1: the shared network cannot reach smm-auth
+PASS T-N1a: smm-auth's only listening socket on :8000 is 10.231.18.2
+PASS T-N1b: from ai-smm-cc-authrh-shared: smm-auth -> 172.28.0.5:8000: refused
+PASS T-N1c: from ai-smm-cc-authrh-shared to the cc-auth address: 10.231.18.2 -> 10.231.18.2:8000: no connection (TimeoutError)
+
+== T-N2: smm-web resolves smm-auth to its cc-auth address; sign-in and sign-out through nginx
+PASS T-N2a: smm-web resolves smm-auth to 10.231.18.2
+sign-in 401 then 200 via smm-auth; /auth/me 200 via smm-api; sign-out; /auth/me 401
+PASS T-N2b: sign-in, session use and sign-out through nginx
+PASS T-N2c: smm-api mounts no login (404 on its own port)
+
+== T-N4: smm-api cannot reach smm-auth on any network
+PASS T-N4a: from smm-api by name: smm-auth -> 172.28.0.5:8000: refused
+PASS T-N4b: from smm-api to the cc-auth address: 10.231.18.2 -> 10.231.18.2:8000: no connection (TimeoutError)
+INFO T-N4c (reverse, FU-024B3-2): from smm-auth: smm-api -> 172.28.0.4:8000: CONNECTED
+
+== T-N5: bind and health survive a restart by the restart policy
+PASS T-N5b: restarted by Docker (restart count 1), healthy, bind 10.231.18.2, shared network: smm-auth -> 172.28.0.5:8000: refused
+
+== T-N3: the bind widened to 0.0.0.0 (a deliberately broken build): the allowlist answers
+ Container ai-smm-control-center-smm-auth-1 Recreate
+ Container ai-smm-control-center-smm-auth-1 Recreated
+ Container ai-smm-control-center-smm-auth-1 Starting
+ Container ai-smm-control-center-smm-auth-1 Started
+ Container ai-smm-control-center-smm-auth-1 Waiting
+ Container ai-smm-control-center-smm-auth-1 Healthy
+PASS T-N3a: widened bind, shared network: 403 FORBIDDEN (application allowlist)
+PASS T-N3b: widened bind, smm-web (allowed peer): 401 for a wrong password
+T-N3c: the packaging test pinning the bind is tests/test_control_center_packaging.py::test_auth_runs_the_auth_application_bound_to_its_address_only
+
+== back to the packaged configuration, through the wrapper
+ Container ai-smm-control-center-smm-web-1 Running
+ Container ai-smm-control-center-smm-api-1 Running
+ Container ai-smm-control-center-smm-auth-1 Recreate
+ Container ai-smm-control-center-smm-auth-1 Recreated
+ Container ai-smm-control-center-smm-auth-1 Starting
+ Container ai-smm-control-center-smm-api-1 Waiting
+ Container ai-smm-control-center-smm-auth-1 Started
+ Container ai-smm-control-center-smm-api-1 Healthy
+ Container ai-smm-control-center-smm-web-1 Waiting
+ Container ai-smm-control-center-smm-api-1 Waiting
+ Container ai-smm-control-center-smm-auth-1 Waiting
+ Container ai-smm-control-center-smm-api-1 Healthy
+ Container ai-smm-control-center-smm-web-1 Healthy
+ Container ai-smm-control-center-smm-auth-1 Healthy
+PASS packaged again: bind 10.231.18.2; shared network: smm-auth -> 172.28.0.5:8000: refused
+
+== the worker stand-in and the database are untouched by the Control Center
+/ai-smm-cc-authrh-worker running=true restarts=0
+/ai-smm-cc-authrh-postgres running=true restarts=0
+
+== REHEARSAL PASSED: T-N1, T-N2, T-N3, T-N4 (a, b), T-N5
+
+== cleanup

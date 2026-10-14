@@ -51,7 +51,17 @@ DECLARE
         'publications', 'publication_attempts', 'content_series',
         'content_items', 'content_revisions', 'content_approvals',
         'content_publication_links', 'audit_log', 'users', 'user_sessions',
-        'social_accounts', 'social_account_credentials'
+        'social_accounts', 'social_account_credentials',
+        -- SMM-025D: without its guards this role must not exist at all.
+        'mutation_contexts', 'approval_grants'
+    ];
+    expected_functions CONSTANT text[] := ARRAY[
+        'public.guard_bind_session(text)',
+        'public.guard_context_user()',
+        'public.guard_context_session()',
+        'public.guard_require_owner(text, text)',
+        'public.guard_publication_problem(bigint)',
+        'public.guard_consume_approval_grant(uuid, uuid, uuid)'
     ];
     missing text[];
     owners text[];
@@ -65,6 +75,15 @@ BEGIN
 
     IF missing IS NOT NULL THEN
         RAISE EXCEPTION 'ai_smm_cc_rw: tables missing in %.public: % -- wrong database or schema revision',
+            current_database(), missing;
+    END IF;
+
+    SELECT array_agg(f) INTO missing
+      FROM unnest(expected_functions) AS f
+     WHERE to_regprocedure(f) IS NULL;
+
+    IF missing IS NOT NULL THEN
+        RAISE EXCEPTION 'ai_smm_cc_rw: guard functions missing in %: % -- migrate to c4d81e2a9f63 first',
             current_database(), missing;
     END IF;
 
@@ -145,15 +164,21 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ai_smm_cc_rw;
 GRANT USAGE ON SCHEMA public TO ai_smm_cc_rw;
 
 -- Reads behind every GET endpoint, the session check and the audit view.
--- users includes password_hash: login verifies it.
 GRANT SELECT ON
     projects, project_memberships, project_settings,
     publications, publication_attempts, content_series,
     content_items, content_revisions, content_approvals,
     content_publication_links,
-    audit_log, users, user_sessions,
+    audit_log, user_sessions,
     social_accounts
 TO ai_smm_cc_rw;
+
+-- SMM-025D, grants G2 (ADR-024C-3A §6.2, correction 1): users column by
+-- column, never password_hash. Signing in is smm-auth's (ai_smm_auth); a
+-- table-level SELECT would expose every column, a later one included.
+GRANT SELECT (id, email, display_name, is_active, last_login_at,
+              created_at, updated_at)
+    ON users TO ai_smm_cc_rw;
 
 -- SMM-025B: credential METADATA only, column by column. Never
 -- ciphertext, nonce or ephemeral_public_key: the API holds no key that
@@ -163,24 +188,18 @@ GRANT SELECT (id, social_account_id, status, scheme, key_id, fingerprint,
               created_by_user_id, created_at, superseded_at, revoked_at)
     ON social_account_credentials TO ai_smm_cc_rw;
 
--- POST /auth/login opens a session; every authenticated request advances
--- last_seen_at; POST /auth/logout sets revoked_at. Never DELETE. INSERT
--- names every column the ORM sends (revoked_at too, as NULL), by name, so
--- that a column added later is not granted with it.
-GRANT INSERT (id, user_id, token_hash, expires_at, last_seen_at, created_at,
-              revoked_at)
-    ON user_sessions TO ai_smm_cc_rw;
-GRANT UPDATE (last_seen_at, revoked_at) ON user_sessions TO ai_smm_cc_rw;
+-- G2 (SMM-025D): sessions are created, revoked and audited by smm-auth
+-- only (smm_auth.session_create / session_revoke, as ai_smm_auth). This
+-- role keeps what the session check of a read needs: advancing
+-- last_seen_at (ADR-024C-3A RS-2); the identity of every write is
+-- decided in SQL by guard_bind_session. No INSERT, no revoked_at, no
+-- write to users.
+GRANT UPDATE (last_seen_at) ON user_sessions TO ai_smm_cc_rw;
 
--- POST /auth/login records the login. Not password_hash: the optional
--- upgrade of an outdated Argon2 hash is skipped for this role
--- (ai_smm.application.auth, SAVEPOINT), so a compromised API cannot set
--- any account's password. Not email, is_active, display_name: accounts
--- are managed by the CLI.
-GRANT UPDATE (last_login_at, updated_at) ON users TO ai_smm_cc_rw;
-
--- auth.login, auth.login_failed, auth.logout. Without id and at: the API
--- cannot choose an entry's id or backdate it. No UPDATE, no DELETE.
+-- Business audit entries only (SMM-025D guard: as the bound user, business
+-- actions only; sign-in audit is smm-auth's). Without id, at and
+-- written_by: the API cannot choose an entry's id, backdate it, or claim
+-- another writer. No UPDATE, no DELETE.
 GRANT INSERT (actor, action, subject, details) ON audit_log TO ai_smm_cc_rw;
 
 DO $sequence$
@@ -271,6 +290,22 @@ BEGIN
     );
 END
 $business_sequence$;
+
+-- SMM-025D: the guard functions this role calls, directly or from a guard
+-- trigger that runs as it (ai_smm.db.guards). Their bodies run as the
+-- table owner where they read or write what this role may not -- the
+-- session table, mutation_contexts, approval_grants -- so EXECUTE is all
+-- it gets. Never guard_token_digest; never a trigger function (those are
+-- not callable); nothing else in the schema.
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM ai_smm_cc_rw;
+GRANT EXECUTE ON FUNCTION
+    public.guard_bind_session(text),
+    public.guard_context_user(),
+    public.guard_context_session(),
+    public.guard_require_owner(text, text),
+    public.guard_publication_problem(bigint),
+    public.guard_consume_approval_grant(uuid, uuid, uuid)
+TO ai_smm_cc_rw;
 
 -- Fail closed on what this file cannot grant away: a privilege that
 -- ai_smm_cc_rw receives through PUBLIC. CREATE on schema public is granted
