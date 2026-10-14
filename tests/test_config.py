@@ -259,3 +259,27 @@ def test_media_root_override_resolves_container_paths(
 
     assert len(resolved) == 1
     assert Path(resolved[0]["path"]).is_file()
+
+
+def test_auth_allowed_peers_default_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AI_SMM_AUTH_ALLOWED_PEERS", raising=False)
+
+    assert load_settings().auth_allowed_peers == ()
+
+
+def test_auth_allowed_peers_are_networks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_SMM_AUTH_ALLOWED_PEERS", "10.231.18.0/29, 127.0.0.1/32")
+
+    assert load_settings().auth_allowed_peers == ("10.231.18.0/29", "127.0.0.1/32")
+
+
+@pytest.mark.parametrize("value", ["10.231.18.1/29", "smm-web", "10.231.18.0/33"])
+def test_auth_allowed_peers_refuse_anything_else(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """A host address with a prefix, a name or a typo is refused, not widened."""
+
+    monkeypatch.setenv("AI_SMM_AUTH_ALLOWED_PEERS", value)
+
+    with pytest.raises(ValueError, match="AI_SMM_AUTH_ALLOWED_PEERS"):
+        load_settings()

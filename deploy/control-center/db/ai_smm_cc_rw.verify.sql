@@ -26,6 +26,15 @@ role AS (
       FROM pg_roles r
      WHERE r.rolname = 'ai_smm_cc_rw'
 ),
+-- SMM-025D: the guard functions this role may execute (ai_smm.db.guards).
+guard_functions(signature) AS (
+    VALUES ('guard_bind_session(text)'),
+           ('guard_context_user()'),
+           ('guard_context_session()'),
+           ('guard_require_owner(text,text)'),
+           ('guard_publication_problem(bigint)'),
+           ('guard_consume_approval_grant(uuid,uuid,uuid)')
+),
 -- The designed matrix. Anything not listed here must be false.
 table_grants(relname, privilege) AS (
     VALUES
@@ -35,23 +44,22 @@ table_grants(relname, privilege) AS (
         ('content_items', 'SELECT'), ('content_revisions', 'SELECT'),
         ('content_approvals', 'SELECT'),
         ('content_publication_links', 'SELECT'),
-        ('audit_log', 'SELECT'), ('users', 'SELECT'),
+        ('audit_log', 'SELECT'),
         ('user_sessions', 'SELECT'),
         ('social_accounts', 'SELECT')
 ),
 column_grants(relname, attname, privilege) AS (
     VALUES
-        ('user_sessions', 'id', 'INSERT'),
-        ('user_sessions', 'user_id', 'INSERT'),
-        ('user_sessions', 'token_hash', 'INSERT'),
-        ('user_sessions', 'expires_at', 'INSERT'),
-        ('user_sessions', 'last_seen_at', 'INSERT'),
-        ('user_sessions', 'created_at', 'INSERT'),
-        ('user_sessions', 'revoked_at', 'INSERT'),
+        -- G2 (SMM-025D): sessions are smm-auth's; the read check only
+        -- advances last_seen_at. users column by column, no password_hash.
         ('user_sessions', 'last_seen_at', 'UPDATE'),
-        ('user_sessions', 'revoked_at', 'UPDATE'),
-        ('users', 'last_login_at', 'UPDATE'),
-        ('users', 'updated_at', 'UPDATE'),
+        ('users', 'id', 'SELECT'),
+        ('users', 'email', 'SELECT'),
+        ('users', 'display_name', 'SELECT'),
+        ('users', 'is_active', 'SELECT'),
+        ('users', 'last_login_at', 'SELECT'),
+        ('users', 'created_at', 'SELECT'),
+        ('users', 'updated_at', 'SELECT'),
         ('audit_log', 'actor', 'INSERT'),
         ('audit_log', 'action', 'INSERT'),
         ('audit_log', 'subject', 'INSERT'),
@@ -384,6 +392,31 @@ checks(status, name, detail) AS (
      CROSS JOIN (VALUES ('USAGE'), ('SELECT'), ('UPDATE')) AS p(privilege)
      WHERE s.relnamespace = 'public'::regnamespace AND s.relkind = 'S'
        AND EXISTS (SELECT 1 FROM role)
+
+    -- SMM-025D: every function of the application owner in schema public
+    -- (trigger functions cannot be called, so they are not listed):
+    -- EXECUTE on exactly the guard functions this role calls
+    UNION ALL
+    SELECT CASE WHEN has_function_privilege('ai_smm_cc_rw', p.oid, 'EXECUTE')
+                     = (p.oid::regprocedure::text IN (SELECT signature FROM guard_functions))
+                THEN 'PASS' ELSE 'FAIL' END,
+           format('function.%s.execute', p.proname),
+           CASE WHEN p.oid::regprocedure::text IN (SELECT signature FROM guard_functions)
+                THEN 'granted' ELSE 'denied' END
+      FROM pg_proc p
+     WHERE p.pronamespace = 'public'::regnamespace
+       AND p.prokind = 'f'
+       AND p.prorettype <> 'trigger'::regtype
+       AND p.proowner = (SELECT c.relowner FROM pg_class c
+                          WHERE c.oid = 'public.publications'::regclass)
+       AND EXISTS (SELECT 1 FROM role)
+
+    -- each of them exists (a dropped guard would otherwise just look "denied")
+    UNION ALL
+    SELECT CASE WHEN to_regprocedure(g.signature) IS NOT NULL
+                THEN 'PASS' ELSE 'FAIL' END,
+           format('matrix.function.%s', split_part(g.signature, '(', 1)), 'function present'
+      FROM guard_functions g
 
     -- every designed grant names a table that exists (a renamed table would
     -- otherwise just look "denied")

@@ -76,7 +76,12 @@ BEGIN
     END IF;
 
     SELECT array_agg(t) INTO missing
-      FROM unnest(ARRAY['users', 'user_sessions', 'audit_log']) AS t
+      FROM unnest(ARRAY['users', 'user_sessions', 'audit_log',
+                        -- the step-up approval (SMM-025D): migrate to
+                        -- c4d81e2a9f63 before this file is run
+                        'project_memberships', 'content_items',
+                        'content_revisions', 'social_accounts',
+                        'approval_grants']) AS t
      WHERE to_regclass(format('public.%I', t)) IS NULL;
 
     IF missing IS NOT NULL THEN
@@ -190,7 +195,13 @@ BEGIN
               ('table', 'public.audit_log', 'SELECT'),
               ('table', 'public.audit_log', 'INSERT'),
               -- audit_log.id's default: nextval()
-              ('sequence', pg_get_serial_sequence('public.audit_log', 'id'), 'USAGE')
+              ('sequence', pg_get_serial_sequence('public.audit_log', 'id'), 'USAGE'),
+              -- approval_preview / approval_grant_issue (SMM-025D)
+              ('table', 'public.project_memberships', 'SELECT'),
+              ('table', 'public.content_items', 'SELECT'),
+              ('table', 'public.content_revisions', 'SELECT'),
+              ('table', 'public.social_accounts', 'SELECT'),
+              ('table', 'public.approval_grants', 'INSERT')
            ) AS e(kind, obj, priv)
      WHERE NOT CASE e.kind
                WHEN 'schema' THEN has_schema_privilege(owner_role, e.obj, e.priv)
@@ -245,7 +256,9 @@ BEGIN
                      'smm_auth.session_resolve(text)',
                      'smm_auth.session_revoke(text)',
                      'smm_auth.record_login_failure(text)',
-                     'smm_auth.recent_login_failures(text)')
+                     'smm_auth.recent_login_failures(text)',
+                     'smm_auth.approval_preview(text,uuid)',
+                     'smm_auth.approval_grant_issue(text,uuid)')
               UNION ALL
               SELECT c.oid::regclass::text
                 FROM pg_class c WHERE c.relnamespace = 'smm_auth'::regnamespace
@@ -567,6 +580,181 @@ BEGIN
 END
 $recent_login_failures$;
 
+-- -- the step-up approval (SMM-025D) ------------------------------------------
+--
+-- An approval by the business-mutation role consumes a grant
+-- (public.approval_grants, ai_smm.db.guards). Only these functions issue
+-- one, and only smm-auth may call them -- after it has re-checked the
+-- owner's password for this very approval. The API process never sees that
+-- password, so a compromised API cannot approve, even with the owner's
+-- cookie. The preview is what the owner confirms: read here, from the
+-- database, not from the API.
+
+-- What approving this revision would publish, and where. For the session's
+-- user only if they own the project; otherwise no row, as for a revision
+-- that does not exist. Writes nothing.
+CREATE OR REPLACE FUNCTION smm_auth.approval_preview(p_token text, p_revision_id uuid)
+RETURNS TABLE (
+    content_item_id uuid,
+    project_id text,
+    revision_number integer,
+    is_current boolean,
+    item_status text,
+    title text,
+    body text,
+    format text,
+    images jsonb,
+    items jsonb,
+    content_hash text,
+    social_account_id uuid,
+    account_display_name text,
+    account_external_username text,
+    account_ready boolean
+)
+LANGUAGE plpgsql
+STABLE STRICT
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $approval_preview$
+DECLARE
+    v_hash text := smm_auth.token_digest(p_token);
+    v_user uuid;
+BEGIN
+    SELECT s.user_id INTO v_user
+      FROM public.user_sessions AS s
+      JOIN public.users AS u ON u.id = s.user_id
+     WHERE s.token_hash = v_hash
+       AND s.revoked_at IS NULL
+       AND s.expires_at > now()
+       AND s.last_seen_at + interval '24 hours' > now()
+       AND u.is_active
+       AND s.created_at <= now() + interval '60 seconds'
+       AND s.last_seen_at <= now() + interval '60 seconds'
+       AND s.last_seen_at >= s.created_at - interval '60 seconds'
+       AND s.expires_at - s.created_at <= interval '7 days 60 seconds';
+
+    IF v_user IS NULL THEN
+        RETURN;
+    END IF;
+
+    RETURN QUERY
+    SELECT i.id, i.project_id::text, r.revision_number,
+           r.id = i.current_revision_id, i.status::text,
+           coalesce(nullif(r.title, ''), i.title)::text, r.body, r.format::text,
+           r.images, r.items, r.content_hash::text, r.social_account_id,
+           a.display_name::text, a.external_username::text,
+           (a.id IS NOT NULL AND a.status = 'active'
+            AND a.external_account_id IS NOT NULL
+            AND a.project_id = i.project_id)
+      FROM public.content_revisions AS r
+      JOIN public.content_items AS i ON i.id = r.content_item_id
+      LEFT JOIN public.social_accounts AS a ON a.id = r.social_account_id
+     WHERE r.id = p_revision_id
+       AND EXISTS (SELECT 1 FROM public.project_memberships AS m
+                    WHERE m.project_id = i.project_id
+                      AND m.user_id = v_user
+                      AND m.role = 'owner');
+END
+$approval_preview$;
+
+-- Issue the step-up grant for one approval of exactly this revision, by
+-- this session's user, valid for five minutes. smm-auth calls it only
+-- after the user re-entered their password. The revision must be the
+-- item's current one, under review; its destination, if any, an active
+-- account of the project with a bound identity, which the grant pins. A
+-- user who does not own the project, or an unknown revision, gets no row.
+-- Writes the grant and content.approval_confirmed, in one transaction.
+CREATE OR REPLACE FUNCTION smm_auth.approval_grant_issue(p_token text, p_revision_id uuid)
+RETURNS TABLE (grant_id uuid, expires_at timestamptz)
+LANGUAGE plpgsql
+VOLATILE STRICT
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $approval_grant_issue$
+DECLARE
+    v_hash text := smm_auth.token_digest(p_token);
+    v_user uuid;
+    v_session uuid;
+    v_item public.content_items%ROWTYPE;
+    v_revision public.content_revisions%ROWTYPE;
+    v_identity text;
+    v_grant uuid := gen_random_uuid();
+    v_expires timestamptz := now() + interval '5 minutes';
+BEGIN
+    SELECT s.id, s.user_id INTO v_session, v_user
+      FROM public.user_sessions AS s
+      JOIN public.users AS u ON u.id = s.user_id
+     WHERE s.token_hash = v_hash
+       AND s.revoked_at IS NULL
+       AND s.expires_at > now()
+       AND s.last_seen_at + interval '24 hours' > now()
+       AND u.is_active
+       AND s.created_at <= now() + interval '60 seconds'
+       AND s.last_seen_at <= now() + interval '60 seconds'
+       AND s.last_seen_at >= s.created_at - interval '60 seconds'
+       AND s.expires_at - s.created_at <= interval '7 days 60 seconds';
+
+    IF v_user IS NULL THEN
+        RETURN;
+    END IF;
+
+    SELECT * INTO v_revision FROM public.content_revisions WHERE id = p_revision_id;
+
+    IF NOT FOUND THEN
+        RETURN;
+    END IF;
+
+    SELECT * INTO v_item FROM public.content_items WHERE id = v_revision.content_item_id;
+
+    IF NOT EXISTS (SELECT 1 FROM public.project_memberships AS m
+                    WHERE m.project_id = v_item.project_id
+                      AND m.user_id = v_user
+                      AND m.role = 'owner') THEN
+        RETURN;
+    END IF;
+
+    IF v_item.current_revision_id IS DISTINCT FROM v_revision.id
+       OR v_item.status <> 'in_review' THEN
+        RAISE EXCEPTION 'smm_auth: only the current revision under review can be confirmed'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+    END IF;
+
+    IF v_revision.social_account_id IS NOT NULL THEN
+        SELECT a.external_account_id INTO v_identity
+          FROM public.social_accounts AS a
+         WHERE a.id = v_revision.social_account_id
+           AND a.project_id = v_item.project_id
+           AND a.status = 'active';
+
+        IF v_identity IS NULL THEN
+            RAISE EXCEPTION 'smm_auth: the destination account is not ready to publish'
+                USING ERRCODE = 'object_not_in_prerequisite_state';
+        END IF;
+    END IF;
+
+    INSERT INTO public.approval_grants
+           (id, user_id, session_id, content_item_id, revision_id,
+            social_account_id, external_account_id, content_hash,
+            created_at, expires_at)
+    VALUES (v_grant, v_user, v_session, v_item.id, v_revision.id,
+            v_revision.social_account_id, v_identity, v_revision.content_hash,
+            now(), v_expires);
+
+    INSERT INTO public.audit_log (actor, action, subject, details)
+    VALUES ('user:' || v_user::text, 'content.approval_confirmed',
+            'content_item:' || v_item.id::text,
+            jsonb_build_object('revision_id', v_revision.id::text,
+                               'grant_id', v_grant::text,
+                               'content_hash', v_revision.content_hash,
+                               'social_account_id', v_revision.social_account_id::text));
+
+    grant_id := v_grant;
+    expires_at := v_expires;
+
+    RETURN NEXT;
+END
+$approval_grant_issue$;
+
 COMMENT ON FUNCTION smm_auth.token_digest(text) IS
     'Internal: hex(sha256) of a well-formed session token. Owner only.';
 COMMENT ON FUNCTION smm_auth.failure_subject(text) IS
@@ -581,6 +769,10 @@ COMMENT ON FUNCTION smm_auth.record_login_failure(text) IS
     'Write auth.login_failed and return the recent failures for the address. EXECUTE: ai_smm_auth.';
 COMMENT ON FUNCTION smm_auth.recent_login_failures(text) IS
     'Recent failed logins for an address. EXECUTE: ai_smm_auth.';
+COMMENT ON FUNCTION smm_auth.approval_preview(text, uuid) IS
+    'What approving a revision would publish, and where; owner only. EXECUTE: ai_smm_auth.';
+COMMENT ON FUNCTION smm_auth.approval_grant_issue(text, uuid) IS
+    'Issue a 5-minute step-up grant for one approval, after the password re-check. EXECUTE: ai_smm_auth.';
 
 -- Owner, and nothing for PUBLIC. A function created by this (superuser)
 -- session is owned by it until reassigned here; PostgreSQL's default
@@ -608,7 +800,7 @@ $owner$;
 
 -- Fail closed on what this file cannot see coming: default privileges or
 -- earlier grants that hand the schema or a helper to someone else. The
--- only grantee besides the owner may be ai_smm_auth, and only on the five
+-- only grantee besides the owner may be ai_smm_auth, and only on the seven
 -- contracts (a re-run after ai_smm_auth.grants.sql).
 DO $postcheck$
 DECLARE
@@ -652,7 +844,7 @@ BEGIN
     END IF;
 
     -- The definer functions call the helpers as the owner: the owner must
-    -- be able to use the schema and execute all seven functions.
+    -- be able to use the schema and execute all nine functions.
     IF NOT has_schema_privilege(owner_oid, 'smm_auth', 'USAGE')
        OR EXISTS (
            SELECT 1 FROM pg_proc p
@@ -661,7 +853,7 @@ BEGIN
                    OR NOT has_function_privilege(owner_oid, p.oid, 'EXECUTE'))
        )
        OR (SELECT count(*) FROM pg_proc p
-            WHERE p.pronamespace = 'smm_auth'::regnamespace) <> 7
+            WHERE p.pronamespace = 'smm_auth'::regnamespace) <> 9
     THEN
         RAISE EXCEPTION 'smm_auth: the owner cannot use the schema or execute every function in it';
     END IF;

@@ -65,6 +65,13 @@ CONTRACTS = {
     "smm_auth.session_revoke(text)": "SELECT * FROM smm_auth.session_revoke(%s)",
     "smm_auth.record_login_failure(text)": "SELECT smm_auth.record_login_failure(%s)",
     "smm_auth.recent_login_failures(text)": "SELECT smm_auth.recent_login_failures(%s)",
+    # SMM-025D: the step-up approval
+    "smm_auth.approval_preview(text,uuid)": (
+        "SELECT * FROM smm_auth.approval_preview(%s, %s)"
+    ),
+    "smm_auth.approval_grant_issue(text,uuid)": (
+        "SELECT * FROM smm_auth.approval_grant_issue(%s, %s)"
+    ),
 }
 #: Internal helpers: the owner only.
 HELPERS = {
@@ -90,6 +97,9 @@ BUSINESS_TABLES = (
 def _args_for(signature: str, user_id: UUID) -> tuple:
     if signature.endswith("(uuid,text)"):
         return (user_id, generate_token())
+
+    if signature.endswith("(text,uuid)"):
+        return (generate_token(), uuid4())
 
     if "login_failure" in signature or "failure_subject" in signature:
         return ("someone@example.com",)
@@ -516,6 +526,7 @@ def test_on_a_migrated_database_alembic_and_the_schema_are_untouched(
             pg_roles.run_script(admin_url, pg_roles.AUTH_DROP_SQL)
 
         # The owner's migrations are not hindered by the new schema.
+        monkeypatch.setenv("AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS", "yes")
         command.downgrade(_alembic_config(owner_url), "-1")
         command.upgrade(_alembic_config(owner_url), "head")
         pg_roles.run_script(admin_url, pg_roles.GRANTS_SQL)
@@ -620,6 +631,8 @@ def test_the_caller_cannot_supply_timestamps_expiry_or_actor(auth_stack, admin) 
     }
 
     assert inputs == {
+        "smm_auth.approval_grant_issue(text,uuid)": ["p_token", "p_revision_id"],
+        "smm_auth.approval_preview(text,uuid)": ["p_token", "p_revision_id"],
         "smm_auth.recent_login_failures(text)": ["p_email"],
         "smm_auth.record_login_failure(text)": ["p_email"],
         "smm_auth.session_create(uuid,text)": ["p_user_id", "p_token"],
@@ -744,7 +757,7 @@ def cc_session(restricted_session_factory: sessionmaker[Session]) -> Iterator[Se
 
 
 def test_a_session_made_by_sql_is_the_apis_and_the_reverse(
-    auth, admin, user, cc_session: Session, settings: Settings
+    auth, admin, user, cc_session: Session, session: Session, settings: Settings
 ) -> None:
     # SQL-created -> accepted by the API's resolve_session (as ai_smm_cc).
     sql_token = generate_token()
@@ -755,12 +768,12 @@ def test_a_session_made_by_sql_is_the_apis_and_the_reverse(
     assert resolved is not None and resolved.session.id == sql_session_id
     cc_session.rollback()
 
-    # API-created (as ai_smm_cc, G1) -> accepted by session_resolve.
-    api_user = cc_session.get(type(resolved.user), user.id)
-    api_session, api_token = create_session(
-        cc_session, user=api_user, settings=settings
-    )
-    cc_session.commit()
+    # Python-created (as a release before smm-auth made it, and as the
+    # owner's tooling still can; G2 took this from ai_smm_cc) -> accepted
+    # by session_resolve.
+    api_user = session.get(type(resolved.user), user.id)
+    api_session, api_token = create_session(session, user=api_user, settings=settings)
+    session.commit()
 
     assert _resolve(auth, api_token) == [
         (api_session.id, user.id, api_session.expires_at)
@@ -771,9 +784,9 @@ def test_a_session_made_by_sql_is_the_apis_and_the_reverse(
     assert resolve_session(cc_session, token=sql_token, settings=settings) is None
     cc_session.rollback()
 
-    row = cc_session.get(UserSession, api_session.id)
+    row = session.get(UserSession, api_session.id)
     revoke_session(row)
-    cc_session.commit()
+    session.commit()
 
     assert _resolve(auth, api_token) == []
 
@@ -1427,8 +1440,8 @@ def test_no_committed_state_lets_public_execute(scratch: Scratch) -> None:
     counts = {count for count, _ in seen}
 
     # The watcher saw the functions (after the first commit), never a part.
-    assert 7 in counts
-    assert counts <= {0, 7}
+    assert 9 in counts
+    assert counts <= {0, 9}
     assert not any(public for _, public in seen)
 
 

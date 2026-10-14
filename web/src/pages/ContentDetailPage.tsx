@@ -29,6 +29,8 @@ import {
   type RevisionDraft,
 } from "../features/content/RevisionForm";
 import {
+  stepUpPassword,
+  useApprovalPreview,
   useApprovals,
   useContentCommands,
   useContentItem,
@@ -44,6 +46,7 @@ import {
 import { formatDateTime } from "../lib/time";
 import type {
   Approval,
+  ApprovalPreview,
   ContentItemDetail,
   MaterializeResult,
   Revision,
@@ -124,8 +127,12 @@ export function ContentDetailPage() {
   const [editing, setEditing] = useState<{ baseVersion: number; base: Revision } | null>(null);
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [note, setNote] = useState("");
+  // The owner's password for the approval's step-up: held only while the
+  // dialog is open, cleared the moment it is sent (or the dialog closes).
+  const [password, setPassword] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [lastMaterialize, setLastMaterialize] = useState<MaterializeResult | null>(null);
+  const preview = useApprovalPreview(dialog?.kind === "approve" ? dialog.revision.id : null);
 
   const tz = project.data?.default_timezone;
 
@@ -165,8 +172,14 @@ export function ContentDetailPage() {
     return true;
   };
 
+  const closeDialog = () => {
+    setPassword("");
+    setDialog(null);
+  };
+
   const openDialog = (kind: DialogKind) => {
     setNote("");
+    setPassword("");
     setNotice(null);
     setLastMaterialize(null);
     Object.values(commands).forEach((m) => m.reset());
@@ -198,6 +211,18 @@ export function ContentDetailPage() {
 
     if (kind === "materialize") {
       commands.materialize.mutate(revision.id, options);
+    } else if (kind === "approve") {
+      commands.approve.mutate(
+        {
+          revision_id: revision.id,
+          expected_item_version: itemVersion,
+          ...(note.trim() ? { note: note.trim() } : {}),
+          password: stepUpPassword(password),
+        },
+        options,
+      );
+      // A failed confirmation asks for the password again.
+      setPassword("");
     } else {
       decisionMutations[kind].mutate(
         {
@@ -211,6 +236,14 @@ export function ContentDetailPage() {
   };
 
   const activeMutation = dialog ? mutationFor(dialog.kind) : null;
+  // An approval is confirmed only against smm-auth's own reading of the
+  // revision: the same revision, the same content, still current and under
+  // review. Otherwise the button stays disabled.
+  const previewMatches =
+    dialog?.kind !== "approve" ||
+    (preview.data !== undefined && previewAgrees(preview.data, dialog.revision));
+  const confirmDisabled =
+    dialog?.kind === "approve" && (!previewMatches || password === "");
   // Errors already turned into a page notice are not repeated in the dialog.
   const dialogError =
     activeMutation?.error && !notice ? activeMutation.error : null;
@@ -337,7 +370,7 @@ export function ContentDetailPage() {
           <Card title="Delivery">
             <p className="muted small">
               Материализация создаёт неизменяемый delivery snapshot (Publication в статусе
-              approved). Ставит в очередь только admin; публикует только worker.
+              approved). Ставит в очередь только owner; публикует только worker.
             </p>
             {lastMaterialize ? (
               <p>
@@ -378,15 +411,29 @@ export function ContentDetailPage() {
           danger={dialog.kind === "reject"}
           pending={activeMutation?.isPending}
           error={dialogError}
-          onCancel={() => setDialog(null)}
+          confirmDisabled={confirmDisabled}
+          onCancel={closeDialog}
           onConfirm={confirm}
         >
-          <DialogBody
-            dialog={dialog}
-            platform={project.data?.default_platform}
-            note={note}
-            onNote={setNote}
-          />
+          {dialog.kind === "approve" ? (
+            <StepUpBody
+              revision={dialog.revision}
+              preview={preview.data}
+              previewError={preview.error}
+              previewPending={preview.isPending}
+              password={password}
+              onPassword={setPassword}
+              note={note}
+              onNote={setNote}
+            />
+          ) : (
+            <DialogBody
+              dialog={dialog}
+              platform={project.data?.default_platform}
+              note={note}
+              onNote={setNote}
+            />
+          )}
         </ConfirmDialog>
       ) : null}
     </>
@@ -470,9 +517,6 @@ function DialogBody({
           очередь.
         </p>
       ) : null}
-      {kind === "approve" ? (
-        <p className="small">Вы одобряете именно этот текст. Новая ревизия отменит одобрение.</p>
-      ) : null}
       <SnapshotView
         title={revision.title}
         body={revision.body}
@@ -480,7 +524,7 @@ function DialogBody({
         images={revision.images}
         items={revision.items}
       />
-      {kind === "reject" || kind === "approve" || kind === "submit" ? (
+      {kind === "reject" || kind === "submit" ? (
         <label>
           Note {kind === "reject" ? "(optional, reason)" : "(optional)"}
           <textarea
@@ -492,6 +536,116 @@ function DialogBody({
           />
         </label>
       ) : null}
+    </>
+  );
+}
+
+/** smm-auth's reading of the revision is the one the dialog shows. */
+function previewAgrees(preview: ApprovalPreview, revision: Revision): boolean {
+  return (
+    preview.revision_id === revision.id &&
+    preview.content_hash === revision.content_hash &&
+    preview.is_current &&
+    preview.item_status === "in_review"
+  );
+}
+
+/**
+ * The approval dialog (SMM-025D): what will be published and where, as
+ * the sign-in service reads it from the database -- not as this page has
+ * it -- and the owner's password, which smm-auth checks before it issues
+ * the one-use grant the approval consumes.
+ */
+function StepUpBody({
+  revision,
+  preview,
+  previewError,
+  previewPending,
+  password,
+  onPassword,
+  note,
+  onNote,
+}: {
+  revision: Revision;
+  preview: ApprovalPreview | undefined;
+  previewError: unknown;
+  previewPending: boolean;
+  password: string;
+  onPassword: (value: string) => void;
+  note: string;
+  onNote: (value: string) => void;
+}) {
+  if (previewPending) return <Loading />;
+
+  if (previewError || !preview) {
+    return (
+      <>
+        <p className="small">
+          Сервис входа не подтвердил, что именно будет одобрено. Одобрение невозможно.
+        </p>
+        <ErrorBanner error={previewError} />
+      </>
+    );
+  }
+
+  const agrees = previewAgrees(preview, revision);
+  const destination =
+    preview.social_account_id === null
+      ? "аккаунт развёртывания (legacy)"
+      : `${preview.account_display_name ?? preview.social_account_id}${
+          preview.account_external_username ? ` (@${preview.account_external_username})` : ""
+        }${preview.account_ready === false ? " — не готов к публикации" : ""}`;
+
+  return (
+    <>
+      <KeyValues
+        rows={[
+          ["revision", `#${preview.revision_number}`],
+          ["revision_id", <code key="r">{preview.revision_id}</code>],
+          ["content_hash", <code key="h">{preview.content_hash.slice(0, 16)}…</code>],
+          ["Аккаунт публикации", <strong key="d">{destination}</strong>],
+        ]}
+      />
+      {agrees ? (
+        <p className="small">
+          Вы одобряете именно этот текст для этого аккаунта. Новая ревизия или смена аккаунта
+          отменит одобрение.
+        </p>
+      ) : (
+        <div className="banner banner-warn" role="alert">
+          Ревизия изменилась или больше не на ревью: сервис входа видит другое содержимое.
+          Закройте окно и обновите страницу.
+        </div>
+      )}
+      <SnapshotView
+        title={preview.title}
+        body={preview.body}
+        format={preview.format}
+        images={preview.images}
+        items={preview.items}
+      />
+      <label>
+        Note (optional)
+        <textarea
+          rows={2}
+          maxLength={2000}
+          value={note}
+          onChange={(e) => onNote(e.target.value)}
+          aria-label="Decision note"
+        />
+      </label>
+      <label>
+        Пароль владельца (подтверждение одобрения)
+        <input
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          maxLength={1024}
+          onChange={(e) => onPassword(e.target.value)}
+          aria-label="Password to confirm the approval"
+          disabled={!agrees}
+        />
+      </label>
     </>
   );
 }
@@ -741,7 +895,7 @@ function NoticeBanner({ notice, onReload }: { notice: Notice; onReload: () => vo
             ]}
           />
           <p className="small">
-            Сначала явно отмените прежний delivery snapshot (admin+), затем снова нажмите
+            Сначала явно отмените прежний delivery snapshot (owner), затем снова нажмите
             «Подготовить публикацию». Автоматической отмены нет.
           </p>
           <div className="banner-actions">
@@ -763,7 +917,7 @@ function MaterializedBanner({ result }: { result: MaterializeResult }) {
         Publication #{result.publication.id}
       </Link>{" "}
       · platform {result.platform} · status <StatusBadge status={result.publication.status} />.
-      Не опубликовано и не в очереди — постановку делает admin.
+      Не опубликовано и не в очереди — постановку делает owner.
     </div>
   );
 }

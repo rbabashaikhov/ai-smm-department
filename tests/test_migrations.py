@@ -18,6 +18,15 @@ from tests.conftest import drop_scratch_database
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _downgrades_past_the_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise older revisions, so they downgrade through
+    c4d81e2a9f63, which refuses without its switch. Its own refusal is
+    tested in tests/test_migration_guards.py."""
+
+    monkeypatch.setenv("AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS", "yes")
+
+
 def _alembic_config(url: str) -> Config:
     config = Config(str(PROJECT_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
@@ -377,6 +386,8 @@ def test_a_session_token_hash_column_is_not_the_token(
 CONTROL_PLANE_HEAD = "2964ac9ceea7"
 EDITORIAL_REVISION = "3d4ac1986f07"
 SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
+#: The head: SMM-025D's business-mutation guards.
+GUARDS_REVISION = "c4d81e2a9f63"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",
@@ -819,7 +830,7 @@ def test_a_lock_timeout_rolls_back_every_pending_revision(
         with engine.connect() as connection:
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == SOCIAL_ACCOUNTS_REVISION
+                == GUARDS_REVISION
             )
     finally:
         engine.dispose()

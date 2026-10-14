@@ -26,6 +26,7 @@ from tests.cc_stub import (
     FIXTURE_ENGINE,
     FIXTURE_NETWORK,
     FIXTURE_PG_CONTAINER,
+    FIXTURE_PUBLIC_KEY,
     FIXTURE_REVISION,
     FIXTURE_VERSION,
     ROOT,
@@ -123,7 +124,7 @@ ACCEPTED = [
     (
         ("up",),
         ["up", "--detach", "--wait", "--wait-timeout", "180", "--no-build",
-         "--pull", "never", "smm-api", "smm-web"],
+         "--pull", "never", "smm-api", "smm-auth", "smm-web"],
     ),
     (("down",), ["down"]),
     (("down", "--remove-orphans"), ["down", "--remove-orphans"]),
@@ -426,19 +427,52 @@ FILE_REFUSALS = {
         "symlink",
     ),
     "interp-project-name": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
-            f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
-            "COMPOSE_PROJECT_NAME=ai-smm\n"
-        ),
+        lambda d: _write_interp(d, extra="COMPOSE_PROJECT_NAME=ai-smm\n"),
         "must define exactly",
     ),
     "interp-export-syntax": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"export SMM_CC_VERSION={FIXTURE_VERSION}\n"
-            f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
-        ),
+        lambda d: _write_interp(d, prefix="export "),
         "not a KEY=value line",
+    ),
+    "interp-without-public-key": (
+        lambda d: _write_interp(d, SMM_CC_CREDENTIALS_PUBLIC_KEY=None),
+        "must define exactly",
+    ),
+    "interp-without-legacy-list": (
+        lambda d: _write_interp(d, SMM_CC_LEGACY_THREADS_PROJECTS=None),
+        "must define exactly",
+    ),
+    "public-key-empty": (
+        lambda d: _write_interp(d, SMM_CC_CREDENTIALS_PUBLIC_KEY=""),
+        "not the base64 of a 32-byte key",
+    ),
+    "public-key-short": (
+        lambda d: _write_interp(
+            d, SMM_CC_CREDENTIALS_PUBLIC_KEY=FIXTURE_PUBLIC_KEY[4:]
+        ),
+        "not the base64 of a 32-byte key",
+    ),
+    "public-key-pem": (
+        lambda d: _write_interp(
+            d, SMM_CC_CREDENTIALS_PUBLIC_KEY="-----BEGIN PRIVATE KEY-----"
+        ),
+        "not the base64 of a 32-byte key",
+    ),
+    "public-key-placeholder": (
+        lambda d: _write_interp(d, SMM_CC_CREDENTIALS_PUBLIC_KEY="A" * 43 + "="),
+        "placeholder",
+    ),
+    "legacy-list-spaces": (
+        lambda d: _write_interp(d, SMM_CC_LEGACY_THREADS_PROJECTS="a, b"),
+        "project ids separated by commas",
+    ),
+    "legacy-list-uppercase": (
+        lambda d: _write_interp(d, SMM_CC_LEGACY_THREADS_PROJECTS="AI-Catalog"),
+        "project ids separated by commas",
+    ),
+    "legacy-list-trailing-comma": (
+        lambda d: _write_interp(d, SMM_CC_LEGACY_THREADS_PROJECTS="a,"),
+        "project ids separated by commas",
     ),
     "version-latest": (
         lambda d: _set_version(d, "latest"), "full 40-hex commit",
@@ -453,15 +487,11 @@ FILE_REFUSALS = {
         lambda d: _set_version(d, FIXTURE_VERSION + "0"), "full 40-hex commit",
     ),
     "network-empty": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"SMM_CC_VERSION={FIXTURE_VERSION}\nSMM_CC_SHARED_NETWORK=\n"
-        ),
+        lambda d: _write_interp(d, SMM_CC_SHARED_NETWORK=""),
         "SMM_CC_SHARED_NETWORK is empty",
     ),
     "network-weird": (
-        lambda d: (d / "control-center.compose.env").write_text(
-            f"SMM_CC_VERSION={FIXTURE_VERSION}\nSMM_CC_SHARED_NETWORK=a b\n"
-        ),
+        lambda d: _write_interp(d, SMM_CC_SHARED_NETWORK="a b"),
         "not a network name",
     ),
     "target-missing": (
@@ -505,10 +535,30 @@ def _append(path: Path, text: str) -> None:
         handle.write(text)
 
 
-def _set_version(directory: Path, version: str) -> None:
+def _write_interp(
+    directory: Path, *, prefix: str = "", extra: str = "", **values: str | None
+) -> None:
+    """control-center.compose.env with every key; None leaves one out."""
+
+    keys = {
+        "SMM_CC_VERSION": FIXTURE_VERSION,
+        "SMM_CC_SHARED_NETWORK": FIXTURE_NETWORK,
+        "SMM_CC_CREDENTIALS_PUBLIC_KEY": FIXTURE_PUBLIC_KEY,
+        "SMM_CC_LEGACY_THREADS_PROJECTS": "",
+        **values,
+    }
     (directory / "control-center.compose.env").write_text(
-        f"SMM_CC_VERSION={version}\nSMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
+        "".join(
+            f"{prefix}{key}={value}\n"
+            for key, value in keys.items()
+            if value is not None
+        )
+        + extra
     )
+
+
+def _set_version(directory: Path, version: str) -> None:
+    _write_interp(directory, SMM_CC_VERSION=version)
 
 
 def _set_target(

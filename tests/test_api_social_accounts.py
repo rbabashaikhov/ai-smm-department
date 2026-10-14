@@ -46,17 +46,12 @@ def api(accounts_app):
 
 
 @pytest.fixture
-def sign_in(api, session: Session):
-    from tests.conftest import TEST_PASSWORD
-
+def sign_in(api, session: Session, open_session):
     def do(user) -> str:
-        response = api.post(
-            "/api/v1/auth/login", json={"email": user.email, "password": TEST_PASSWORD}
-        )
-        assert response.status_code == 200
+        csrf = open_session(api, user)
         session.expire_all()
 
-        return response.json()["csrf_token"]
+        return csrf
 
     return do
 
@@ -418,10 +413,14 @@ def test_a_second_active_credential_is_refused_by_the_database(
 
 
 def test_no_public_key_means_nothing_is_stored(
-    api_settings, api_session_factory, owner, identity_service, session: Session
+    api_settings,
+    api_session_factory,
+    owner,
+    identity_service,
+    session: Session,
+    open_session,
 ) -> None:
     from ai_smm.api.app import create_app
-    from tests.conftest import TEST_PASSWORD
 
     app = create_app(
         api_settings,
@@ -431,9 +430,7 @@ def test_no_public_key_means_nothing_is_stored(
     )
 
     with TestClient(app) as client:
-        csrf = client.post(
-            "/api/v1/auth/login", json={"email": owner.email, "password": TEST_PASSWORD}
-        ).json()["csrf_token"]
+        csrf = open_session(client, owner)
         account = _new_account(client, csrf)
         response = _put_token(client, csrf, account["id"], fake_token())
 

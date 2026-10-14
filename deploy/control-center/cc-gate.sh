@@ -44,6 +44,11 @@
 # reports no FAIL: the role has exactly the designed privileges, a SCRAM
 # password, no membership and owns nothing.
 #
+# Auth role (SMM-025D), before anything starts smm-auth: its URL, in
+# control-center.auth.env, names ai_smm_auth on the same host, port and
+# database, and is none of the other URLs; ai_smm_auth.verify.sql (pinned)
+# reports no FAIL: the role, every privilege, every smm_auth function body.
+#
 # Queue: nothing may be publishing, hold a lease, or become due -- first
 # attempt or retry -- from CC_QUEUE_MARGIN_MINUTES before the window
 # starts until CC_QUEUE_MARGIN_MINUTES after it ends; nothing may have
@@ -69,21 +74,30 @@ readonly CC_API_VERIFY_MIN_CHECKS=200
 # could print a passing answer; a compose file from another release -- the
 # 2026-10-11 one gives smm-api control-center.env -- would start the API
 # on the owner URL whatever control-center.api.env says.
-readonly CC_PINNED_COMPOSE_SHA256=f894a9be7e00e020b677adaf1d16af26ad63fa9d5b0086e2663f05bee5c82ac6
-readonly CC_PINNED_VERIFY_SHA256=8e5561c1255ba09951f457a7be371d21828749f8b36f20930c071f7b541a10cc
+readonly CC_PINNED_COMPOSE_SHA256=dc30a11525a5d56e4944d047de90fb660d2917b9a939ce7a2c62320067e1ac8b
+readonly CC_PINNED_VERIFY_SHA256=d086f99a7c8f077261f4f92b16cd4501cc16ecda04767b61e4057070ca8a96c3
 # Mutation mode (SMM-025C): the override that switches smm-api to the
 # mutation role, and the verify file of that role.
 readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
 readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
-readonly CC_PINNED_RW_VERIFY_SHA256=ff5e533dd7210d67633988a176a987d44aa81c1ab5b7a749ac0184a9b069d967
+readonly CC_PINNED_RW_VERIFY_SHA256=421806af8d2124811947b2c2523a3d46b2797e614ae5ada7965b7226e930bdfb
 # Whether THIS release may run business mutations at all. `no` in every
-# release until the owner has decided FU-025C-1 and closed FU-024C2-1,
-# FU-024C2-2, FU-025C-2 and FU-024C1-5 (docs/mutation-role.md §9): then a
-# reviewed release changes it. With `no`, `mutations enable` is refused
+# release until the owner has reviewed one that may: SMM-025D closes
+# FU-025C-1, FU-024C2-1, FU-024C2-2 and FU-025C-2 in code
+# (docs/adr/ADR-025D-database-enforced-mutation-safety.md); what remains
+# is the owner's review, the smm-auth rollout and the FU-024C1-5
+# checklist on this exact release in production. Then a reviewed release
+# changes it. With `no`, `mutations enable` is refused
 # before anything runs and a mode file is never honoured. Not an
 # environment switch on purpose: only a new, reviewed release lifts it.
+# The sign-in service (SMM-025D): its role's verify file, and how many
+# checks a complete run makes at the least (one per relation, column,
+# sequence and routine: about 950 on the 2026-10 schema).
+readonly CC_AUTH_VERIFY_FILE_NAME=ai_smm_auth.verify.sql
+readonly CC_AUTH_VERIFY_MIN_CHECKS=400
+readonly CC_PINNED_AUTH_VERIFY_SHA256=8c610b2d7773e2036b589036e0f29571c927630f4bbbeace3dff28706f07c805
 readonly CC_RELEASE_PERMITS_MUTATIONS=no
-readonly CC_MUTATIONS_BLOCKED_BY='FU-025C-1, FU-024C2-1, FU-024C2-2, FU-025C-2, FU-024C1-5'
+readonly CC_MUTATIONS_BLOCKED_BY='owner review of SMM-025D, smm-auth rollout (ADR-024C-3A P3-P6), FU-024C1-5 checklist on this release'
 
 readonly CC_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
 readonly CC_UTC_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
@@ -210,7 +224,7 @@ cc_pg_read() {
 # Requires CC_DSN (cc_load_secret), CC_DOCKER_HOST and a verified engine.
 cc_gate_identity() {
     local network="$1" state worker_env count worker_dsn line names matches=() id cid
-    local answer re sysid oid port db
+    local answer re sysid oid port db worker_legacy
 
     cc_load_identity
     cc_parse_dsn "$CC_DSN" "$CC_SECRET_FILE_NAME"
@@ -232,6 +246,15 @@ cc_gate_identity() {
     worker_dsn="$(sed -n 's/^AI_SMM_DATABASE_URL=//p' <<<"$worker_env")"
     [[ "$worker_dsn" == "$CC_DSN" ]] \
         || cc_gate_die "the database URL in $CC_SECRET_FILE_NAME differs from the running worker's (neither is printed)"
+
+    # FU-025C-2: the Control Center shows legacy publishing as the worker
+    # applies it -- the same allow-list, compared as sets.
+    count="$(grep -c '^AI_SMM_LEGACY_THREADS_PROJECTS=' <<<"$worker_env" || true)"
+    (( count <= 1 )) \
+        || cc_gate_die "the worker $CC_WORKER_CONTAINER defines AI_SMM_LEGACY_THREADS_PROJECTS $count times"
+    worker_legacy="$(cc_list_set "$(sed -n 's/^AI_SMM_LEGACY_THREADS_PROJECTS=//p' <<<"$worker_env")")"
+    [[ "$worker_legacy" == "$(cc_list_set "${CC_LEGACY_PROJECTS:-}")" ]] \
+        || cc_gate_die "SMM_CC_LEGACY_THREADS_PROJECTS ('${CC_LEGACY_PROJECTS:-}') differs from the running worker's AI_SMM_LEGACY_THREADS_PROJECTS ('$worker_legacy')"
 
     line="$(cc_container_on_network "$CC_WORKER_CONTAINER" "$network")"
     [[ "$line" == *" @on"* ]] \
@@ -287,6 +310,7 @@ cc_gate_identity() {
         || cc_gate_die "the instance listens on $port, the database URL uses $CC_DSN_PORT"
 
     echo "gate identity: PASS -- $CC_APP_DB (oid $oid) in $CC_PG_CONTAINER (${CC_PG_CONTAINER_ID:0:12}, system $sysid); worker $CC_WORKER_CONTAINER and $CC_SECRET_FILE_NAME use the same URL; '$CC_DSN_HOST' unique on $network"
+    echo "gate identity: legacy allow-list '${worker_legacy:-<none>}' as the worker's; credential public key id ${CC_PUBLIC_KEY_ID:-<unset>} (compare with the deployment record)"
 }
 
 # $1 is a regular file whose sha256 is exactly $2.
@@ -406,6 +430,91 @@ cc_gate_api_role() {
     done
 
     echo "gate api-role: PASS -- smm-api connects as $gate_role to $owner_host:$owner_port/$owner_db; $count checks, no FAIL"
+}
+
+# Requires cc_gate_identity to have passed in this process (CC_DSN_*,
+# CC_PG_CONTAINER, CC_PG_USER), CC_API_DSN and CC_AUTH_DSN
+# (cc_load_auth_secret); CC_RW_DSN too when it is loaded.
+#
+# smm-auth checks passwords and opens sessions: its URL must name
+# ai_smm_auth on the recorded host, port and database, and be none of the
+# owner's, the API's or the mutation role's -- a mix-up in either direction
+# would give a service the other one's rights.
+cc_gate_auth_role() {
+    local owner_host="$CC_DSN_HOST" owner_port="$CC_DSN_PORT" owner_db="$CC_DSN_DB"
+    local auth_user verify answer line last="" count=0 fails=() info=()
+    # Check names carry function signatures here: smm_auth.f(text,uuid).
+    local re='^(PASS|FAIL|INFO)\|[a-z0-9_.(),]+\|[^|]*$' required other
+
+    cc_require_pinned "$CC_DIR/$CC_COMPOSE_FILE_NAME" "$CC_PINNED_COMPOSE_SHA256"
+    cc_require_pinned "$CC_DIR/$CC_AUTH_VERIFY_FILE_NAME" "$CC_PINNED_AUTH_VERIFY_SHA256"
+
+    cc_parse_dsn "$CC_AUTH_DSN" "$CC_AUTH_SECRET_FILE_NAME"
+    auth_user="$(cc_dsn_user "$CC_AUTH_DSN")" \
+        || cc_gate_die "$CC_AUTH_SECRET_FILE_NAME: no user name in the database URL; it is not printed"
+
+    [[ "$CC_AUTH_DSN" =~ ^postgresql(\+[a-z0-9]+)?://[^:@/?#]+:[^@/?#]+@ ]] \
+        || cc_gate_die "$CC_AUTH_SECRET_FILE_NAME: the database URL carries no password; it is not printed"
+    [[ "$auth_user" == "$CC_AUTH_ROLE" ]] \
+        || cc_gate_die "$CC_AUTH_SECRET_FILE_NAME connects as '$auth_user', not the sign-in role $CC_AUTH_ROLE"
+
+    for other in "$CC_DSN" "$CC_API_DSN" "${CC_RW_DSN:-}"; do
+        [[ -z "$other" || "$CC_AUTH_DSN" != "$other" ]] \
+            || cc_gate_die "$CC_AUTH_SECRET_FILE_NAME holds the same URL as another service's file (none is printed)"
+        [[ -z "$other" || "$(cc_dsn_user "$other")" != "$CC_AUTH_ROLE" ]] \
+            || cc_gate_die "another service's file connects as $CC_AUTH_ROLE; only smm-auth may"
+    done
+
+    [[ "${CC_DSN_HOST,,}" == "${owner_host,,}" && "$CC_DSN_PORT" == "$owner_port" && "$CC_DSN_DB" == "$owner_db" ]] \
+        || cc_gate_die "$CC_AUTH_SECRET_FILE_NAME points at $CC_DSN_HOST:$CC_DSN_PORT/$CC_DSN_DB, not the recorded $owner_host:$owner_port/$owner_db"
+
+    # Restore the owner's values for anything that runs after this gate.
+    cc_parse_dsn "$CC_DSN" "$CC_SECRET_FILE_NAME"
+
+    verify="$CC_DIR/$CC_AUTH_VERIFY_FILE_NAME"
+
+    # Read-only, as the instance's superuser over the local socket; the
+    # sign-in role's password is never handled here.
+    answer="$(cc_pg_read "$CC_APP_DB" "$(cat "$verify")" 2>/dev/null)" \
+        || cc_gate_die "cannot run $CC_AUTH_VERIFY_FILE_NAME in $CC_APP_DB (database unreachable, or the query failed)"
+
+    while IFS= read -r line; do
+        [[ -z "$last" ]] || cc_gate_die "$CC_AUTH_VERIFY_FILE_NAME: output continues after the END line"
+
+        if [[ "$line" =~ ^END\|checks\|([0-9]+)$ ]]; then
+            last="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        [[ "$line" =~ $re ]] || cc_gate_die "$CC_AUTH_VERIFY_FILE_NAME: unexpected output line"
+        count=$((count + 1))
+
+        case "$line" in
+            FAIL\|*) fails+=("${line#FAIL|}") ;;
+            INFO\|*) info+=("${line#INFO|}") ;;
+        esac
+    done <<<"$answer"
+
+    [[ -n "$last" && "$last" == "$count" ]] \
+        || cc_gate_die "$CC_AUTH_VERIFY_FILE_NAME: incomplete output ($count checks, END reports '${last:-none}')"
+    (( count >= CC_AUTH_VERIFY_MIN_CHECKS )) \
+        || cc_gate_die "$CC_AUTH_VERIFY_FILE_NAME ran only $count checks; expected at least $CC_AUTH_VERIFY_MIN_CHECKS"
+    (( ${#fails[@]} == 0 )) \
+        || cc_gate_die "$CC_AUTH_ROLE is not as designed: ${fails[*]}"
+
+    for required in \
+        'PASS|role.exists|' 'PASS|role.attributes|' 'PASS|role.password|set, SCRAM-SHA-256' \
+        'PASS|role.member_of|none' 'PASS|role.owns_nothing|0 owned objects' \
+        'PASS|schema.public.create|' 'PASS|schema.smm_auth.objects|designed functions only'; do
+        [[ $'\n'"$answer" == *$'\n'"$required"* ]] \
+            || cc_gate_die "$CC_AUTH_VERIFY_FILE_NAME did not report '$required'"
+    done
+
+    for line in "${info[@]}"; do
+        echo "gate auth-role: INFO $line"
+    done
+
+    echo "gate auth-role: PASS -- smm-auth connects as $CC_AUTH_ROLE to $owner_host:$owner_port/$owner_db; $count checks, no FAIL"
 }
 
 # Requires cc_gate_identity to have passed in this process.

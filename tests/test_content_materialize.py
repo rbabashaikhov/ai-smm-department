@@ -86,7 +86,7 @@ def _content_publications(session: Session, item_id) -> list[Publication]:
 
 @pytest.fixture
 def editor_csrf(login, member) -> str:
-    return login(member(MembershipRole.EDITOR))
+    return login(member(MembershipRole.OWNER))
 
 
 @pytest.fixture
@@ -522,7 +522,8 @@ def test_a_materialised_publication_flows_through_the_existing_queue(
     approved_item,
     editor_csrf,
 ) -> None:
-    """materialise (editor) -> schedule (admin) -> claim (worker), unchanged."""
+    """materialise -> schedule -> claim (worker), unchanged; both commands
+    the owner's (SMM-025D)."""
 
     from ai_smm.queue import claim_due_publication
 
@@ -531,17 +532,18 @@ def test_a_materialised_publication_flows_through_the_existing_queue(
         "publication"
     ]["id"]
 
-    # The editor cannot schedule: that is still an admin command.
+    # Another member cannot schedule: that is the owner's command.
+    client.cookies.clear()
     editor_attempt = client.post(
         f"/api/v1/publications/{publication_id}/schedule",
         json={"scheduled_at": datetime.now(timezone.utc).isoformat()},
-        headers={"X-CSRF-Token": editor_csrf},
+        headers={"X-CSRF-Token": login(member(MembershipRole.EDITOR))},
     )
 
     assert editor_attempt.status_code == 403
 
     client.cookies.clear()
-    admin_csrf = login(member(MembershipRole.ADMIN))
+    admin_csrf = login(member(MembershipRole.OWNER))
     scheduled = client.post(
         f"/api/v1/publications/{publication_id}/schedule",
         json={

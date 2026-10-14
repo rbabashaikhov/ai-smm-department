@@ -22,8 +22,8 @@ from fastapi import APIRouter, Query, Response
 from ai_smm.api.dependencies import (
     AppSettings,
     DbSession,
-    EditorContentItem,
-    EditorProject,
+    OwnerContentItem,
+    OwnerProject,
     PageParams,
     ViewerContentItem,
     ViewerProject,
@@ -177,7 +177,7 @@ def list_approvals(
     summary="Create a content item with its first revision (editor+)",
 )
 def create_item(
-    payload: ContentItemCreate, db: DbSession, context: EditorProject
+    payload: ContentItemCreate, db: DbSession, context: OwnerProject
 ) -> ContentItemDetail:
     item, _ = _run(
         lambda: create_content_item(
@@ -200,7 +200,7 @@ def create_item(
     summary="Append a revision; the item returns to draft (editor+)",
 )
 def add_revision(
-    payload: RevisionCreate, db: DbSession, context: EditorContentItem
+    payload: RevisionCreate, db: DbSession, context: OwnerContentItem
 ) -> RevisionCreated:
     item, revision = _run(
         lambda: create_revision(
@@ -227,7 +227,7 @@ def submit(
     payload: RevisionDecisionIn,
     db: DbSession,
     settings: AppSettings,
-    context: EditorContentItem,
+    context: OwnerContentItem,
 ) -> ContentItemSummary:
     item = _run(
         lambda: submit_for_review(
@@ -251,7 +251,7 @@ def submit(
     summary="Approve exactly the named, current revision (editor+)",
 )
 def approve(
-    payload: RevisionDecisionIn, db: DbSession, context: EditorContentItem
+    payload: RevisionDecisionIn, db: DbSession, context: OwnerContentItem
 ) -> DecisionOut:
     item, approval = _run(
         lambda: approve_revision(
@@ -276,7 +276,7 @@ def approve(
     summary="Reject exactly the named, current revision (editor+)",
 )
 def reject(
-    payload: RevisionDecisionIn, db: DbSession, context: EditorContentItem
+    payload: RevisionDecisionIn, db: DbSession, context: OwnerContentItem
 ) -> DecisionOut:
     item, approval = _run(
         lambda: reject_revision(
@@ -308,7 +308,7 @@ def materialize(
     response: Response,
     db: DbSession,
     settings: AppSettings,
-    context: EditorContentItem,
+    context: OwnerContentItem,
 ) -> MaterializeOut:
     result = _run(
         lambda: materialize_approved_revision(

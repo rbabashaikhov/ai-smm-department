@@ -108,6 +108,36 @@ export interface LoginResponse {
   csrf_token: string;
 }
 
+/** What smm-auth says approving a revision would publish, and where
+ *  (GET /api/v1/auth/step-up/approvals/{revision_id}). Read from the
+ *  database by the sign-in service, not by the API. */
+export interface ApprovalPreview {
+  content_item_id: string;
+  project_id: string;
+  revision_id: string;
+  revision_number: number;
+  is_current: boolean;
+  item_status: ContentStatus;
+  /** The revision's title, or the item's when it has none. */
+  title: string;
+  body: string;
+  format: ContentFormat;
+  images: JsonObject[];
+  items: JsonObject[];
+  content_hash: string;
+  social_account_id: string | null;
+  account_display_name: string | null;
+  account_external_username: string | null;
+  account_ready: boolean | null;
+}
+
+/** A one-use, five-minute confirmation of one approval. */
+export interface StepUpGrant {
+  grant_id: string;
+  revision_id: string;
+  expires_at: string;
+}
+
 export interface CsrfResponse {
   csrf_token: string;
   header_name: string;

@@ -21,12 +21,13 @@ address.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, undefer
 
 from ai_smm.config import Settings
 from ai_smm.db.models import User, UserSession
@@ -88,7 +89,9 @@ def authenticate(
     """
 
     user = db.scalars(
-        select(User).where(User.email == email)
+        select(User)
+        .where(User.email == email)
+        .options(undefer(User.password_hash))
     ).one_or_none()
 
     if user is None:
@@ -248,6 +251,35 @@ def resolve_session(
         session=user_session,
         csrf_token=derive_csrf_token(token),
     )
+
+
+def bind_transaction_to_session(
+    db: Session, *, token: str | None
+) -> uuid.UUID | None:
+    """Bind the current transaction to the session behind `token`, in SQL.
+
+    Returns the user the database now considers this transaction to act
+    for, or None when PostgreSQL does not accept the session (unknown,
+    revoked, expired, idle, inactive user, malformed token). The raw token
+    goes to guard_bind_session only, which hashes it; it is never logged
+    (hide_parameters on the engine). SMM-025D, ai_smm.db.guards.
+    """
+
+    if not token:
+        return None
+
+    try:
+        with db.begin_nested():
+            return db.execute(
+                text("SELECT public.guard_bind_session(:token)"),
+                {"token": token},
+            ).scalar_one_or_none()
+    except DBAPIError as exc:
+        # A token the database refuses as malformed is not a live session.
+        if getattr(exc.orig, "sqlstate", None) == "22023":
+            return None
+
+        raise
 
 
 def revoke_session(

@@ -31,6 +31,8 @@ export const qk = {
     ["projects", projectId, "publications", { ...filters, ...page }] as const,
 
   contentItem: (itemId: string) => ["content-items", itemId] as const,
+  /** smm-auth's preview of one approval; never cached (gcTime 0). */
+  approvalPreview: (revisionId: string) => ["step-up", "approvals", revisionId] as const,
   revisions: (itemId: string) => ["content-items", itemId, "revisions"] as const,
   approvals: (itemId: string) => ["content-items", itemId, "approvals"] as const,
 

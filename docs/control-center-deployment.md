@@ -115,10 +115,12 @@ Everything lives in `/root/ai-smm-control-center/`:
 | `cc-db-backup.sh` | `deploy/control-center/cc-db-backup.sh` | pre-migration dump and restore check | 755 |
 | `cc-common.sh` | `deploy/control-center/cc-common.sh` | shared checks, sourced by both | 644 |
 | `cc-gate.sh` | `deploy/control-center/cc-gate.sh` | the PostgreSQL identity and queue gates (§2.1), sourced by both | 644 |
-| `control-center.compose.env` | `deploy/control-center/control-center.compose.env.example` | **exactly** `SMM_CC_VERSION` (the full 40-hex commit) and `SMM_CC_SHARED_NETWORK` — not secret | 644 |
+| `control-center.compose.env` | `deploy/control-center/control-center.compose.env.example` | **exactly** `SMM_CC_VERSION` (the full 40-hex commit) and `SMM_CC_SHARED_NETWORK`; from SMM-025D also `SMM_CC_CREDENTIALS_PUBLIC_KEY` and `SMM_CC_LEGACY_THREADS_PROJECTS` ([credential-keys.md](credential-keys.md)) — not secret | 644 |
 | `control-center.env` | `deploy/control-center/control-center.env.example` | **exactly** `AI_SMM_DATABASE_URL` — secret. The owner role, byte-identical to the worker's URL; `migrate` and `cli` | **600** |
 | `control-center.api.env` | `deploy/control-center/control-center.api.env.example` | **exactly** `AI_SMM_DATABASE_URL` as `ai_smm_cc` — secret; `smm-api` only. **From SMM-024C-2 on, not yet in production** ([least-privilege-role.md](least-privilege-role.md)) | **600** |
 | `ai_smm_cc.verify.sql` | `deploy/control-center/db/ai_smm_cc.verify.sql` | the read-only check the API role gate runs before `up`/`restart`. From SMM-024C-2 on | 644 |
+| `control-center.auth.env` | `deploy/control-center/control-center.auth.env.example` | **exactly** `AI_SMM_DATABASE_URL` as `ai_smm_auth` — secret; `smm-auth` only. **From SMM-025D on, not yet in production** ([ADR-024C-3A](adr/ADR-024C-3A-auth-service-isolation.md)) | **600** |
+| `ai_smm_auth.verify.sql` | `deploy/control-center/db/ai_smm_auth.verify.sql` | the read-only check the auth role gate runs before `up`/`restart`/`preflight`. From SMM-025D on | 644 |
 | `control-center.target` | `deploy/control-center/control-center.target.example` | **exactly** `SMM_CC_DOCKER_HOST` (a `unix://` socket) and `SMM_CC_DOCKER_ENGINE_ID` — host-specific | 644 |
 | `control-center.identity` | `deploy/control-center/control-center.identity.example` | **exactly** the five confirmed PostgreSQL identifiers (§2.1), copied from the deployment record — host-specific | 644 |
 | `control-center.window` | `deploy/control-center/control-center.window.example` | **exactly** `SMM_CC_WINDOW_START` and `SMM_CC_WINDOW_END`, UTC `YYYY-MM-DDTHH:MM:SSZ` — the agreed migration window | 644 |

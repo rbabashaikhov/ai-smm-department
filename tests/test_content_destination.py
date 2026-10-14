@@ -37,7 +37,7 @@ from ai_smm.db.models import (
 
 @pytest.fixture
 def editor(member):
-    return member(MembershipRole.EDITOR)
+    return member(MembershipRole.OWNER)
 
 
 def _create(
@@ -251,7 +251,7 @@ def test_the_api_takes_the_destination_and_shows_it(
     client, login, member, make_account
 ) -> None:
     account, _ = make_account()
-    csrf = login(member(MembershipRole.EDITOR))
+    csrf = login(member(MembershipRole.OWNER))
 
     created = client.post(
         "/api/v1/projects/test-project/content-items",
@@ -274,7 +274,7 @@ def test_the_api_refuses_submission_without_a_destination(
     from ai_smm.api.app import create_app
     from tests.conftest import TEST_PASSWORD
 
-    user = member(MembershipRole.EDITOR)
+    user = member(MembershipRole.OWNER)
     app = create_app(
         replace(api_settings, legacy_threads_projects=()),
         session_factory=session_factory,

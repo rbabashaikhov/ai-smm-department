@@ -85,7 +85,7 @@ def test_login_session_is_committed_before_the_response_is_sent(
 def test_a_command_is_committed_before_the_response_is_sent(
     api_app, session_factory, member, project: str
 ) -> None:
-    user = member(MembershipRole.EDITOR)
+    user = member(MembershipRole.OWNER)
     probe = CommitProbe(
         api_app,
         lambda: _count(

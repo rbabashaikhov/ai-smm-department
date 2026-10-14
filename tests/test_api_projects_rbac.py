@@ -147,9 +147,9 @@ def test_every_role_may_read_settings(
 
 
 @pytest.mark.parametrize(
-    "role", [MembershipRole.VIEWER, MembershipRole.EDITOR]
+    "role", [MembershipRole.VIEWER, MembershipRole.EDITOR, MembershipRole.ADMIN]
 )
-def test_viewer_and_editor_may_not_patch_settings(
+def test_members_below_owner_may_not_patch_settings(
     client, session: Session, login, member, project: str, role
 ) -> None:
     csrf = login(member(role))
@@ -164,7 +164,7 @@ def test_viewer_and_editor_may_not_patch_settings(
 
     assert error["code"] == "FORBIDDEN"
     assert error["details"] == {
-        "required_role": "admin",
+        "required_role": "owner",
         "your_role": role.value,
     }
 
@@ -173,13 +173,10 @@ def test_viewer_and_editor_may_not_patch_settings(
     assert session.get(ProjectSettings, project) is None
 
 
-@pytest.mark.parametrize(
-    "role", [MembershipRole.ADMIN, MembershipRole.OWNER]
-)
-def test_admin_and_owner_may_patch_settings(
-    client, login, member, project: str, role
+def test_the_owner_may_patch_settings(
+    client, login, member, project: str
 ) -> None:
-    csrf = login(member(role))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _patch(
         client, project, csrf, expected_version=0, content_config={"a": 1}
@@ -220,7 +217,7 @@ def test_settings_return_defaults_when_no_row_exists(
 def test_the_first_patch_creates_the_row_at_version_one(
     client, session: Session, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _patch(
         client,
@@ -251,7 +248,7 @@ def test_the_first_patch_creates_the_row_at_version_one(
 def test_an_untouched_section_survives_a_patch(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     _patch(client, project, csrf, expected_version=0, content_config={"a": 1})
     body = _patch(
@@ -266,7 +263,7 @@ def test_an_untouched_section_survives_a_patch(
 def test_a_supplied_section_is_replaced_whole(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     _patch(
         client,
@@ -285,7 +282,7 @@ def test_a_supplied_section_is_replaced_whole(
 def test_a_stale_version_is_refused_with_409(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     _patch(client, project, csrf, expected_version=0, content_config={"a": 1})
 
@@ -312,7 +309,7 @@ def test_a_stale_version_is_refused_with_409(
 def test_the_losing_write_changed_nothing(
     client, session: Session, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     _patch(client, project, csrf, expected_version=0, content_config={"a": 1})
     _patch(client, project, csrf, expected_version=1, content_config={"a": 2})
@@ -328,7 +325,7 @@ def test_the_losing_write_changed_nothing(
 def test_a_wrong_version_on_a_missing_row_is_also_409(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _patch(
         client, project, csrf, expected_version=7, content_config={"a": 1}
@@ -344,7 +341,7 @@ def test_a_wrong_version_on_a_missing_row_is_also_409(
 def test_a_patch_with_no_section_is_a_validation_error(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _patch(client, project, csrf, expected_version=0)
 
@@ -357,7 +354,7 @@ def test_a_patch_cannot_smuggle_a_project_id(
 ) -> None:
     """The project comes from the path and nowhere else."""
 
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     response = _patch(
         client,
@@ -374,7 +371,7 @@ def test_a_patch_cannot_smuggle_a_project_id(
 def test_a_successful_patch_is_audited(
     client, session: Session, login, member, project: str
 ) -> None:
-    user = member(MembershipRole.ADMIN)
+    user = member(MembershipRole.OWNER)
     csrf = login(user)
 
     _patch(client, project, csrf, expected_version=0, content_config={"a": 1})

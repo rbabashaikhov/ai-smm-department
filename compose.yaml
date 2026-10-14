@@ -24,13 +24,13 @@ x-common: &common
     - n8n
   volumes:
     # Knowledge base and media assets: read-only, the app never writes here.
-    - ${AI_SMM_KNOWLEDGE_HOST_PATH:-/srv/ai-smm/knowledge}:/srv/ai-smm/knowledge:ro
+    - &knowledge-volume ${AI_SMM_KNOWLEDGE_HOST_PATH:-/srv/ai-smm/knowledge}:/srv/ai-smm/knowledge:ro
     # The ONE writable path: the directory the public storage serves this
     # project's Threads media from. Deliberately not /srv/file-storage --
     # the worker must not be able to touch another project's media, nor the
     # rest of this project's. Writable by gid 10001 on the host; the
     # uploader additionally refuses any path outside its own prefix.
-    - ${AI_SMM_MEDIA_HOST_PATH:?set AI_SMM_MEDIA_HOST_PATH to the directory the public storage serves this project's media from}:/srv/ai-smm/media:rw
+    - &media-volume ${AI_SMM_MEDIA_HOST_PATH:?set AI_SMM_MEDIA_HOST_PATH to the directory the public storage serves this project's media from}:/srv/ai-smm/media:rw
   read_only: true
   tmpfs:
     - /tmp:size=64m,mode=1777
@@ -50,9 +50,21 @@ x-common: &common
       max-size: "10m"
       max-file: "5"
 
+# The credential private key(s) (SMM-025D, FU-025C-2, docs/credential-keys.md):
+# a host directory, owner 10001, mode 700, files mode 600, mounted READ-ONLY
+# into the worker and the operator CLI only -- never into migrate, never
+# into any Control Center service. ai-smm.env names the file(s) in
+# AI_SMM_CREDENTIALS_PRIVATE_KEY_FILES. Not under the knowledge, media or
+# backup paths: a database dump and this key together open every token.
+x-credential-keys: &credential-keys-volume ${AI_SMM_CREDENTIAL_KEYS_HOST_PATH:?set AI_SMM_CREDENTIAL_KEYS_HOST_PATH to the directory holding the credential private key (docs/credential-keys.md)}:/run/ai-smm/credential-keys:ro
+
 services:
   worker:
     <<: *common
+    volumes:
+      - *knowledge-volume
+      - *media-volume
+      - *credential-keys-volume
     container_name: ai-smm-worker
     restart: unless-stopped
     # Long enough for an in-flight publish to record its outcome before the
@@ -76,6 +88,10 @@ services:
   # Never started by `up` thanks to the profile.
   cli:
     <<: *common
+    volumes:
+      - *knowledge-volume
+      - *media-volume
+      - *credential-keys-volume
     profiles:
       - cli
     restart: "no"

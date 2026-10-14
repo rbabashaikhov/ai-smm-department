@@ -194,9 +194,6 @@ def require_project_role(
 ViewerProject = Annotated[
     ProjectContext, Depends(require_project_role(MembershipRole.VIEWER))
 ]
-AdminProject = Annotated[
-    ProjectContext, Depends(require_project_role(MembershipRole.ADMIN))
-]
 
 
 # -- resources addressed by their own id ---------------------------------
@@ -367,9 +364,9 @@ ViewerPublication = Annotated[
     PublicationContext,
     Depends(require_publication_role(MembershipRole.VIEWER)),
 ]
-AdminPublication = Annotated[
+OwnerPublication = Annotated[
     PublicationContext,
-    Depends(require_publication_role(MembershipRole.ADMIN)),
+    Depends(require_publication_role(MembershipRole.OWNER)),
 ]
 ViewerSeries = Annotated[
     SeriesContext, Depends(require_series_role(MembershipRole.VIEWER))
@@ -467,13 +464,14 @@ ViewerContentItem = Annotated[
     ContentItemContext,
     Depends(require_content_item_role(MembershipRole.VIEWER)),
 ]
-EditorContentItem = Annotated[
+OwnerContentItem = Annotated[
     ContentItemContext,
-    Depends(require_content_item_role(MembershipRole.EDITOR)),
+    Depends(require_content_item_role(MembershipRole.OWNER)),
 ]
-EditorProject = Annotated[
-    ProjectContext, Depends(require_project_role(MembershipRole.EDITOR))
-]
+#: Every business mutation is the project owner's (SMM-025D). The database
+#: enforces the same rule for the Control Center's role (ai_smm.db.guards);
+#: these aliases decide how a refusal is answered (403, not a 500 from
+#: PostgreSQL). Reads stay open to every member (Viewer*).
 OwnerProject = Annotated[
     ProjectContext, Depends(require_project_role(MembershipRole.OWNER))
 ]

@@ -23,9 +23,9 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from ai_smm.api.dependencies import (
-    AdminPublication,
     AppSettings,
     DbSession,
+    OwnerPublication,
     PageParams,
     ViewerProject,
     ViewerPublication,
@@ -174,7 +174,7 @@ def schedule(
     payload: ScheduleRequest,
     db: DbSession,
     settings: AppSettings,
-    context: AdminPublication,
+    context: OwnerPublication,
 ) -> PublicationDetail:
     return _run_command(
         lambda: schedule_publication(
@@ -200,7 +200,7 @@ def reschedule(
     payload: ScheduleRequest,
     db: DbSession,
     settings: AppSettings,
-    context: AdminPublication,
+    context: OwnerPublication,
 ) -> PublicationDetail:
     return _run_command(
         lambda: reschedule_publication(
@@ -226,7 +226,7 @@ def cancel(
     payload: CancelRequest,
     db: DbSession,
     settings: AppSettings,
-    context: AdminPublication,
+    context: OwnerPublication,
 ) -> PublicationDetail:
     return _run_command(
         lambda: cancel_publication(

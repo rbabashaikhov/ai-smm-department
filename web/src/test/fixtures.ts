@@ -1,5 +1,6 @@
 import type {
   Approval,
+  ApprovalPreview,
   ContentItemDetail,
   ContentStatus,
   Credential,
@@ -207,6 +208,34 @@ export function makePreview(detail: PublicationDetail): PublicationPreview {
   };
 }
 
+/** smm-auth's reading of an item's current revision (step-up preview). */
+export function makeApprovalPreview(
+  item: ContentItemDetail,
+  overrides: Partial<ApprovalPreview> = {},
+): ApprovalPreview {
+  const revision = item.current_revision;
+
+  return {
+    content_item_id: item.id,
+    project_id: item.project_id,
+    revision_id: revision.id,
+    revision_number: revision.revision_number,
+    is_current: true,
+    item_status: item.status,
+    title: revision.title ?? item.title,
+    body: revision.body,
+    format: revision.format,
+    images: revision.images,
+    items: revision.items,
+    content_hash: revision.content_hash,
+    social_account_id: revision.social_account_id ?? null,
+    account_display_name: null,
+    account_external_username: null,
+    account_ready: null,
+    ...overrides,
+  };
+}
+
 /**
  * A fake backend with a signed-in user of `role` (or no session when
  * `role` is null) and one of everything.
@@ -277,7 +306,19 @@ export function createServer(
     .on("GET", "/api/v1/publications/:id", ok(publication))
     .on("GET", "/api/v1/publications/:id/preview", ok(makePreview(publication)))
     .on("GET", "/api/v1/publications/:id/attempts", ok(page([])))
-    .on("GET", "/api/v1/projects/:projectId/social-accounts", ok([]));
+    .on("GET", "/api/v1/projects/:projectId/social-accounts", ok([]))
+    // smm-auth's step-up (SMM-025D), behind the same origin.
+    .on("GET", "/api/v1/auth/step-up/approvals/:revisionId", ok(makeApprovalPreview(item)))
+    .on("POST", "/api/v1/auth/step-up/approvals", (req) =>
+      ok(
+        {
+          grant_id: "88888888-8888-4888-8888-888888888888",
+          revision_id: (req.body as { revision_id: string }).revision_id,
+          expires_at: T0,
+        },
+        201,
+      ),
+    );
 
   return api;
 }

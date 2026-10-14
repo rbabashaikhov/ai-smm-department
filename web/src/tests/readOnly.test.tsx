@@ -144,7 +144,7 @@ describe("editable deployment (control)", () => {
 
   it("a MUTATIONS_DISABLED refusal is explained, not shown as a role problem", async () => {
     // The deployment was switched to read-only after this tab loaded.
-    const server = createServer("admin");
+    const server = createServer("owner");
     server.on(
       "POST",
       "/api/v1/publications/:id/cancel",

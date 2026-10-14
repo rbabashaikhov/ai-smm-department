@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DBAPIError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ai_smm.api.request_id import REQUEST_ID_HEADER, current_request_id
@@ -68,6 +69,14 @@ class ErrorCode:
     CREDENTIAL_REJECTED = "CREDENTIAL_REJECTED"
     #: The deployment has no credential public key configured.
     CREDENTIALS_NOT_CONFIGURED = "CREDENTIALS_NOT_CONFIGURED"
+    #: SMM-025D. An approval needs a fresh step-up confirmation from
+    #: smm-auth (the owner's password, re-entered for this revision).
+    APPROVAL_CONFIRMATION_REQUIRED = "APPROVAL_CONFIRMATION_REQUIRED"
+    #: smm-auth refused the step-up: wrong password, or too many failures.
+    STEP_UP_FAILED = "STEP_UP_FAILED"
+    #: The database guards refused a write the API attempted (a defect or
+    #: an attack -- never a normal outcome).
+    GUARD_REFUSED = "GUARD_REFUSED"
 
 
 #: Fallback mapping for HTTPExceptions raised by the framework itself.
@@ -216,6 +225,34 @@ def install_error_handlers(app: FastAPI) -> None:
             request_id=getattr(request.state, "request_id", None),
         )
 
+    @app.exception_handler(DBAPIError)
+    async def _database_error(request: Request, exc: DBAPIError) -> JSONResponse:
+        refusal = guard_refusal(exc)
+
+        if refusal is None:
+            return await _unexpected(request, exc)
+
+        request_id = getattr(request.state, "request_id", None)
+        code, message = refusal
+
+        # Never a normal outcome: the application should not have tried.
+        # The guard's own message names ids, never a secret or a parameter.
+        logger.warning(
+            "Database guard refused a write",
+            extra={
+                "context": {
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "guard": str(exc.orig).splitlines()[0][:300],
+                }
+            },
+        )
+
+        return error_response(
+            status_code=403, code=code, message=message, request_id=request_id
+        )
+
     @app.exception_handler(Exception)
     async def _unexpected(request: Request, exc: Exception) -> JSONResponse:
         request_id = getattr(request.state, "request_id", None)
@@ -240,6 +277,31 @@ def install_error_handlers(app: FastAPI) -> None:
             message="Internal server error.",
             request_id=request_id,
         )
+
+
+def guard_refusal(exc: DBAPIError) -> tuple[str, str] | None:
+    """(code, message) when PostgreSQL's business guards refused (SMM-025D)."""
+
+    if getattr(exc.orig, "sqlstate", None) != "42501":
+        return None
+
+    text = str(exc.orig)
+
+    if not text.startswith("guard: "):
+        return None
+
+    if "step-up confirmation" in text:
+        return (
+            ErrorCode.APPROVAL_CONFIRMATION_REQUIRED,
+            "Approving needs a fresh confirmation with your password. "
+            "Nothing was approved.",
+        )
+
+    return (
+        ErrorCode.GUARD_REFUSED,
+        "The database refused this change: it is not one the owner of this "
+        "project may make here. Nothing was changed.",
+    )
 
 
 def _safe_validation_details(

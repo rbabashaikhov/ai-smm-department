@@ -19,6 +19,16 @@ from tests.test_migrations import _alembic_config, migration_db  # noqa: F401
 
 
 EDITORIAL = "3d4ac1986f07"
+
+
+@pytest.fixture(autouse=True)
+def _downgrades_past_the_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests exercise older revisions, so they downgrade through
+    c4d81e2a9f63, which refuses without its switch. Its own refusal is
+    tested in tests/test_migration_guards.py."""
+
+    monkeypatch.setenv("AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS", "yes")
+
 SOCIAL = "a7c2e5f19b40"
 
 

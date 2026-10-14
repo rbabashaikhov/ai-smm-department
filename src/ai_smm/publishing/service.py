@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ai_smm.config import Settings
@@ -99,6 +100,14 @@ def _default_identity_fetcher(token: SecretToken) -> Any:
     from ai_smm.publishing.threads import fetch_identity
 
     return fetch_identity(token)
+
+
+def lineage_problem(session: Session, publication_id: int) -> str | None:
+    """Why this row may not be delivered, by the database's guard, or None."""
+
+    return session.execute(
+        text("SELECT public.guard_publication_problem(:id)"), {"id": publication_id}
+    ).scalar_one()
 
 
 class PublishBlocked(Exception):
@@ -330,6 +339,37 @@ def publish_claimed_publication(
         worker_id=settings.worker_id,
         phase=AttemptPhase.PREFLIGHT,
     )
+
+    # --- Approval lineage ---------------------------------------------------
+    # Asked of the database, whoever wrote the row (SMM-025D): a content
+    # snapshot must still be exactly an approved revision, for the approved
+    # account; a row from before the editorial layer must be reviewed and
+    # account-less. The same function the Control Center's writes are
+    # checked with. A failure is permanent: nothing was sent, and a person
+    # must look at how the row came to be.
+    problem = lineage_problem(session, publication.id)
+
+    if problem is not None:
+        reason = f"Approval lineage does not hold: {problem}"
+
+        mark_permanent_failure(
+            session,
+            publication,
+            attempt=attempt,
+            reason=reason,
+            actor=actor,
+            error_type="ApprovalLineage",
+        )
+        session.commit()
+
+        logger.error(
+            "Publication refused: approval lineage does not hold",
+            extra={"context": {**context, "reason": problem}},
+        )
+
+        return PublishOutcome(
+            publication_id=publication.id, status="failed", detail=reason
+        )
 
     # --- Route -----------------------------------------------------------
     # Which account, which token. A route that is not usable is a

@@ -21,6 +21,7 @@ created by deploy/control-center/db/ai_smm_cc.grants.sql, the file an
 operator runs (tests/pg_roles.py); these tests need a superuser of the
 disposable test cluster in AI_SMM_TEST_ADMIN_DATABASE_URL.
 """
+
 from __future__ import annotations
 
 from dataclasses import replace
@@ -84,7 +85,6 @@ SELECT_TABLES = frozenset(
         "content_approvals",
         "content_publication_links",
         "audit_log",
-        "users",
         "user_sessions",
         # SMM-025B: account metadata (labels, status, platform identity).
         "social_accounts",
@@ -94,6 +94,18 @@ SELECT_TABLES = frozenset(
 #: Column-level SELECT: readable columns of a table the API may not read
 #: whole. Credentials are metadata only -- never the sealed token.
 COLUMN_SELECTS: dict[str, frozenset[str]] = {
+    # SMM-025D, G2: never password_hash; sign-in is smm-auth's.
+    "users": frozenset(
+        {
+            "id",
+            "email",
+            "display_name",
+            "is_active",
+            "last_login_at",
+            "created_at",
+            "updated_at",
+        }
+    ),
     "social_account_credentials": frozenset(
         {
             "id",
@@ -119,26 +131,18 @@ KEY_MATERIAL_COLUMNS = frozenset({"ciphertext", "nonce", "ephemeral_public_key"}
 #: Column-level writes, and nothing else. No table-level INSERT, UPDATE,
 #: DELETE, TRUNCATE, REFERENCES or TRIGGER anywhere.
 COLUMN_WRITES: dict[tuple[str, str], frozenset[str]] = {
-    # Every column the ORM sends on login, revoked_at (NULL) included.
-    ("user_sessions", "INSERT"): frozenset(
-        {
-            "id",
-            "user_id",
-            "token_hash",
-            "expires_at",
-            "last_seen_at",
-            "created_at",
-            "revoked_at",
-        }
-    ),
-    ("user_sessions", "UPDATE"): frozenset({"last_seen_at", "revoked_at"}),
-    # Not password_hash: the optional Argon2 upgrade is skipped (SAVEPOINT).
-    ("users", "UPDATE"): frozenset({"last_login_at", "updated_at"}),
-    ("audit_log", "INSERT"): frozenset({"actor", "action", "subject", "details"}),
+    # SMM-025D, grants G2: sessions are created, revoked and audited by
+    # smm-auth only. The session check of a read advances last_seen_at
+    # (ADR-024C-3A RS-2) -- the only write this role has left.
+    ("user_sessions", "UPDATE"): frozenset({"last_seen_at"}),
 }
 
 #: Tables the API must not see at all.
-NO_ACCESS_TABLES = frozenset({"alembic_version"})
+#: SMM-025D: mutation_contexts and approval_grants are written and read
+#: only inside the guard and smm_auth functions, as the owner.
+NO_ACCESS_TABLES = frozenset(
+    {"alembic_version", "mutation_contexts", "approval_grants"}
+)
 
 TABLE_PRIVILEGES = (
     "SELECT",
@@ -202,9 +206,20 @@ def test_the_role_has_no_power_beyond_its_grants(
 
     assert rows == [
         # super inherit createrole createdb replication bypassrls login
-        (False, False, False, False, False, False, True,
-         # connlimit, memberships, owned objects, SCRAM password
-         10, 0, 0, True)
+        (
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+            # connlimit, memberships, owned objects, SCRAM password
+            10,
+            0,
+            0,
+            True,
+        )
     ]
 
 
@@ -294,15 +309,8 @@ def test_effective_privileges_match_the_matrix(
         "       AS p(priv) "
         " WHERE s.relnamespace = 'public'::regnamespace AND s.relkind = 'S'",
     )
-    audit_sequence = pg_roles.query_admin(
-        admin_database_url,
-        "SELECT split_part(pg_get_serial_sequence('public.audit_log', 'id'), "
-        "'.', 2)",
-    )[0][0]
-
-    assert {(name, priv) for name, priv, held in sequences if held} == {
-        (audit_sequence, "USAGE")
-    }
+    # G2 (SMM-025D): no audit entry, so no sequence at all.
+    assert {(name, priv) for name, priv, held in sequences if held} == set()
 
     schema = pg_roles.query_admin(
         admin_database_url,
@@ -328,7 +336,13 @@ def test_the_verify_file_passes_and_reports_everything(
         "PASS|table.publications.update|denied",
         "PASS|table.publications.select|granted",
         "PASS|column.users.is_active.update|denied",
-        "PASS|column.user_sessions.revoked_at.update|granted",
+        # G2 (SMM-025D): sign-in, sign-out and their audit are smm-auth's.
+        "PASS|column.user_sessions.last_seen_at.update|granted",
+        "PASS|column.user_sessions.revoked_at.update|denied",
+        "PASS|column.user_sessions.token_hash.insert|denied",
+        "PASS|column.users.password_hash.select|denied",
+        "PASS|column.users.email.select|granted",
+        "PASS|column.audit_log.actor.insert|denied",
         "PASS|column.audit_log.at.insert|denied",
         "PASS|role.password|set, SCRAM-SHA-256",
         "PASS|role.owns_nothing|0 owned objects",
@@ -386,9 +400,7 @@ def test_the_verify_file_sees_a_privilege_granted_through_public(
     try:
         failing = pg_roles.failures(pg_roles.verify(admin_database_url))
     finally:
-        pg_roles.run_admin(
-            admin_database_url, "REVOKE DELETE ON audit_log FROM PUBLIC"
-        )
+        pg_roles.run_admin(admin_database_url, "REVOKE DELETE ON audit_log FROM PUBLIC")
 
     assert failing == ["FAIL|table.audit_log.delete|denied"]
 
@@ -541,8 +553,7 @@ DENIED = {
     # editorial state
     "update series": "UPDATE content_series SET status = 'active'",
     "insert series": (
-        "INSERT INTO content_series (project_id, title) "
-        "VALUES ('test-project', 'x')"
+        "INSERT INTO content_series (project_id, title) VALUES ('test-project', 'x')"
     ),
     "update content items": "UPDATE content_items SET status = 'approved'",
     "lock content items": "SELECT id FROM content_items FOR UPDATE",
@@ -594,12 +605,9 @@ DENIED = {
         "SELECT gen_random_uuid(), id, 'superseded', 's', 'k', NULL, NULL, NULL, "
         "'000000000000' FROM social_accounts LIMIT 1"
     ),
-    "route a publication": (
-        "UPDATE publications SET social_account_id = NULL"
-    ),
+    "route a publication": ("UPDATE publications SET social_account_id = NULL"),
     "declare account routing": (
-        "UPDATE publications SET status = 'claimed' "
-        "WHERE social_account_id IS NOT NULL"
+        "UPDATE publications SET status = 'claimed' WHERE social_account_id IS NOT NULL"
     ),
     # the audit trail
     "update audit": "UPDATE audit_log SET action = 'x'",
@@ -617,7 +625,7 @@ DENIED = {
         "DROP TRIGGER trg_content_revisions_append_only ON content_revisions"
     ),
     "drop table": "DROP TABLE audit_log",
-    "grant onwards": "GRANT SELECT ON users TO PUBLIC",
+    "grant onwards": "GRANT SELECT ON projects TO PUBLIC",
     "become owner": "SET ROLE {owner}",
     "disable triggers": "SET session_replication_role = replica",
     "block the queue": "LOCK TABLE publications IN SHARE MODE",
@@ -650,9 +658,7 @@ def test_postgresql_refuses_business_changes_from_the_api_role(
                 with pytest.raises(DBAPIError) as raised:
                     connection.execute(text(statement))
 
-                assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE, (
-                    raised.value
-                )
+                assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE, raised.value
         finally:
             if transaction is not None:
                 transaction.rollback()
@@ -691,9 +697,32 @@ def test_the_api_role_cannot_read_the_role_catalog(
 
 @pytest.fixture
 def production_settings(api_settings: Settings) -> Settings:
-    """As compose.control-center.yml: read-only for business operations."""
+    """As compose.control-center.yml: read-only for business operations,
+    and no sign-in of its own (smm-auth's, SMM-025D)."""
 
-    return replace(api_settings, api_mutations_enabled=False)
+    return replace(
+        api_settings, api_mutations_enabled=False, api_auth_routes_enabled=False
+    )
+
+
+@pytest.fixture
+def sign_in(session_factory, api_settings: Settings):
+    """Sign a user in as smm-auth does and give `client` the cookie.
+
+    The role itself can no longer create a session (grants G2); this is
+    the session smm_auth.session_create would have made.
+    """
+
+    from ai_smm.application.auth import SESSION_COOKIE_NAME, csrf_token_for
+    from tests.mutation_role.conftest import _open_session
+
+    def do(client: TestClient, user: User) -> str:
+        token = _open_session(session_factory, api_settings, user, TEST_PASSWORD)
+        client.cookies.set(SESSION_COOKIE_NAME, token)
+
+        return csrf_token_for(token)
+
+    return do
 
 
 @pytest.fixture
@@ -724,9 +753,7 @@ def _read_paths(seeded: World, project: str, session: Session) -> list[str]:
     from ai_smm.db.models import ContentSeries, Publication
 
     series_id = session.scalars(select(ContentSeries.id)).first()
-    attempted = session.scalars(
-        select(PublicationAttempt.publication_id)
-    ).first()
+    attempted = session.scalars(select(PublicationAttempt.publication_id)).first()
     publication = session.scalars(select(Publication.id)).first()
 
     return [
@@ -765,12 +792,10 @@ def test_the_session_lifecycle_and_every_read_work_through_the_role(
     project: str,
     session: Session,
     member,
+    sign_in,
 ) -> None:
     owner = member(MembershipRole.OWNER)
-
-    response = _login(cc_client, owner)
-    assert response.status_code == 200, response.text
-    csrf = response.json()["csrf_token"]
+    csrf = sign_in(cc_client, owner)
 
     for path in _read_paths(seeded, project, session):
         response = cc_client.get(path)
@@ -781,47 +806,51 @@ def test_the_session_lifecycle_and_every_read_work_through_the_role(
     assert me["control_plane"] == {"mutations_enabled": False}
     assert cc_client.get("/api/v1/auth/csrf").json()["csrf_token"] == csrf
 
-    response = cc_client.post(
-        "/api/v1/auth/logout", headers={"X-CSRF-Token": csrf}
-    )
-    assert response.status_code == 204, response.text
-    assert cc_client.get("/api/v1/auth/me").status_code == 401
+    # Sign-out is smm-auth's: the packaged API has no such route.
+    response = cc_client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})
+    assert response.status_code in {404, 405}, response.text
+    assert cc_client.get("/api/v1/auth/me").status_code == 200
 
-    # What the role wrote, read back as the owner.
+    # What the role wrote, read back as the owner: last_seen_at, nothing else.
     session.expire_all()
     user_session = session.scalars(
         select(UserSession).where(UserSession.user_id == owner.id)
     ).one()
-    stored = session.get(User, owner.id)
     actions = session.scalars(
         select(AuditLog.action).where(AuditLog.subject == f"user:{owner.id}")
     ).all()
 
-    assert user_session.revoked_at is not None
+    assert user_session.revoked_at is None
     assert user_session.last_seen_at > user_session.created_at
-    assert stored.last_login_at is not None
-    assert sorted(actions) == ["auth.login", "auth.logout"]
+    assert sorted(actions) == ["auth.login"]  # smm-auth's
 
 
-def test_a_failed_login_is_audited_through_the_role(
-    cc_client: TestClient, session: Session, make_user
+@pytest.mark.parametrize("path", ["/api/v1/auth/login", "/api/v1/auth/logout"])
+def test_the_packaged_api_serves_no_sign_in(
+    cc_client: TestClient, session: Session, make_user, path: str
 ) -> None:
+    """SMM-025D: nginx sends these paths to smm-auth; a request that reached
+    smm-api anyway finds no route, and nothing is written."""
+
     user = make_user()
+    response = cc_client.post(
+        path, json={"email": user.email, "password": TEST_PASSWORD}
+    )
 
-    response = _login(cc_client, user, password="not-the-password")
-
-    assert response.status_code == 401
+    assert response.status_code in {404, 405}
     session.expire_all()
-    assert session.scalars(
-        select(AuditLog.action).where(AuditLog.subject == f"email:{user.email}")
-    ).all() == ["auth.login_failed"]
+    assert session.scalars(select(UserSession)).all() == []
+    assert session.scalars(select(AuditLog)).all() == []
 
 
-@pytest.mark.parametrize(("role", "name"), [
-    (role, name)
-    for role in (MembershipRole.OWNER, MembershipRole.VIEWER)
-    for name in sorted(GATED)
-])
+@pytest.mark.parametrize(
+    ("role", "name"),
+    [
+        (role, name)
+        for role in (MembershipRole.OWNER, MembershipRole.VIEWER)
+        for name in sorted(GATED)
+    ],
+)
 def test_the_gate_still_answers_first_through_the_role(
     cc_client: TestClient,
     seeded: World,
@@ -830,8 +859,9 @@ def test_the_gate_still_answers_first_through_the_role(
     member,
     role: MembershipRole,
     name: str,
+    sign_in,
 ) -> None:
-    csrf = _login(cc_client, member(role)).json()["csrf_token"]
+    csrf = sign_in(cc_client, member(role))
     before = _fingerprint(engine)
 
     response = _request(cc_client, csrf, name, seeded, project)
@@ -878,10 +908,9 @@ def test_every_business_command_fails_in_the_database_without_the_gate(
     engine: Engine,
     member,
     name: str,
+    sign_in,
 ) -> None:
-    csrf = _login(ungated_client, member(MembershipRole.OWNER)).json()[
-        "csrf_token"
-    ]
+    csrf = sign_in(ungated_client, member(MembershipRole.OWNER))
     before = _fingerprint(engine)
 
     response = _request(ungated_client, csrf, name, seeded, project)
@@ -895,20 +924,8 @@ def test_every_business_command_fails_in_the_database_without_the_gate(
 # -- each write the role holds is needed ---------------------------------------
 
 
-def _flow_login(client, user, csrf):
-    return _login(client, user)
-
-
 def _flow_authenticated_read(client, user, csrf):
     return client.get("/api/v1/auth/me")
-
-
-def _flow_logout(client, user, csrf):
-    return client.post("/api/v1/auth/logout", headers={"X-CSRF-Token": csrf})
-
-
-def _flow_failed_login(client, user, csrf):
-    return _login(client, user, password="not-the-password")
 
 
 def _flow_audit_view(client, user, csrf):
@@ -931,31 +948,11 @@ def _flow_content(client, user, csrf):
 #: signed in first). Restored by re-running the grants file. The same
 #: flow with every grant in place is the control, run first.
 NECESSITY = {
-    "select users": ("REVOKE SELECT ON users FROM ai_smm_cc", _flow_login, False),
-    "insert user_sessions": (
-        "REVOKE INSERT ON user_sessions FROM ai_smm_cc",
-        _flow_login,
-        False,
-    ),
-    "update users.last_login_at": (
-        "REVOKE UPDATE (last_login_at) ON users FROM ai_smm_cc",
-        _flow_login,
-        False,
-    ),
-    "update users.updated_at": (
-        "REVOKE UPDATE (updated_at) ON users FROM ai_smm_cc",
-        _flow_login,
-        False,
-    ),
-    "insert audit_log": (
-        "REVOKE INSERT ON audit_log FROM ai_smm_cc",
-        _flow_failed_login,
-        False,
-    ),
-    "usage audit sequence": (
-        "REVOKE USAGE ON SEQUENCE audit_log_id_seq FROM ai_smm_cc",
-        _flow_login,
-        False,
+    # SMM-025D, G2: the user columns the session check reads.
+    "select users columns": (
+        "REVOKE SELECT (email) ON users FROM ai_smm_cc",
+        _flow_authenticated_read,
+        True,
     ),
     "select user_sessions": (
         "REVOKE SELECT ON user_sessions FROM ai_smm_cc",
@@ -965,11 +962,6 @@ NECESSITY = {
     "update user_sessions.last_seen_at": (
         "REVOKE UPDATE (last_seen_at) ON user_sessions FROM ai_smm_cc",
         _flow_authenticated_read,
-        True,
-    ),
-    "update user_sessions.revoked_at": (
-        "REVOKE UPDATE (revoked_at) ON user_sessions FROM ai_smm_cc",
-        _flow_logout,
         True,
     ),
     "select audit_log": (
@@ -1008,20 +1000,14 @@ def test_each_grant_is_needed(
     admin_database_url: str,
     restore_grants,
     name: str,
+    sign_in,
 ) -> None:
     revoke, flow, signed_in = NECESSITY[name]
     user = member(MembershipRole.OWNER)
-    csrf = None
+    csrf = sign_in(cc_client, user) if signed_in else None
 
-    if signed_in:
-        response = _login(cc_client, user)
-        assert response.status_code == 200, response.text
-        csrf = response.json()["csrf_token"]
-
-    # Control. Logout can only run once; its control is the lifecycle test.
-    if flow is not _flow_logout:
-        expected = 401 if flow is _flow_failed_login else 200
-        assert flow(cc_client, user, csrf).status_code == expected
+    # Control: the same flow with every grant in place.
+    assert flow(cc_client, user, csrf).status_code == 200
 
     pg_roles.run_admin(admin_database_url, revoke)
 
@@ -1031,8 +1017,8 @@ def test_each_grant_is_needed(
 
 
 # -- session security: what the database does and does not guarantee -------
-# ai_smm_cc must INSERT into user_sessions for login to work. These tests
-# pin down what that implies, so that no document can claim more.
+# SMM-025D, grants G2: sessions are smm-auth's. These tests pin down what
+# the role can no longer do, and the one thing it still can (RS-2).
 
 
 def test_the_session_table_has_only_these_constraints(
@@ -1093,73 +1079,57 @@ def _session_anomalies(admin_database_url: str) -> list[str]:
     ]
 
 
-def test_residual_risk_the_role_can_mint_a_session_for_any_user(
-    cc_client: TestClient,
-    restricted_engine: Engine,
-    admin_database_url: str,
-    member,
+def test_closed_risk_the_role_cannot_mint_a_session(
+    restricted_engine: Engine, session: Session, member
 ) -> None:
-    """RISK, not protection: a compromised API connection can impersonate.
-
-    The foreign key only requires that the user exists, and the unique
-    token_hash only that the token is new; neither stops this. The forged
-    session is accepted by the application for ten years.
-    """
-
-    from ai_smm.application.auth import SESSION_COOKIE_NAME
+    """CLOSED by SMM-025D (FU-024C2-1), was a residual risk: a compromised
+    API connection could create a session for any user. Now only
+    smm_auth.session_create (as ai_smm_auth) can."""
 
     victim = member(MembershipRole.OWNER)
-    _forge_session(restricted_engine, user_id=victim.id, token="forged-token")
 
-    cc_client.cookies.set(SESSION_COOKIE_NAME, "forged-token")
-    me = cc_client.get("/api/v1/auth/me")
+    with pytest.raises(DBAPIError) as raised:
+        _forge_session(restricted_engine, user_id=victim.id, token="forged-token")
 
-    assert me.status_code == 200
-    assert me.json()["user"]["id"] == str(victim.id)
-
-    # Detected, though not prevented: no login audit, lifetime too long.
-    anomalies = _session_anomalies(admin_database_url)
-
-    assert len(anomalies) == 2 and anomalies[-1] == "END|anomalies|1"
-    assert "lifetime_over_maximum" in anomalies[0]
-    assert "no_login_audit" in anomalies[0]
+    assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
+    session.expire_all()
+    assert session.scalars(select(UserSession)).all() == []
 
 
-def test_what_the_session_constraints_actually_stop(
-    restricted_engine: Engine, member
-) -> None:
+def test_what_the_session_constraints_actually_stop(engine: Engine, member) -> None:
+    """For the role that may still insert (the owner): only these two."""
+
     from ai_smm.security.tokens import generate_token
 
     user = member(MembershipRole.VIEWER)
 
     with pytest.raises(DBAPIError) as missing_user:
-        _forge_session(restricted_engine, user_id=uuid4(), token=generate_token())
+        _forge_session(engine, user_id=uuid4(), token=generate_token())
 
     assert _sqlstate(missing_user.value) == "23503"  # foreign_key_violation
 
     token = generate_token()
-    _forge_session(restricted_engine, user_id=user.id, token=token)
+    _forge_session(engine, user_id=user.id, token=token)
 
     with pytest.raises(DBAPIError) as duplicate:
-        _forge_session(restricted_engine, user_id=user.id, token=token)
+        _forge_session(engine, user_id=user.id, token=token)
 
     assert _sqlstate(duplicate.value) == "23505"  # unique_violation
 
 
-def test_residual_risk_the_role_can_revoke_or_refresh_any_session(
-    restricted_engine: Engine, session: Session, member
+def test_residual_risk_the_role_can_refresh_but_not_revoke_any_session(
+    restricted_engine: Engine, engine: Engine, member
 ) -> None:
-    """RISK: UPDATE (last_seen_at, revoked_at) is not limited to own rows.
-
-    It can sign everyone out (availability) or keep an idle session alive;
-    it cannot change whose session it is, its token or its expiry.
-    """
+    """RISK, narrowed (ADR-024C-3A RS-2): UPDATE (last_seen_at) is not limited
+    to one's own rows, so an idle session can be kept alive -- never past its
+    expiry, and useless without its raw token. Revoking (or un-revoking) is
+    CLOSED by G2: only smm_auth.session_revoke can."""
 
     from ai_smm.security.tokens import generate_token
 
     for role in (MembershipRole.OWNER, MembershipRole.VIEWER):
         _forge_session(
-            restricted_engine,
+            engine,
             user_id=member(role).id,
             token=generate_token(),
             expires_at=datetime.now(timezone.utc) + timedelta(days=1),
@@ -1169,17 +1139,27 @@ def test_residual_risk_the_role_can_revoke_or_refresh_any_session(
         refreshed = connection.execute(
             text("UPDATE user_sessions SET last_seen_at = now()")
         ).rowcount
-        revoked = connection.execute(
-            text("UPDATE user_sessions SET revoked_at = now()")
-        ).rowcount
 
-    assert refreshed == revoked == 2
+    assert refreshed == 2
+
+    for statement in (
+        "UPDATE user_sessions SET revoked_at = now()",
+        "UPDATE user_sessions SET revoked_at = NULL",
+        "UPDATE user_sessions SET expires_at = now() + interval '1 year'",
+    ):
+        with (
+            restricted_engine.connect() as connection,
+            pytest.raises(DBAPIError) as raised,
+        ):
+            connection.execute(text(statement))
+
+        assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE, statement
 
 
 def test_a_real_login_leaves_no_session_anomaly(
-    cc_client: TestClient, admin_database_url: str, member
+    cc_client: TestClient, admin_database_url: str, member, sign_in
 ) -> None:
-    assert _login(cc_client, member(MembershipRole.OWNER)).status_code == 200
+    sign_in(cc_client, member(MembershipRole.OWNER))
     assert cc_client.get("/api/v1/auth/me").status_code == 200
 
     assert _session_anomalies(admin_database_url) == ["END|anomalies|0"]
@@ -1188,56 +1168,36 @@ def test_a_real_login_leaves_no_session_anomaly(
 # -- audit integrity: three different properties ------------------------------
 
 
-def test_residual_risk_the_role_can_write_any_actor_and_action(
+def test_the_role_writes_no_audit_entry_at_all(
     restricted_engine: Engine, session: Session
 ) -> None:
-    """RISK: the database does not know who an audit entry is about.
+    """GUARANTEED (SMM-025D, G2 and FU-024C2-2): no entry of any kind -- not
+    a worker's, an operator's, a business action, nor a sign-in (those are
+    smm-auth's, written inside smm_auth functions). Before G2, the
+    database guard already confined a role like this one to auth.*."""
 
-    Nothing structural or cryptographic ties actor/action to the role that
-    wrote the row; the API's own code is what writes auth.* entries only.
-    """
-
-    with restricted_engine.begin() as connection:
-        connection.execute(
-            text(
-                "INSERT INTO audit_log (actor, action, subject, details) "
-                "VALUES ('worker:worker-1', 'publication.published', "
-                "'publication:1', '{}')"
+    for actor, action in (
+        ("worker:worker-1", "publication.published"),
+        ("cli:operator", "rescheduled"),
+        ("user:x", "content.approved"),
+        ("user:someone-else", "auth.login"),
+        ("anonymous", "auth.login_failed"),
+    ):
+        with (
+            restricted_engine.connect() as connection,
+            pytest.raises(DBAPIError) as raised,
+        ):
+            connection.execute(
+                text(
+                    "INSERT INTO audit_log (actor, action, subject, details) "
+                    "VALUES (:actor, :action, 'publication:1', '{}')"
+                ),
+                {"actor": actor, "action": action},
             )
-        )
 
-    assert session.scalars(
-        select(AuditLog.actor).where(AuditLog.action == "publication.published")
-    ).all() == ["worker:worker-1"]
+        assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
 
-
-def test_the_audit_time_is_the_servers_not_the_writers(
-    restricted_engine: Engine,
-) -> None:
-    """GUARANTEED: `at` comes from the database's now(); the role cannot set it.
-
-    now() is the start of the writing transaction, so the time is the
-    server's clock -- a property of the row, not proof of its author.
-    """
-
-    with restricted_engine.begin() as connection:
-        before = connection.execute(text("SELECT clock_timestamp()")).scalar_one()
-        written = connection.execute(
-            text(
-                "INSERT INTO audit_log (actor, action) VALUES ('a', 'b') "
-                "RETURNING at, now()"
-            )
-        ).one()
-
-    assert written.at == written.now
-    assert abs((written.at - before).total_seconds()) < 5
-
-    with restricted_engine.connect() as connection, pytest.raises(DBAPIError) as raised:
-        connection.execute(
-            text("INSERT INTO audit_log (at, actor, action) VALUES (now(), 'a', 'b')")
-        )
-
-    assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
+    assert session.scalars(select(AuditLog.actor)).all() == []
 
 
 def test_existing_audit_entries_cannot_be_changed_by_the_role(
@@ -1258,9 +1218,10 @@ def test_existing_audit_entries_cannot_be_changed_by_the_role(
         "DELETE FROM audit_log",
         "TRUNCATE audit_log",
     ):
-        with restricted_engine.connect() as connection, pytest.raises(
-            DBAPIError
-        ) as raised:
+        with (
+            restricted_engine.connect() as connection,
+            pytest.raises(DBAPIError) as raised,
+        ):
             connection.execute(text(statement))
 
         assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE, statement
@@ -1296,57 +1257,6 @@ def _client_for(settings: Settings, factory) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_an_outdated_hash_logs_in_through_the_role_and_stays_as_it_is(
-    production_settings: Settings,
-    restricted_session_factory,
-    session: Session,
-    member,
-    capsys,
-) -> None:
-    owner = member(MembershipRole.OWNER)
-    old_hash = _outdated_hash()
-    session.execute(
-        text("UPDATE users SET password_hash = :h WHERE id = :id"),
-        {"h": old_hash, "id": owner.id},
-    )
-    session.commit()
-
-    with _client_for(production_settings, restricted_session_factory) as client:
-        first = _login(client, owner)
-        me = client.get("/api/v1/auth/me")
-        logout = client.post(
-            "/api/v1/auth/logout",
-            headers={"X-CSRF-Token": first.json().get("csrf_token", "")},
-        )
-        second = _login(client, owner)
-
-    assert first.status_code == 200, first.text
-    assert me.status_code == 200
-    assert logout.status_code == 204
-    assert second.status_code == 200, second.text
-
-    session.expire_all()
-    # The upgrade was refused and rolled back alone ...
-    assert session.get(User, owner.id).password_hash == old_hash
-    # ... while everything else the login writes is there.
-    assert session.get(User, owner.id).last_login_at is not None
-    assert len(
-        session.scalars(
-            select(UserSession).where(UserSession.user_id == owner.id)
-        ).all()
-    ) == 2
-    assert sorted(
-        session.scalars(
-            select(AuditLog.action).where(AuditLog.subject == f"user:{owner.id}")
-        ).all()
-    ) == ["auth.login", "auth.login", "auth.logout"]
-
-    log = capsys.readouterr().out
-
-    assert log.count("Password hash upgrade skipped") == 2
-    assert old_hash not in log and TEST_PASSWORD not in log
-
-
 def test_an_outdated_hash_is_still_upgraded_where_the_role_may(
     production_settings: Settings,
     session_factory,
@@ -1363,7 +1273,9 @@ def test_an_outdated_hash_is_still_upgraded_where_the_role_may(
     )
     session.commit()
 
-    with _client_for(production_settings, session_factory) as client:
+    with _client_for(
+        replace(production_settings, api_auth_routes_enabled=True), session_factory
+    ) as client:
         assert _login(client, owner).status_code == 200
 
     from ai_smm.security.passwords import password_needs_rehash, verify_password
@@ -1401,18 +1313,25 @@ def test_any_other_error_during_the_upgrade_still_fails_the_login(
     session.commit()
 
     with engine.begin() as connection:
-        connection.execute(text(
-            "CREATE FUNCTION test_refuse_hash() RETURNS trigger LANGUAGE plpgsql "
-            f"AS $$ BEGIN RAISE EXCEPTION 'test refusal' USING ERRCODE = '{errcode}'; "
-            "END $$"
-        ))
-        connection.execute(text(
-            "CREATE TRIGGER test_refuse_hash BEFORE UPDATE OF password_hash "
-            "ON users FOR EACH ROW EXECUTE FUNCTION test_refuse_hash()"
-        ))
+        connection.execute(
+            text(
+                "CREATE FUNCTION test_refuse_hash() RETURNS trigger LANGUAGE plpgsql "
+                "AS $$ BEGIN RAISE EXCEPTION 'test refusal' "
+                f"USING ERRCODE = '{errcode}'; END $$"
+            )
+        )
+        connection.execute(
+            text(
+                "CREATE TRIGGER test_refuse_hash BEFORE UPDATE OF password_hash "
+                "ON users FOR EACH ROW EXECUTE FUNCTION test_refuse_hash()"
+            )
+        )
 
     try:
-        with _client_for(production_settings, session_factory) as client:
+        with _client_for(
+            replace(production_settings, api_auth_routes_enabled=True),
+            session_factory,
+        ) as client:
             response = _login(client, owner)
     finally:
         with engine.begin() as connection:
@@ -1423,12 +1342,18 @@ def test_any_other_error_during_the_upgrade_still_fails_the_login(
 
     session.expire_all()
     # The whole login rolled back: no session, no login audit.
-    assert session.scalars(
-        select(UserSession).where(UserSession.user_id == owner.id)
-    ).all() == []
-    assert session.scalars(
-        select(AuditLog.action).where(AuditLog.subject == f"user:{owner.id}")
-    ).all() == []
+    assert (
+        session.scalars(
+            select(UserSession).where(UserSession.user_id == owner.id)
+        ).all()
+        == []
+    )
+    assert (
+        session.scalars(
+            select(AuditLog.action).where(AuditLog.subject == f"user:{owner.id}")
+        ).all()
+        == []
+    )
 
 
 # -- the database unavailable, or the credentials wrong ------------------------
@@ -1439,7 +1364,6 @@ def test_the_api_fails_closed_without_its_database(
     production_settings: Settings,
     api_role,
     admin_database_url: str,
-    make_user,
     capsys,
     failure: str,
 ) -> None:
@@ -1452,7 +1376,6 @@ def test_the_api_fails_closed_without_its_database(
     elif failure == "wrong password":
         url = url.set(password="not-" + secret)
 
-    user = make_user()
     engine = create_db_engine(
         url.render_as_string(hide_password=False),
         settings=production_settings,
@@ -1472,10 +1395,15 @@ def test_the_api_fails_closed_without_its_database(
             access_log=False,
         )
 
+        from ai_smm.application.auth import SESSION_COOKIE_NAME
+        from ai_smm.security.tokens import generate_token
+
         with TestClient(app, raise_server_exceptions=False) as client:
             live = client.get("/health/live")
             ready = client.get("/health/ready")
-            login = _login(client, user)
+            # The session check needs the database (sign-in is smm-auth's).
+            client.cookies.set(SESSION_COOKIE_NAME, generate_token())
+            login = client.get("/api/v1/auth/me")
     finally:
         engine.dispose()
 
@@ -1485,7 +1413,7 @@ def test_the_api_fails_closed_without_its_database(
     assert live.status_code == 200
     assert ready.status_code == 503
     assert ready.json()["error"]["code"] == "DEPENDENCY_UNAVAILABLE"
-    # Not a 401: a broken database is not a wrong password.
+    # Not a 401: a broken database is not a missing session.
     assert login.status_code == 500
     assert login.json()["error"]["code"] == "INTERNAL_ERROR"
 
@@ -1527,7 +1455,9 @@ def migration_db(database_url: str, admin_database_url: str, api_role):
 
     yield (
         make_url(database_url).set(database=name).render_as_string(hide_password=False),
-        make_url(admin_database_url).set(database=name).render_as_string(hide_password=False),
+        make_url(admin_database_url)
+        .set(database=name)
+        .render_as_string(hide_password=False),
         make_url(api_role.url).set(database=name).render_as_string(hide_password=False),
     )
 
@@ -1558,9 +1488,12 @@ def test_migrations_run_as_the_owner_alongside_the_role(
     assert _sqlstate(raised.value) == INSUFFICIENT_PRIVILEGE
 
     # The owner's DDL is not hindered by the role's grants: a downgrade
-    # drops tables the role can read, the upgrade recreates them.
+    # drops tables the role can read, the upgrade recreates them. Down to
+    # the editorial revision, through the guards (c4d81e2a9f63, which needs
+    # its switch) and the social accounts (a7c2e5f19b40).
     monkeypatch.setenv("AI_SMM_DATABASE_URL", owner_url)
-    command.downgrade(_alembic_config(owner_url), "-1")
+    monkeypatch.setenv("AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS", "yes")
+    command.downgrade(_alembic_config(owner_url), "3d4ac1986f07")
     command.upgrade(_alembic_config(owner_url), "head")
 
     # A recreated table carries no grant (no default privileges, by
@@ -1568,7 +1501,7 @@ def test_migrations_run_as_the_owner_alongside_the_role(
     # which, and re-running the grants file is the repair.
     lost = pg_roles.failures(pg_roles.verify(admin_url))
 
-    # The newest revision (a7c2e5f19b40) is the one dropped and recreated.
+    # a7c2e5f19b40's tables are among those dropped and recreated.
     assert "FAIL|table.social_accounts.select|granted" in lost
     assert all(".select|granted" in line or "matrix." in line for line in lost)
 
@@ -1596,9 +1529,9 @@ def test_dropping_a_scratch_database_outlasts_a_session_it_may_not_end(
     name = "ai_smm_lp_drop_probe_test"
     owner = create_engine(database_url, isolation_level="AUTOCOMMIT")
     holder_url = pg_roles.libpq_url(
-        make_url(admin_database_url).set(database=name).render_as_string(
-            hide_password=False
-        )
+        make_url(admin_database_url)
+        .set(database=name)
+        .render_as_string(hide_password=False)
     )
 
     with owner.connect() as connection:

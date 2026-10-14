@@ -92,8 +92,8 @@ describe("publication detail", () => {
 });
 
 describe("scheduling", () => {
-  it("admin: the confirmation shows the exact snapshot and sends an offset-aware time", async () => {
-    const server = createServer("admin");
+  it("owner: the confirmation shows the exact snapshot and sends an offset-aware time", async () => {
+    const server = createServer("owner");
     server.on("POST", "/api/v1/publications/:id/schedule", ok(makePublication("scheduled")));
     const { user } = renderApp(server, `/projects/${PROJECT_ID}/publications`);
 
@@ -126,8 +126,8 @@ describe("scheduling", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
-  it("admin: reschedule starts from the current time in the project zone", async () => {
-    const server = createServer("admin", { publication: makePublication("scheduled") });
+  it("owner: reschedule starts from the current time in the project zone", async () => {
+    const server = createServer("owner", { publication: makePublication("scheduled") });
     server.on("POST", "/api/v1/publications/:id/reschedule", ok(makePublication("scheduled")));
     const { user } = renderApp(server, `/publications/${PUBLICATION_ID}`);
 
@@ -144,8 +144,8 @@ describe("scheduling", () => {
     });
   });
 
-  it("admin: cancel needs an explicit confirmation", async () => {
-    const server = createServer("admin");
+  it("owner: cancel needs an explicit confirmation", async () => {
+    const server = createServer("owner");
     server.on("POST", "/api/v1/publications/:id/cancel", ok(makePublication("cancelled")));
     const { user } = renderApp(server, `/publications/${PUBLICATION_ID}`);
 
@@ -185,7 +185,7 @@ describe("scheduling", () => {
   }, 10_000);
 
   it("shows the server's 409 INVALID_STATE_TRANSITION verbatim", async () => {
-    const server = createServer("admin");
+    const server = createServer("owner");
     server.on(
       "POST",
       "/api/v1/publications/:id/schedule",

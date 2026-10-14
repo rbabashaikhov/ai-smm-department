@@ -28,8 +28,10 @@ import yaml
 
 from tests.cc_stub import (
     FIXTURE_API_DSN,
+    FIXTURE_AUTH_DSN,
     FIXTURE_DSN,
     FIXTURE_NETWORK,
+    FIXTURE_PUBLIC_KEY,
     FIXTURE_VERSION,
     docker_socket,
     run_script,
@@ -55,9 +57,17 @@ COMMON = DEPLOY_DIR / "cc-common.sh"
 ALEMBIC_ENV = ROOT / "alembic" / "env.py"
 
 PROJECT = "ai-smm-control-center"
-HTTP_SERVICES = ("smm-api", "smm-web")
+HTTP_SERVICES = ("smm-api", "smm-auth", "smm-web")
 TOOL_SERVICES = ("migrate", "cli")
-PYTHON_SERVICES = ("smm-api", "migrate", "cli")
+PYTHON_SERVICES = ("smm-api", "smm-auth", "migrate", "cli")
+AUTH_VERIFY_SQL = DEPLOY_DIR / "db" / "ai_smm_auth.verify.sql"
+AUTH_SECRET_EXAMPLE = DEPLOY_DIR / "control-center.auth.env.example"
+#: smm-auth's one address, in cc-auth (ADR-024C-3A §9.2).
+AUTH_SUBNET = "10.231.18.0/29"
+AUTH_ADDRESS = "10.231.18.2"
+NGINX_CONF = ROOT / "web" / "nginx" / "default.conf"
+NGINX_AUTH_SNIPPET = ROOT / "web" / "nginx" / "smm-auth-proxy.inc"
+WEB_DOCKERFILE = ROOT / "web" / "Dockerfile"
 ALL_SERVICES = (*HTTP_SERVICES, *TOOL_SERVICES)
 
 
@@ -132,7 +142,7 @@ def test_images_are_prebuilt_never_built_or_pulled(
     assert services["smm-api"]["image"].startswith(f"ai-smm-api:{version}")
     assert services["smm-web"]["image"].startswith(f"ai-smm-web:{version}")
 
-    for name in TOOL_SERVICES:
+    for name in (*TOOL_SERVICES, "smm-auth"):
         assert services[name]["image"] == services["smm-api"]["image"], name
 
 
@@ -151,9 +161,13 @@ def test_only_web_publishes_a_port_on_loopback_8088(
 def test_network_definitions(compose: dict[str, Any]) -> None:
     networks = compose["networks"]
 
-    assert set(networks) == {"cc-internal", "cc-edge", "shared"}
+    assert set(networks) == {"cc-internal", "cc-edge", "cc-auth", "shared"}
 
     assert networks["cc-internal"]["internal"] is True
+    # smm-web <-> smm-auth only; a fixed subnet so smm-auth binds one address.
+    assert networks["cc-auth"]["internal"] is True
+    assert networks["cc-auth"]["name"] == "ai-smm-cc-auth"
+    assert networks["cc-auth"]["ipam"] == {"config": [{"subnet": AUTH_SUBNET}]}
     assert networks["cc-edge"].get("internal", False) is False
     assert networks["cc-edge"].get("external", False) is False
 
@@ -166,9 +180,16 @@ def test_network_definitions(compose: dict[str, Any]) -> None:
 
 def test_network_attachments(services: dict[str, Any]) -> None:
     # The web tier never sees the shared network (database, other projects).
-    assert _networks(services["smm-web"]) == {"cc-edge", "cc-internal"}
+    assert _networks(services["smm-web"]) == {"cc-edge", "cc-internal", "cc-auth"}
     # The API: reached by web on cc-internal, reaches the database on shared.
     assert _networks(services["smm-api"]) == {"cc-internal", "shared"}
+    # smm-auth: reached by web on cc-auth, at its fixed address; reaches
+    # the database on shared. Never on cc-internal: smm-api and smm-auth
+    # cannot reach each other.
+    assert services["smm-auth"]["networks"] == {
+        "cc-auth": {"ipv4_address": AUTH_ADDRESS},
+        "shared": {},
+    }
 
     # One-shot tools: the database only.
     for name in TOOL_SERVICES:
@@ -179,7 +200,10 @@ def test_network_attachments(services: dict[str, Any]) -> None:
         if "shared" in _networks(service)
     }
 
-    assert attached_to_shared == {"smm-api", *TOOL_SERVICES}
+    assert attached_to_shared == {"smm-api", "smm-auth", *TOOL_SERVICES}
+    assert {
+        name for name, service in services.items() if "cc-auth" in _networks(service)
+    } == {"smm-auth", "smm-web"}
 
     for name, service in services.items():
         assert "network_mode" not in service, name
@@ -200,7 +224,8 @@ def test_startup_order(services: dict[str, Any]) -> None:
         "smm-api": {"condition": "service_healthy"}
     }
 
-    for name in ("smm-api", *TOOL_SERVICES):
+    # Not on smm-auth: browsing with a session goes on while it is down.
+    for name in ("smm-api", "smm-auth", *TOOL_SERVICES):
         assert "depends_on" not in services[name], name
 
 
@@ -211,6 +236,8 @@ def test_only_the_dedicated_env_file_is_read(services: dict[str, Any]) -> None:
     # The API connects as its own restricted role (SMM-024C-2); only the
     # one-shot tools that migrate and bootstrap keep the owner URL.
     assert services["smm-api"]["env_file"] == ["control-center.api.env"]
+    # smm-auth: the sign-in role ai_smm_auth only (SMM-025D).
+    assert services["smm-auth"]["env_file"] == ["control-center.auth.env"]
 
     for name in TOOL_SERVICES:
         assert services[name]["env_file"] == ["control-center.env"], name
@@ -223,7 +250,7 @@ def test_only_the_dedicated_env_file_is_read(services: dict[str, Any]) -> None:
     assert "ai-smm.env" not in uncommented
     assert ".env\n" not in uncommented.replace(
         "control-center.api.env\n", ""
-    ).replace("control-center.env\n", "")
+    ).replace("control-center.auth.env\n", "").replace("control-center.env\n", "")
 
 
 def test_the_gate_pins_the_files_of_this_release() -> None:
@@ -243,6 +270,7 @@ def test_the_gate_pins_the_files_of_this_release() -> None:
         ("CC_PINNED_VERIFY_SHA256", VERIFY_SQL),
         ("CC_PINNED_MUTATIONS_COMPOSE_SHA256", MUTATIONS_COMPOSE_PATH),
         ("CC_PINNED_RW_VERIFY_SHA256", RW_VERIFY_SQL),
+        ("CC_PINNED_AUTH_VERIFY_SHA256", AUTH_VERIFY_SQL),
     ):
         pinned = re.search(rf"^readonly {name}=([0-9a-f]{{64}})$", gate, re.M)
 
@@ -278,17 +306,21 @@ DEPLOYED_RELEASE = "0cbd641074ad3bc0501e54f59dac90bd1ccc9006"
 GRANTS_IN_GIT = "deploy/control-center/db/ai_smm_cc.grants.sql"
 
 
-def _write_grants(sql: str) -> set[str]:
-    """GRANT INSERT/UPDATE/DELETE/TRUNCATE statements, whitespace-normalised."""
+def _write_grants(sql: str) -> set[tuple[str, str, str]]:
+    """(privilege, table, column) of every INSERT/UPDATE/DELETE/TRUNCATE
+    grant; '*' for a table-level one."""
 
     sql = re.sub(r"--[^\n]*", "", sql)
+    found: set[tuple[str, str, str]] = set()
 
-    return {
-        " ".join(statement.split())
-        for statement in re.findall(
-            r"GRANT\s+(?:INSERT|UPDATE|DELETE|TRUNCATE)\b[^;]*;", sql
-        )
-    }
+    for privilege, columns, table in re.findall(
+        r"GRANT\s+(INSERT|UPDATE|DELETE|TRUNCATE)\b\s*(?:\(([^)]*)\))?\s*ON\s+(\w+)",
+        sql,
+    ):
+        for column in (columns.split(",") if columns else ["*"]):
+            found.add((privilege, table, column.strip()))
+
+    return found
 
 
 def test_the_read_only_role_gains_no_write_over_the_deployed_release() -> None:
@@ -307,19 +339,63 @@ def test_the_read_only_role_gains_no_write_over_the_deployed_release() -> None:
 
     current = (DEPLOY_DIR / "db" / "ai_smm_cc.grants.sql").read_text(encoding="utf-8")
 
-    assert _write_grants(current) == _write_grants(deployed.stdout)
-    assert _write_grants(current)  # the session and audit writes are found
+    # Nothing new; G2 (SMM-025D) only takes away: session creation and
+    # revocation, the login columns of users and the audit entry are
+    # smm-auth's now.
+    current_writes = _write_grants(current)
+
+    assert current_writes <= _write_grants(deployed.stdout)
+    assert current_writes == {("UPDATE", "user_sessions", "last_seen_at")}
 
 
-def test_the_read_only_release_needs_no_credential_key() -> None:
-    """Neither compose file passes or mounts a key: the read-only rollout
-    deploys API, UI and worker without one (FU-025C-2 adds it before R7)."""
+#: The two FU-025C-2 values, interpolated into smm-api only.
+API_KEY_ENV = {
+    "AI_SMM_CREDENTIALS_PUBLIC_KEY": "${SMM_CC_CREDENTIALS_PUBLIC_KEY:?",
+    "AI_SMM_LEGACY_THREADS_PROJECTS": "${SMM_CC_LEGACY_THREADS_PROJECTS?",
+}
 
-    for path in (COMPOSE_PATH, WORKER_COMPOSE_PATH, MUTATIONS_COMPOSE_PATH):
+
+def test_only_the_api_gets_the_public_key_and_no_service_a_private_one(
+    services: dict[str, Any],
+) -> None:
+    """FU-025C-2: the public key and the legacy allow-list reach smm-api
+    and nothing else here; no Control Center file names a private key."""
+
+    for key, prefix in API_KEY_ENV.items():
+        assert services["smm-api"]["environment"][key].startswith(prefix), key
+
+        for name, service in services.items():
+            if name != "smm-api":
+                assert key not in (service.get("environment") or {}), (name, key)
+
+    for path in (COMPOSE_PATH, MUTATIONS_COMPOSE_PATH):
         text = path.read_text(encoding="utf-8")
 
-        assert "AI_SMM_CREDENTIALS" not in text, path.name
+        assert "PRIVATE_KEY" not in text, path.name
         assert ".pem" not in text, path.name
+        assert "/run/ai-smm/credential-keys" not in text, path.name
+
+
+def test_the_worker_mounts_the_private_key_read_only_and_migrate_does_not() -> None:
+    worker = yaml.safe_load(WORKER_COMPOSE_PATH.read_text(encoding="utf-8"))
+    key_mount = (
+        "${AI_SMM_CREDENTIAL_KEYS_HOST_PATH:?set AI_SMM_CREDENTIAL_KEYS_HOST_PATH"
+    )
+
+    for name in ("worker", "cli"):
+        mounts = [
+            m for m in worker["services"][name]["volumes"]
+            if "/run/ai-smm/credential-keys" in m
+        ]
+
+        assert len(mounts) == 1, name
+        assert mounts[0].startswith(key_mount), name
+        assert mounts[0].endswith(":/run/ai-smm/credential-keys:ro"), name
+        # The knowledge and media mounts are still there, unchanged.
+        assert len(worker["services"][name]["volumes"]) == 3, name
+
+    for mount in worker["services"]["migrate"]["volumes"]:
+        assert "credential" not in mount
 
 
 def test_api_secret_example_names_the_api_role() -> None:
@@ -329,6 +405,17 @@ def test_api_secret_example_names_the_api_role() -> None:
 
     assert (
         "AI_SMM_DATABASE_URL=postgresql+psycopg://ai_smm_cc:CHANGE_ME@"
+        "<postgres-container>:5432/ai_smm"
+    ) in text
+
+
+def test_auth_secret_example_names_the_sign_in_role() -> None:
+    assert _env_keys(AUTH_SECRET_EXAMPLE) == ["AI_SMM_DATABASE_URL"]
+
+    text = AUTH_SECRET_EXAMPLE.read_text(encoding="utf-8")
+
+    assert (
+        "AI_SMM_DATABASE_URL=postgresql+psycopg://ai_smm_auth:CHANGE_ME@"
         "<postgres-container>:5432/ai_smm"
     ) in text
 
@@ -365,15 +452,22 @@ def test_safety_settings_are_literals(services: dict[str, Any]) -> None:
         ):
             assert env[credential] == "", (name, credential)
 
+        # Sign-in is smm-auth's: smm-api mounts no login or logout.
+        assert env["AI_SMM_API_AUTH_ROUTES"] == "false", name
+
         # The database URL comes from control-center.env only.
         assert "AI_SMM_DATABASE_URL" not in env, name
 
         for key, value in env.items():
+            if name == "smm-api" and key in API_KEY_ENV:
+                continue  # FU-025C-2, validated by the wrapper
+
             assert "${" not in str(value), (name, key)
 
 
 def test_interpolation_is_limited_and_required() -> None:
-    """Two variables, both required, neither with a default."""
+    """Four variables, all required, none with a default. The legacy
+    allow-list may be empty (no legacy project) but never unset."""
 
     text = COMPOSE_PATH.read_text(encoding="utf-8")
     uncommented = re.sub(r"#[^\n]*", "", text)
@@ -382,10 +476,15 @@ def test_interpolation_is_limited_and_required() -> None:
     assert {name for name, _ in references} == {
         "SMM_CC_VERSION",
         "SMM_CC_SHARED_NETWORK",
+        "SMM_CC_CREDENTIALS_PUBLIC_KEY",
+        "SMM_CC_LEGACY_THREADS_PROJECTS",
     }
 
     for name, modifier in references:
-        assert modifier.startswith(":?"), (name, modifier)
+        if name == "SMM_CC_LEGACY_THREADS_PROJECTS":
+            assert modifier.startswith("?"), (name, modifier)
+        else:
+            assert modifier.startswith(":?"), (name, modifier)
 
     assert "$$" not in uncommented
 
@@ -398,8 +497,10 @@ def test_secret_example_holds_only_the_database_url() -> None:
     assert ":CHANGE_ME@<postgres-container>:5432/ai_smm" in text
 
 
-def test_interpolation_example_holds_only_its_two_keys() -> None:
+def test_interpolation_example_holds_only_its_four_keys() -> None:
     assert sorted(_env_keys(INTERP_EXAMPLE)) == [
+        "SMM_CC_CREDENTIALS_PUBLIC_KEY",
+        "SMM_CC_LEGACY_THREADS_PROJECTS",
         "SMM_CC_SHARED_NETWORK",
         "SMM_CC_VERSION",
     ]
@@ -466,7 +567,8 @@ def test_env_files_never_enter_an_image() -> None:
     [
         COMPOSE_PATH, WRAPPER, BACKUP, COMMON,
         SECRET_EXAMPLE, API_SECRET_EXAMPLE, INTERP_EXAMPLE, TARGET_EXAMPLE,
-        RW_SECRET_EXAMPLE, MUTATIONS_COMPOSE_PATH,
+        RW_SECRET_EXAMPLE, MUTATIONS_COMPOSE_PATH, AUTH_SECRET_EXAMPLE,
+        WORKER_COMPOSE_PATH, NGINX_CONF, NGINX_AUTH_SNIPPET,
         *sorted((DEPLOY_DIR / "db").glob("*.sql")),
     ],
 )
@@ -587,6 +689,63 @@ def test_the_api_runs_the_image_entrypoint_only(
     assert "command" not in api
 
 
+def test_auth_runs_the_auth_application_bound_to_its_address_only(
+    services: dict[str, Any],
+) -> None:
+    """ADR-024C-3A §9.2: no listening socket on the shared network; the
+    application refuses any other peer as well."""
+
+    auth = services["smm-auth"]
+
+    assert auth["entrypoint"] == [
+        "/app/.venv/bin/uvicorn", "ai_smm.api.auth_service:create_auth_app",
+        "--factory", "--host", AUTH_ADDRESS, "--port", "8000",
+        "--no-access-log", "--no-server-header",
+    ]
+    assert "command" not in auth
+    assert auth["environment"]["AI_SMM_AUTH_ALLOWED_PEERS"] == AUTH_SUBNET
+    assert auth["environment"]["PGAPPNAME"] == "ai-smm-control-center-auth"
+    assert AUTH_ADDRESS in " ".join(auth["healthcheck"]["test"])
+    # Argon2 at 64 MiB, two at a time, plus the interpreter.
+    assert auth["mem_limit"] == "320m"
+
+
+def test_nginx_sends_sign_in_sign_out_and_step_up_to_smm_auth() -> None:
+    conf = NGINX_CONF.read_text(encoding="utf-8")
+    snippet = NGINX_AUTH_SNIPPET.read_text(encoding="utf-8")
+
+    assert "set $smm_auth http://smm-auth:8000;" in conf
+
+    for location in (
+        "location = /api/v1/auth/login {",
+        "location = /api/v1/auth/logout {",
+        "location ^~ /api/v1/auth/step-up/ {",
+    ):
+        start = conf.index(location)
+        block = conf[start:conf.index("}", start)]
+
+        assert "include /etc/nginx/snippets/smm-auth-proxy.inc;" in block, location
+
+        if "logout" not in location:
+            assert "limit_req zone=smm_auth" in block, location
+
+    assert "proxy_pass $smm_auth;" in snippet
+    assert "$smm_api" not in snippet
+    assert "error_page 502 504 = @auth_unavailable;" in snippet
+    assert '"dependency":"auth"' in conf
+    # Every other /api path still goes to smm-api, which mounts no login.
+    assert "proxy_pass $smm_api;" in (
+        ROOT / "web" / "nginx" / "smm-proxy.inc"
+    ).read_text(encoding="utf-8")
+
+    dockerfile = WEB_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert (
+        "COPY --chown=root:root nginx/smm-auth-proxy.inc "
+        "/etc/nginx/snippets/smm-auth-proxy.inc"
+    ) in dockerfile
+
+
 def test_cli_is_pinned_to_user_management(services: dict[str, Any]) -> None:
     """No schedule, approve, publish-now or import from this project."""
 
@@ -610,6 +769,14 @@ def test_worker_compose_is_untouched_by_this_packaging() -> None:
 #
 # Through the wrapper's `config` verb with the real Docker Compose CLI.
 # `config` does not contact a daemon; the pinned socket only has to exist.
+
+
+INTERP_FIXTURE = (
+    f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
+    f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n"
+    f"SMM_CC_CREDENTIALS_PUBLIC_KEY={FIXTURE_PUBLIC_KEY}\n"
+    "SMM_CC_LEGACY_THREADS_PROJECTS=\n"
+)
 
 
 def _docker_compose_available() -> bool:
@@ -666,7 +833,7 @@ def _compose_direct(
 
 
 @needs_compose
-def test_rendered_default_up_starts_web_and_api_only(deploy_dir: Path) -> None:
+def test_rendered_default_up_starts_web_api_and_auth_only(deploy_dir: Path) -> None:
     rendered = _render(deploy_dir)
 
     assert rendered["name"] == PROJECT
@@ -699,12 +866,27 @@ def test_rendered_ports_and_networks(deploy_dir: Path) -> None:
     assert networks["shared"]["name"] == FIXTURE_NETWORK
     assert networks["shared"]["external"] is True
     assert networks["cc-internal"]["internal"] is True
+    assert networks["cc-auth"]["internal"] is True
+    assert networks["cc-auth"]["ipam"]["config"] == [{"subnet": AUTH_SUBNET}]
+    assert services["smm-auth"]["networks"]["cc-auth"]["ipv4_address"] == AUTH_ADDRESS
+
+    # FU-025C-2: the wrapper-validated values, on smm-api only.
+    api_env = services["smm-api"]["environment"]
+
+    assert api_env["AI_SMM_CREDENTIALS_PUBLIC_KEY"] == FIXTURE_PUBLIC_KEY
+    assert api_env["AI_SMM_LEGACY_THREADS_PROJECTS"] == ""
+
+    for name in ("smm-auth", "migrate", "cli"):
+        env = services[name]["environment"]
+
+        assert "AI_SMM_CREDENTIALS_PUBLIC_KEY" not in env, name
 
 
 @needs_compose
 def test_wrapper_config_never_prints_the_database_url(deploy_dir: Path) -> None:
     passwords = [
-        dsn.split(":")[2].split("@")[0] for dsn in (FIXTURE_DSN, FIXTURE_API_DSN)
+        dsn.split(":")[2].split("@")[0]
+        for dsn in (FIXTURE_DSN, FIXTURE_API_DSN, FIXTURE_AUTH_DSN)
     ]
 
     for args in ((), ("--json",), ("--json", "--with-tools"), ("--services",)):
@@ -736,8 +918,13 @@ def test_rendered_env_holds_only_the_fixture_database_url(
 
     services = json.loads(result.stdout)["services"]
 
-    # The API as ai_smm_cc; migrate as the owner, the worker's URL.
-    for name, dsn in (("smm-api", FIXTURE_API_DSN), ("migrate", FIXTURE_DSN)):
+    # The API as ai_smm_cc; smm-auth as ai_smm_auth; migrate as the owner,
+    # the worker's URL.
+    for name, dsn in (
+        ("smm-api", FIXTURE_API_DSN),
+        ("smm-auth", FIXTURE_AUTH_DSN),
+        ("migrate", FIXTURE_DSN),
+    ):
         env = services[name]["environment"]
 
         assert env["AI_SMM_DATABASE_URL"] == dsn, name
@@ -781,9 +968,7 @@ def test_bare_compose_would_be_renamed_by_a_dotenv(tmp_path: Path) -> None:
     directory.mkdir()
     shutil.copy(COMPOSE_PATH, directory / COMPOSE_PATH.name)
     (directory / ".env").write_text(
-        "COMPOSE_PROJECT_NAME=ai-smm\n"
-        f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
-        f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n",
+        "COMPOSE_PROJECT_NAME=ai-smm\n" + INTERP_FIXTURE,
         encoding="utf-8",
     )
     (directory / "control-center.env").write_text(
@@ -791,6 +976,9 @@ def test_bare_compose_would_be_renamed_by_a_dotenv(tmp_path: Path) -> None:
     )
     (directory / "control-center.api.env").write_text(
         f"AI_SMM_DATABASE_URL={FIXTURE_API_DSN}\n", encoding="utf-8"
+    )
+    (directory / "control-center.auth.env").write_text(
+        f"AI_SMM_DATABASE_URL={FIXTURE_AUTH_DSN}\n", encoding="utf-8"
     )
 
     result = _compose_direct(
@@ -809,11 +997,7 @@ def test_env_file_cannot_override_the_literals(tmp_path: Path) -> None:
     directory = tmp_path / "cc"
     directory.mkdir()
     shutil.copy(COMPOSE_PATH, directory / COMPOSE_PATH.name)
-    (directory / "interp.env").write_text(
-        f"SMM_CC_VERSION={FIXTURE_VERSION}\n"
-        f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n",
-        encoding="utf-8",
-    )
+    (directory / "interp.env").write_text(INTERP_FIXTURE, encoding="utf-8")
     overrides = (
         "AI_SMM_API_MUTATIONS_ENABLED=true\n"
         "AI_SMM_API_DOCS_ENABLED=true\n"
@@ -821,11 +1005,15 @@ def test_env_file_cannot_override_the_literals(tmp_path: Path) -> None:
         "THREADS_ACCESS_TOKEN=fixture-not-a-token\n"
         "OPENAI_API_KEY=fixture-not-a-key\n"
         "THREADS_API_BASE_URL=https://graph.threads.net\n"
+        "AI_SMM_API_AUTH_ROUTES=true\n"
+        "AI_SMM_AUTH_ALLOWED_PEERS=0.0.0.0/0\n"
+        "AI_SMM_CREDENTIALS_PUBLIC_KEY=fixture-not-the-key\n"
     )
 
     for name, dsn in (
         ("control-center.env", FIXTURE_DSN),
         ("control-center.api.env", FIXTURE_API_DSN),
+        ("control-center.auth.env", FIXTURE_AUTH_DSN),
     ):
         (directory / name).write_text(
             f"AI_SMM_DATABASE_URL={dsn}\n" + overrides, encoding="utf-8"
@@ -841,8 +1029,18 @@ def test_env_file_cannot_override_the_literals(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
 
-    for service in ("smm-api", "migrate"):
-        env = json.loads(result.stdout)["services"][service]["environment"]
+    rendered = json.loads(result.stdout)["services"]
+
+    auth_env = rendered["smm-auth"]["environment"]
+
+    assert auth_env["AI_SMM_AUTH_ALLOWED_PEERS"] == AUTH_SUBNET
+    assert (
+        rendered["smm-api"]["environment"]["AI_SMM_CREDENTIALS_PUBLIC_KEY"]
+        == FIXTURE_PUBLIC_KEY
+    )
+
+    for service in ("smm-api", "smm-auth", "migrate"):
+        env = rendered[service]["environment"]
 
         assert env["AI_SMM_API_MUTATIONS_ENABLED"] == "false", service
         assert env["AI_SMM_API_DOCS_ENABLED"] == "false", service
@@ -850,6 +1048,7 @@ def test_env_file_cannot_override_the_literals(tmp_path: Path) -> None:
         assert env["THREADS_ACCESS_TOKEN"] == "", service
         assert env["OPENAI_API_KEY"] == "", service
         assert env["THREADS_API_BASE_URL"] == "http://127.0.0.1:9", service
+        assert env["AI_SMM_API_AUTH_ROUTES"] == "false", service
 
 
 @needs_compose
@@ -861,10 +1060,17 @@ def test_missing_version_or_network_fails_to_render(tmp_path: Path) -> None:
         f"AI_SMM_DATABASE_URL={FIXTURE_DSN}\n", encoding="utf-8"
     )
 
-    for interp, missing in (
-        (f"SMM_CC_SHARED_NETWORK={FIXTURE_NETWORK}\n", "SMM_CC_VERSION"),
-        (f"SMM_CC_VERSION={FIXTURE_VERSION}\n", "SMM_CC_SHARED_NETWORK"),
+    for missing in (
+        "SMM_CC_VERSION",
+        "SMM_CC_SHARED_NETWORK",
+        "SMM_CC_CREDENTIALS_PUBLIC_KEY",
+        "SMM_CC_LEGACY_THREADS_PROJECTS",
     ):
+        interp = "".join(
+            line + "\n"
+            for line in INTERP_FIXTURE.splitlines()
+            if not line.startswith(f"{missing}=")
+        )
         (directory / "interp.env").write_text(interp, encoding="utf-8")
 
         result = _compose_direct(

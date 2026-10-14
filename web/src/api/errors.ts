@@ -32,6 +32,13 @@ export const ErrorCode = {
   ACCOUNT_ALREADY_CONNECTED: "ACCOUNT_ALREADY_CONNECTED",
   CREDENTIAL_REJECTED: "CREDENTIAL_REJECTED",
   CREDENTIALS_NOT_CONFIGURED: "CREDENTIALS_NOT_CONFIGURED",
+  // SMM-025D
+  /** An approval needs a fresh password confirmation (smm-auth step-up). */
+  APPROVAL_CONFIRMATION_REQUIRED: "APPROVAL_CONFIRMATION_REQUIRED",
+  /** The step-up password did not confirm; the session itself is intact. */
+  STEP_UP_FAILED: "STEP_UP_FAILED",
+  /** PostgreSQL's business guards refused the change. */
+  GUARD_REFUSED: "GUARD_REFUSED",
   // Client-side only: the request never produced an HTTP response, or the
   // response was not the API's envelope (a proxy page, for example).
   NETWORK_ERROR: "NETWORK_ERROR",

@@ -9,6 +9,7 @@ import {
   REV2_ID,
   createServer,
   makeApproval,
+  makeApprovalPreview,
   makeItem,
   makePublication,
   makeRevision,
@@ -20,7 +21,7 @@ const dialog = () => screen.getByRole("dialog");
 
 describe("content list", () => {
   it("shows the columns and passes filters and pagination to the API", async () => {
-    const server = createServer("editor");
+    const server = createServer("owner");
     server.on(
       "GET",
       "/api/v1/projects/:projectId/content-items",
@@ -59,7 +60,7 @@ describe("content list", () => {
 
 describe("create content", () => {
   it("creates the item and its first revision in one request", async () => {
-    const server = createServer("editor");
+    const server = createServer("owner");
     server.on("POST", "/api/v1/projects/:projectId/content-items", ok(makeItem("draft"), 201));
     const { user } = renderApp(server, `/projects/${PROJECT_ID}/content/new`);
 
@@ -104,7 +105,7 @@ describe("content detail", () => {
       current_revision: makeRevision({ id: REV2_ID, revision_number: 2, body: "Second text" }),
       current_revision_id: REV2_ID,
     });
-    const server = createServer("editor", { item });
+    const server = createServer("owner", { item });
     server.on("GET", "/api/v1/content-items/:id/approvals", ok(page([makeApproval()])));
     renderApp(server, `/content/${ITEM_ID}`);
 
@@ -116,7 +117,7 @@ describe("content detail", () => {
 
 describe("new revision", () => {
   it("POSTs a new revision with expected_item_version, never PATCH", async () => {
-    const server = createServer("editor", { item: makeItem("approved") });
+    const server = createServer("owner", { item: makeItem("approved") });
     server.on(
       "POST",
       "/api/v1/content-items/:id/revisions",
@@ -142,7 +143,7 @@ describe("new revision", () => {
   });
 
   it("explains VERSION_CONFLICT and requires a reload instead of overwriting", async () => {
-    const server = createServer("editor");
+    const server = createServer("owner");
     server.on(
       "POST",
       "/api/v1/content-items/:id/revisions",
@@ -172,7 +173,7 @@ describe("new revision", () => {
 
 describe("review decisions", () => {
   it("submits the exact revision on screen for review", async () => {
-    const server = createServer("editor", { item: makeItem("draft") });
+    const server = createServer("owner", { item: makeItem("draft") });
     server.on("POST", "/api/v1/content-items/:id/submit-review", ok(makeItem("in_review")));
     const { user } = renderApp(server, `/content/${ITEM_ID}`);
 
@@ -184,8 +185,8 @@ describe("review decisions", () => {
     expect(call!.body).toEqual({ revision_id: REV1_ID, expected_item_version: 3 });
   });
 
-  it("approves only after a confirmation that shows the exact revision", async () => {
-    const server = createServer("editor", { item: makeItem("in_review") });
+  it("approves only after smm-auth's preview and the owner's password", async () => {
+    const server = createServer("owner", { item: makeItem("in_review") });
     server.on(
       "POST",
       "/api/v1/content-items/:id/approve",
@@ -196,22 +197,102 @@ describe("review decisions", () => {
     await user.click(await screen.findByRole("button", { name: "Approve" }));
     expect(server.callsTo("POST", /approve$/)).toHaveLength(0);
 
+    // What is shown is smm-auth's reading of the revision, fetched now.
     const modal = dialog();
-    expect(within(modal).getByText("Exact body of revision one")).toBeInTheDocument();
+    expect(await within(modal).findByText("Exact body of revision one")).toBeInTheDocument();
+    expect(server.callsTo("GET", `/api/v1/auth/step-up/approvals/${REV1_ID}`)).toHaveLength(1);
     expect(within(modal).getByText(REV1_ID)).toBeInTheDocument();
     expect(within(modal).getByText("#1")).toBeInTheDocument();
 
-    await user.click(within(modal).getByRole("button", { name: "Approve this revision" }));
+    const confirm = within(modal).getByRole("button", { name: "Approve this revision" });
+    expect(confirm).toBeDisabled();
+
+    await user.type(within(modal).getByLabelText("Password to confirm the approval"), "owner-pw");
+    expect(confirm).toBeEnabled();
+    await user.click(confirm);
 
     await waitFor(() => expect(server.callsTo("POST", /approve$/)).toHaveLength(1));
+    const stepUp = server.callsTo("POST", "/api/v1/auth/step-up/approvals");
+    expect(stepUp).toHaveLength(1);
+    expect(stepUp[0]!.body).toEqual({ revision_id: REV1_ID, password: "owner-pw" });
+    expect(stepUp[0]!.headers["x-csrf-token"]).toBe(server.csrfToken);
+    // The step-up first, then the approval -- which never carries the password.
+    expect(server.calls.indexOf(stepUp[0]!)).toBeLessThan(
+      server.calls.indexOf(server.callsTo("POST", /approve$/)[0]!),
+    );
     expect(server.callsTo("POST", /approve$/)[0]!.body).toEqual({
       revision_id: REV1_ID,
       expected_item_version: 3,
     });
   });
 
+  it("a wrong step-up password approves nothing and keeps the session", async () => {
+    const server = createServer("owner", { item: makeItem("in_review") });
+    server.on(
+      "POST",
+      "/api/v1/auth/step-up/approvals",
+      apiError(401, "STEP_UP_FAILED", "The password did not confirm the approval."),
+    );
+    const { user } = renderApp(server, `/content/${ITEM_ID}`);
+
+    await user.click(await screen.findByRole("button", { name: "Approve" }));
+    const modal = dialog();
+    await within(modal).findByText("Exact body of revision one");
+    const field = within(modal).getByLabelText("Password to confirm the approval");
+    await user.type(field, "wrong");
+    await user.click(within(modal).getByRole("button", { name: "Approve this revision" }));
+
+    expect(await within(modal).findByText(/Пароль не подтвердил одобрение/)).toBeInTheDocument();
+    expect(server.callsTo("POST", /approve$/)).toHaveLength(0);
+    // Not signed out, and the field is empty for the next attempt.
+    expect(screen.getByRole("heading", { name: "Launch post" })).toBeInTheDocument();
+    expect(field).toHaveValue("");
+  });
+
+  it("refuses to confirm when smm-auth reads different content", async () => {
+    const server = createServer("owner", { item: makeItem("in_review") });
+    server.on(
+      "GET",
+      "/api/v1/auth/step-up/approvals/:revisionId",
+      ok(
+        makeApprovalPreview(makeItem("in_review"), {
+          body: "Text swapped behind the page",
+          content_hash: "0".repeat(64),
+        }),
+      ),
+    );
+    const { user } = renderApp(server, `/content/${ITEM_ID}`);
+
+    await user.click(await screen.findByRole("button", { name: "Approve" }));
+    const modal = dialog();
+
+    expect(await within(modal).findByText(/сервис входа видит другое содержимое/)).toBeInTheDocument();
+    expect(within(modal).getByLabelText("Password to confirm the approval")).toBeDisabled();
+    expect(within(modal).getByRole("button", { name: "Approve this revision" })).toBeDisabled();
+    expect(server.callsTo("POST", "/api/v1/auth/step-up/approvals")).toHaveLength(0);
+  });
+
+  it("explains a database refusal of an approval without a confirmation", async () => {
+    const server = createServer("owner", { item: makeItem("in_review") });
+    server.on(
+      "POST",
+      "/api/v1/content-items/:id/approve",
+      apiError(403, "APPROVAL_CONFIRMATION_REQUIRED", "Approving needs a fresh confirmation."),
+    );
+    const { user } = renderApp(server, `/content/${ITEM_ID}`);
+
+    await user.click(await screen.findByRole("button", { name: "Approve" }));
+    const modal = dialog();
+    await within(modal).findByText("Exact body of revision one");
+    await user.type(within(modal).getByLabelText("Password to confirm the approval"), "owner-pw");
+    await user.click(within(modal).getByRole("button", { name: "Approve this revision" }));
+
+    expect(await within(modal).findByText(/Нужно подтверждение паролем/)).toBeInTheDocument();
+    expect(screen.queryByText(/Недостаточно прав/)).not.toBeInTheDocument();
+  });
+
   it("rejects with an optional note", async () => {
-    const server = createServer("editor", { item: makeItem("in_review") });
+    const server = createServer("owner", { item: makeItem("in_review") });
     server.on(
       "POST",
       "/api/v1/content-items/:id/reject",
@@ -232,7 +313,7 @@ describe("review decisions", () => {
   });
 
   it("on STALE_REVISION records nothing and reloads the current revision", async () => {
-    const server = createServer("editor", { item: makeItem("in_review") });
+    const server = createServer("owner", { item: makeItem("in_review") });
     server.on(
       "POST",
       "/api/v1/content-items/:id/approve",
@@ -256,6 +337,10 @@ describe("review decisions", () => {
         }),
       ),
     );
+    await user.type(
+      await within(dialog()).findByLabelText("Password to confirm the approval"),
+      "owner-pw",
+    );
     await user.click(within(dialog()).getByRole("button", { name: "Approve this revision" }));
 
     expect(await screen.findByText(/STALE_REVISION/)).toBeInTheDocument();
@@ -266,7 +351,7 @@ describe("review decisions", () => {
 
 describe("materialize", () => {
   it("is called a delivery snapshot, confirms revision/hash/platform and posts the revision", async () => {
-    const server = createServer("editor", { item: makeItem("approved") });
+    const server = createServer("owner", { item: makeItem("approved") });
     server.on(
       "POST",
       "/api/v1/content-items/:id/materialize",

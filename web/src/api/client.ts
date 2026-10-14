@@ -155,7 +155,13 @@ export class ApiClient {
 
     const error = await toApiError(response);
 
-    if (error.status === 401 && error.code !== ErrorCode.INVALID_CREDENTIALS) {
+    // A wrong password -- at sign-in, or confirming an approval -- is not
+    // a lost session: only other 401s sign the user out.
+    if (
+      error.status === 401 &&
+      error.code !== ErrorCode.INVALID_CREDENTIALS &&
+      error.code !== ErrorCode.STEP_UP_FAILED
+    ) {
       this.clearCsrfToken();
       this.#unauthorizedListeners.forEach((listener) => listener(error));
     }

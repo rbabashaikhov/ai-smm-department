@@ -69,39 +69,54 @@ describe("viewer is read-only", () => {
   });
 });
 
-describe("editor", () => {
-  it("can approve content but is offered no schedule/reschedule/cancel", async () => {
-    const server = createServer("editor", { item: makeItem("in_review") });
+// SMM-025D: every business change is the owner's. editor and admin read
+// (admin also the audit trail); the API and the database refuse them.
+describe.each(["editor", "admin"] as const)("%s is offered no business change", (role) => {
+  it.each<ContentStatus>(["draft", "in_review", "approved"])(
+    "content detail in %s offers no write action",
+    async (status) => {
+      const server = createServer(role, { item: makeItem(status) });
+      renderApp(server, `/content/${ITEM_ID}`);
+
+      await screen.findByRole("heading", { name: "Launch post" });
+
+      for (const name of WRITE_BUTTONS) {
+        expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
+      }
+    },
+  );
+
+  it("gets no queue command in the publication list or on the publication page", async () => {
+    const server = createServer(role);
     server.on(
       "GET",
       "/api/v1/projects/:projectId/publications",
-      ok(page([makePublication("approved"), makePublication("failed", { id: 2, title: "Failed" })])),
+      ok(page([makePublication("approved"), makePublication("scheduled", { id: 2, title: "Queued" })])),
     );
-    const { user } = renderApp(server, `/content/${ITEM_ID}`);
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/content`);
 
-    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New Revision" })).toBeInTheDocument();
+    await screen.findByRole("link", { name: "Launch post" });
+    expect(screen.queryByRole("link", { name: "Create Content" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("link", { name: "Publications" }));
-    await screen.findByRole("link", { name: "Failed" });
+    await screen.findByRole("link", { name: "Queued" });
     for (const name of ["Schedule", "Reschedule", "Cancel"]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     }
   });
-
-  it("gets no schedule control on the publication page either", async () => {
-    const server = createServer("editor");
-    renderApp(server, `/publications/${PUBLICATION_ID}`);
-
-    await screen.findByText("Exact immutable snapshot body");
-    expect(screen.queryByRole("button", { name: "Schedule" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
-  });
 });
 
-describe("admin", () => {
+describe("owner", () => {
+  it("is offered approve and a new revision on content under review", async () => {
+    const server = createServer("owner", { item: makeItem("in_review") });
+    renderApp(server, `/content/${ITEM_ID}`);
+
+    expect(await screen.findByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New Revision" })).toBeInTheDocument();
+  });
+
   it("is offered schedule and cancel for an approved snapshot, reschedule for a scheduled one", async () => {
-    const server = createServer("admin");
+    const server = createServer("owner");
     server.on(
       "GET",
       "/api/v1/projects/:projectId/publications",
@@ -118,7 +133,9 @@ describe("admin", () => {
     expect(within(scheduledRow).getByRole("button", { name: "Reschedule" })).toBeInTheDocument();
     expect(within(scheduledRow).queryByRole("button", { name: "Schedule" })).not.toBeInTheDocument();
   });
+});
 
+describe("admin", () => {
   it("sees Audit in the sidebar", async () => {
     const server = createServer("admin");
     renderApp(server, `/projects/${PROJECT_ID}`);
@@ -129,7 +146,7 @@ describe("admin", () => {
 
 describe("the backend stays the authority", () => {
   it("a 403 from the server is shown even if the UI offered the action", async () => {
-    const server = createServer("admin");
+    const server = createServer("owner");
     server.on(
       "POST",
       "/api/v1/publications/:id/cancel",

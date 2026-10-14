@@ -23,6 +23,9 @@ readonly CC_API_ROLE=ai_smm_cc
 # Business-mutation mode (SMM-025C): its own role, URL file and compose
 # override, used only while the state file names the running release.
 readonly CC_RW_SECRET_FILE_NAME=control-center.api-rw.env
+# smm-auth only (SMM-025D, ADR-024C-3A): the sign-in service's role.
+readonly CC_AUTH_SECRET_FILE_NAME=control-center.auth.env
+readonly CC_AUTH_ROLE=ai_smm_auth
 readonly CC_RW_ROLE=ai_smm_cc_rw
 readonly CC_MUTATIONS_COMPOSE_FILE_NAME=compose.control-center.mutations.yml
 readonly CC_MUTATIONS_STATE_FILE_NAME=control-center.mutations
@@ -86,12 +89,15 @@ cc_load_dir() {
     done
 }
 
-# Sets CC_VERSION and CC_NETWORK from control-center.compose.env.
+# Sets CC_VERSION, CC_NETWORK, CC_PUBLIC_KEY, CC_PUBLIC_KEY_ID and
+# CC_LEGACY_PROJECTS from control-center.compose.env.
 cc_load_compose_env() {
     local file="$CC_DIR/$CC_INTERP_FILE_NAME"
+    local project_re='[a-z0-9][a-z0-9_-]{0,119}'
 
     cc_require_file "$file"
-    cc_check_keys "$file" SMM_CC_SHARED_NETWORK SMM_CC_VERSION
+    cc_check_keys "$file" SMM_CC_SHARED_NETWORK SMM_CC_VERSION \
+        SMM_CC_CREDENTIALS_PUBLIC_KEY SMM_CC_LEGACY_THREADS_PROJECTS
 
     CC_VERSION="$(cc_value_of "$file" SMM_CC_VERSION)"
     [[ "$CC_VERSION" =~ ^[0-9a-f]{40}$ ]] \
@@ -101,6 +107,34 @@ cc_load_compose_env() {
     [[ -n "$CC_NETWORK" ]] || cc_die "SMM_CC_SHARED_NETWORK is empty"
     [[ "$CC_NETWORK" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] \
         || cc_die "SMM_CC_SHARED_NETWORK is not a network name: '$CC_NETWORK'"
+
+    # FU-025C-2 (docs/credential-keys.md). Not secret: printed as a key id.
+    CC_PUBLIC_KEY="$(cc_value_of "$file" SMM_CC_CREDENTIALS_PUBLIC_KEY)"
+    [[ "$CC_PUBLIC_KEY" =~ ^[A-Za-z0-9+/]{43}=$ ]] \
+        || cc_die "SMM_CC_CREDENTIALS_PUBLIC_KEY is not the base64 of a 32-byte key (ai-smm credentials keygen prints it)"
+    [[ "$CC_PUBLIC_KEY" != AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= ]] \
+        || cc_die "SMM_CC_CREDENTIALS_PUBLIC_KEY is still the example's placeholder"
+    CC_PUBLIC_KEY_ID="$(printf '%s' "$CC_PUBLIC_KEY" | base64 -d 2>/dev/null | sha256sum | cut -c1-16)"
+    [[ "$CC_PUBLIC_KEY_ID" =~ ^[0-9a-f]{16}$ ]] \
+        || cc_die "SMM_CC_CREDENTIALS_PUBLIC_KEY cannot be decoded"
+
+    CC_LEGACY_PROJECTS="$(cc_value_of "$file" SMM_CC_LEGACY_THREADS_PROJECTS)"
+    [[ -z "$CC_LEGACY_PROJECTS" || "$CC_LEGACY_PROJECTS" =~ ^$project_re(,$project_re)*$ ]] \
+        || cc_die "SMM_CC_LEGACY_THREADS_PROJECTS must be project ids separated by commas (no spaces), or empty"
+}
+
+# A comma-separated list as one sorted, de-duplicated line ("" for none).
+cc_list_set() {
+    local item items=() IFS=,
+
+    for item in $1; do
+        item="${item#"${item%%[![:space:]]*}"}"
+        item="${item%"${item##*[![:space:]]}"}"
+        [[ -n "$item" ]] && items+=("$item")
+    done
+
+    (( ${#items[@]} )) || return 0
+    printf '%s\n' "${items[@]}" | LC_ALL=C sort -u | paste -sd, -
 }
 
 # Sets CC_DSN from control-center.env: exactly one key, mode 600. The
@@ -147,6 +181,21 @@ cc_load_rw_secret() {
         || cc_die "$file is mode $mode; it holds the mutation role's database password and must be 600"
 
     CC_RW_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
+}
+
+# Sets CC_AUTH_DSN from control-center.auth.env, smm-auth's file: exactly
+# one key, mode 600. Checked by the auth role gate (cc_gate_auth_role).
+cc_load_auth_secret() {
+    local file="$CC_DIR/$CC_AUTH_SECRET_FILE_NAME" mode
+
+    cc_require_file "$file"
+    cc_check_keys "$file" AI_SMM_DATABASE_URL
+
+    mode="$(stat -c '%a' "$file")"
+    (( (8#$mode & 8#077) == 0 )) \
+        || cc_die "$file is mode $mode; it holds the sign-in service's database password and must be 600"
+
+    CC_AUTH_DSN="$(cc_value_of "$file" AI_SMM_DATABASE_URL)"
 }
 
 # Reads control-center.mutations, written only by `mutations enable`.

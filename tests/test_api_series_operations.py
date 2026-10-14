@@ -409,7 +409,7 @@ def test_audit_shows_entries_about_this_project(
     client, session: Session, login, member, project: str, make_publication
 ) -> None:
     publication = make_publication(status=PublicationStatus.SCHEDULED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     client.post(
         f"/api/v1/publications/{publication.id}/cancel",
@@ -435,7 +435,7 @@ def test_audit_can_be_filtered_by_action(
 ) -> None:
     first = make_publication(status=PublicationStatus.SCHEDULED)
     second = make_publication(status=PublicationStatus.APPROVED)
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
     headers = {"X-CSRF-Token": csrf}
 
     client.post(
@@ -513,7 +513,7 @@ def test_audit_excludes_another_projects_entries(
 def test_audit_includes_project_level_entries(
     client, login, member, project: str
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
 
     client.patch(
         f"/api/v1/projects/{project}/settings",
@@ -530,7 +530,7 @@ def test_audit_includes_project_level_entries(
 def test_audit_is_paginated(
     client, session: Session, login, member, project: str, make_publication
 ) -> None:
-    csrf = login(member(MembershipRole.ADMIN))
+    csrf = login(member(MembershipRole.OWNER))
     headers = {"X-CSRF-Token": csrf}
 
     for _ in range(3):

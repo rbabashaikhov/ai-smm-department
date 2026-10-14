@@ -141,6 +141,36 @@ def test_an_account_row_is_published_with_its_own_token_only(
     assert stored.id == publication.id
 
 
+@pytest.mark.parametrize("spoil", ["no_lineage", "text_changed_after_approval"])
+def test_the_worker_refuses_a_row_whose_approval_lineage_does_not_hold(
+    session: Session, make_account, make_publication, route, identity_service, spoil
+) -> None:
+    """SMM-025D: asked of the database right before any external call, so a
+    row the guards did not see being written (an owner-role path) is caught
+    too. A permanent failure; nothing reaches Threads."""
+
+    account, _ = make_account()
+
+    if spoil == "no_lineage":
+        publication = make_publication(social_account_id=account.id, lineage=False)
+    else:
+        publication = make_publication(social_account_id=account.id)
+        publication.body = "Текст, которого никто не одобрял."
+        session.commit()
+
+    calls_before = list(identity_service.calls)
+    outcome, legacy, accounts, stored = route()
+
+    assert outcome.status == "failed"
+    assert "Approval lineage does not hold" in outcome.detail
+    assert stored.status is PublicationStatus.FAILED
+    assert accounts.tokens == [] and accounts.publish_calls == []
+    assert legacy.calls == 0
+    # Not even the identity check (GET /me) was made.
+    assert identity_service.calls == calls_before
+    assert stored.id == publication.id
+
+
 def test_two_accounts_each_get_their_own_token(
     session: Session, make_account, make_publication, route
 ) -> None:

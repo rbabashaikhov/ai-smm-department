@@ -20,7 +20,8 @@
 --   * read the eight named columns of users (password verification and
 --     the login response) -- named, so a column added later is not
 --     granted with them;
---   * execute the five smm_auth contracts.
+--   * execute the seven smm_auth contracts (five for sessions, two for
+--     the step-up approval of SMM-025D).
 -- Nothing else: no table-level privilege anywhere, no write on any table
 -- (sessions, last_login_at and audit rows are written by the definer
 -- functions), no sequence, no helper function, no password_hash UPDATE.
@@ -208,7 +209,10 @@ GRANT EXECUTE ON FUNCTION
     smm_auth.session_resolve(text),
     smm_auth.session_revoke(text),
     smm_auth.record_login_failure(text),
-    smm_auth.recent_login_failures(text)
+    smm_auth.recent_login_failures(text),
+    -- SMM-025D: the step-up approval
+    smm_auth.approval_preview(text, uuid),
+    smm_auth.approval_grant_issue(text, uuid)
 TO ai_smm_auth;
 
 -- Fail closed on what this file cannot grant away: privileges that reach
