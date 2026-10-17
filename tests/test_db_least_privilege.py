@@ -88,6 +88,8 @@ SELECT_TABLES = frozenset(
         "user_sessions",
         # SMM-025B: account metadata (labels, status, platform identity).
         "social_accounts",
+        # SMM-026A/2.1: generation job status, for a draft's provenance.
+        "content_generation_jobs",
     }
 )
 

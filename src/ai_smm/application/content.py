@@ -197,7 +197,7 @@ class RevisionInput:
     social_account_id: uuid.UUID | None = None
 
 
-def content_hash(
+def canonical_content(
     *,
     title: str | None,
     body: str,
@@ -206,7 +206,7 @@ def content_hash(
     items: list[Any],
     social_account_id: uuid.UUID | None = None,
 ) -> str:
-    """SHA-256 of the deliverable snapshot, in a canonical JSON form.
+    """The canonical UTF-8 JSON text hashed for approval lineage.
 
     Covers exactly what would be published, and where. metadata, source
     and the editor's notes are about the revision, not part of the post,
@@ -227,11 +227,32 @@ def content_hash(
     if social_account_id is not None:
         snapshot["social_account_id"] = str(social_account_id)
 
-    canonical = json.dumps(
+    return json.dumps(
         snapshot,
         sort_keys=True,
         ensure_ascii=False,
         separators=(",", ":"),
+    )
+
+
+def content_hash(
+    *,
+    title: str | None,
+    body: str,
+    format: str,
+    images: list[Any],
+    items: list[Any],
+    social_account_id: uuid.UUID | None = None,
+) -> str:
+    """SHA-256 of the deliverable snapshot's canonical UTF-8 JSON."""
+
+    canonical = canonical_content(
+        title=title,
+        body=body,
+        format=format,
+        images=images,
+        items=items,
+        social_account_id=social_account_id,
     )
 
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

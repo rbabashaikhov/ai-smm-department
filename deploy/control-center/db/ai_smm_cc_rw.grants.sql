@@ -53,7 +53,9 @@ DECLARE
         'content_publication_links', 'audit_log', 'users', 'user_sessions',
         'social_accounts', 'social_account_credentials',
         -- SMM-025D: without its guards this role must not exist at all.
-        'mutation_contexts', 'approval_grants'
+        'mutation_contexts', 'approval_grants',
+        -- SMM-026A/2.1
+        'content_generation_jobs'
     ];
     expected_functions CONSTANT text[] := ARRAY[
         'public.guard_bind_session(text)',
@@ -170,7 +172,8 @@ GRANT SELECT ON
     content_items, content_revisions, content_approvals,
     content_publication_links,
     audit_log, user_sessions,
-    social_accounts
+    social_accounts,
+    content_generation_jobs
 TO ai_smm_cc_rw;
 
 -- SMM-025D, grants G2 (ADR-024C-3A §6.2, correction 1): users column by
@@ -254,7 +257,7 @@ GRANT UPDATE (status, ephemeral_public_key, nonce, ciphertext, superseded_at, re
     ON social_account_credentials TO ai_smm_cc_rw;
 
 -- POST /projects/{id}/content-items.
-GRANT INSERT (id, project_id, title, content_type, status, current_revision_id, approved_revision_id, version, created_by_user_id, created_at, updated_at, archived_at)
+GRANT INSERT (id, project_id, title, content_type, status, current_revision_id, approved_revision_id, version, created_by_user_id, generation_job_id, created_at, updated_at, archived_at)
     ON content_items TO ai_smm_cc_rw;
 
 -- new revision, submit, approve, reject. Never project_id.
@@ -272,6 +275,30 @@ GRANT INSERT (id, content_item_id, revision_id, decision, actor_user_id, note, c
 -- materialize: the lineage row (the link trigger checks project and platform).
 GRANT INSERT (content_item_id, revision_id, platform, publication_id, created_at)
     ON content_publication_links TO ai_smm_cc_rw;
+
+-- POST /projects/{id}/generation-jobs (SMM-026A/2.1). The ORM sends every
+-- column; the worker-owned ones (claimed_*, next_attempt_at, last_error,
+-- finished_at) go in as NULL and result/attempt_count are left to their
+-- server defaults. The guard's own insert trigger refuses any of them
+-- carrying a real value, so granting the column here does not let this
+-- role actually set one.
+GRANT INSERT (id, project_id, requested_by_user_id, status, params,
+              last_error, next_attempt_at, claimed_by, claimed_at,
+              lease_expires_at, created_at, updated_at, finished_at)
+    ON content_generation_jobs TO ai_smm_cc_rw;
+
+-- POST /generation-jobs/{id}/cancel: queued|claimed -> cancelled only (the
+-- guard enforces the transition). claimed_by/claimed_at/lease_expires_at/
+-- next_attempt_at/attempt_count/result/last_error are granted, same as
+-- publications' own claim columns, so an attempt to tamper with them
+-- reaches the trigger's "belong to the worker" refusal rather than a bare
+-- permission error; the trigger still never lets any of them actually
+-- change. Never project_id or requested_by_user_id -- same as
+-- publications never grants project_id/social_account_id for UPDATE.
+GRANT UPDATE (status, updated_at, finished_at, claimed_by, claimed_at,
+              lease_expires_at, next_attempt_at, attempt_count, result,
+              last_error)
+    ON content_generation_jobs TO ai_smm_cc_rw;
 
 -- materialize: a new delivery snapshot in `approved`. The ORM sends every column; the ones the API never sets (threads_post_id, published_at, the claim and series columns) go in as NULL. Not id: the sequence assigns it.
 GRANT INSERT (project_id, platform, ordinal, title, format, body, images, items, status, scheduled_at, idempotency_key, threads_post_id, published_at, claimed_by, claimed_at, lease_expires_at, attempt_count, next_attempt_at, last_error, editor_score, human_reviewed, source_ref, social_account_id, series_id, series_position, series_total, parent_publication_id, previous_publication_id, created_at, updated_at)

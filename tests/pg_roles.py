@@ -222,6 +222,12 @@ MUTATION_REVOKE_SQL = DB_DIR / "ai_smm_cc_rw.revoke.sql"
 #: The privileges of every role but ai_smm_cc_rw -- ai_smm_cc included.
 MUTATION_SNAPSHOT_SQL = DB_DIR / "ai_smm_cc_rw.acl-snapshot.sql"
 
+# -- generation worker (SMM-026A/2.1-FIX) -----------------------------------
+GENERATION_ROLE = "ai_smm_generation"
+GENERATION_GRANTS_SQL = DB_DIR / "ai_smm_generation.grants.sql"
+GENERATION_VERIFY_SQL = DB_DIR / "ai_smm_generation.verify.sql"
+GENERATION_REVOKE_SQL = DB_DIR / "ai_smm_generation.revoke.sql"
+
 
 def verify_mutation(admin_url: str) -> list[str]:
     return [
@@ -265,3 +271,34 @@ def provision_mutation(admin_url: str, database_url: str) -> ApiRole:
 
 def retire_mutation(admin_url: str) -> None:
     run_script(admin_url, MUTATION_REVOKE_SQL)
+
+
+def verify_generation(admin_url: str) -> list[str]:
+    return [
+        row[0]
+        for row in query_admin(
+            admin_url, GENERATION_VERIFY_SQL.read_text(encoding="utf-8")
+        )
+    ]
+
+
+def provision_generation(admin_url: str, database_url: str) -> ApiRole:
+    run_script(admin_url, GENERATION_GRANTS_SQL)
+    password = secrets.token_hex(24)
+    run_admin(
+        admin_url,
+        sql.SQL("ALTER ROLE ai_smm_generation PASSWORD {}").format(
+            sql.Literal(password)
+        ),
+    )
+    return ApiRole(
+        url=make_url(database_url)
+        .set(username=GENERATION_ROLE, password=password)
+        .render_as_string(hide_password=False),
+        others_before=[],
+        others_after=[],
+    )
+
+
+def retire_generation(admin_url: str) -> None:
+    run_script(admin_url, GENERATION_REVOKE_SQL)

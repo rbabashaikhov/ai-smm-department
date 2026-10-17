@@ -427,38 +427,50 @@ def _trigger_fn(name: str, body: str, *, declare: str = "") -> str:
     )
 
 
-_AUDIT_INSERT = (
-    "CREATE OR REPLACE FUNCTION public.guard_audit_log_insert() RETURNS trigger\n"
-    f"{_HEADER}AS $guard$\n"
-    "DECLARE\n    v_user uuid;\nBEGIN\n"
-    "    -- Provenance for every row, whoever writes it (FU-024C2-2). Inside a\n"
-    "    -- SECURITY DEFINER function this is the role that called it.\n"
-    "    NEW.written_by := session_user;\n\n"
-    f"    IF NOT ({_GUARDED}) THEN\n        RETURN NEW;\n    END IF;\n\n"
-    "    -- Column-level grants count: has_table_privilege would miss them.\n"
-    "    IF pg_catalog.has_any_column_privilege(current_user, 'public.content_items', 'INSERT')\n"
-    "       OR pg_catalog.has_any_column_privilege(current_user, 'public.publications', 'UPDATE') THEN\n"
-    "        -- A business role: business actions, as the bound user, only.\n"
-    "        v_user := public.guard_context_user();\n\n"
-    "        IF v_user IS NULL THEN\n"
-    f"            {_raise('audit entries of % need a session-bound transaction', 'current_user')}\n"
-    "        END IF;\n\n"
-    "        IF NEW.actor IS DISTINCT FROM 'user:' || v_user::text THEN\n"
-    f"            {_raise('the audit actor must be the bound user')}\n"
-    "        END IF;\n\n"
-    "        IF NOT (" + " OR ".join(
-        [f"NEW.action LIKE '{p}'" for p in BUSINESS_AUDIT_ACTIONS]
-        + [f"NEW.action = '{e}'" for e in BUSINESS_AUDIT_EXACT]
-    ) + ") THEN\n"
-    f"            {_raise('audit action % is not a business action', 'NEW.action')}\n"
-    "        END IF;\n"
-    "    ELSIF NEW.action NOT LIKE 'auth.%' THEN\n"
-    "        -- A role without business rights (the read-only API until\n"
-    "        -- smm-auth takes over logins): sign-in events only.\n"
-    f"        {_raise('% may write auth.* audit entries only', 'current_user')}\n"
-    "    END IF;\n\n"
-    "    RETURN NEW;\nEND\n$guard$"
-)
+def _build_audit_insert(actions: tuple[str, ...]) -> str:
+    return (
+        "CREATE OR REPLACE FUNCTION public.guard_audit_log_insert() RETURNS trigger\n"
+        f"{_HEADER}AS $guard$\n"
+        "DECLARE\n    v_user uuid;\nBEGIN\n"
+        "    -- Provenance for every row, whoever writes it (FU-024C2-2). Inside a\n"
+        "    -- SECURITY DEFINER function this is the role that called it.\n"
+        "    NEW.written_by := session_user;\n\n"
+        f"    IF NOT ({_GUARDED}) THEN\n        RETURN NEW;\n    END IF;\n\n"
+        "    -- Column-level grants count: has_table_privilege would miss them.\n"
+        "    IF pg_catalog.has_any_column_privilege(current_user, 'public.content_items', 'INSERT')\n"
+        "       OR pg_catalog.has_any_column_privilege(current_user, 'public.publications', 'UPDATE') THEN\n"
+        "        -- A business role: business actions, as the bound user, only.\n"
+        "        v_user := public.guard_context_user();\n\n"
+        "        IF v_user IS NULL THEN\n"
+        f"            {_raise('audit entries of % need a session-bound transaction', 'current_user')}\n"
+        "        END IF;\n\n"
+        "        IF NEW.actor IS DISTINCT FROM 'user:' || v_user::text THEN\n"
+        f"            {_raise('the audit actor must be the bound user')}\n"
+        "        END IF;\n\n"
+        "        IF NOT (" + " OR ".join(
+            [f"NEW.action LIKE '{p}'" for p in actions]
+            + [f"NEW.action = '{e}'" for e in BUSINESS_AUDIT_EXACT]
+        ) + ") THEN\n"
+        f"            {_raise('audit action % is not a business action', 'NEW.action')}\n"
+        "        END IF;\n"
+        "    ELSIF NEW.action NOT LIKE 'auth.%' THEN\n"
+        "        -- A role without business rights (the read-only API until\n"
+        "        -- smm-auth takes over logins): sign-in events only.\n"
+        f"        {_raise('% may write auth.* audit entries only', 'current_user')}\n"
+        "    END IF;\n\n"
+        "    RETURN NEW;\nEND\n$guard$"
+    )
+
+
+_AUDIT_INSERT = _build_audit_insert(BUSINESS_AUDIT_ACTIONS)
+
+#: v2 (SMM-026A/2.1): generation.* added to the business audit whitelist,
+#: for generation.queued/generation.cancelled (ai_smm.application.
+#: generation). Same function name, applied by a later migration via
+#: CREATE OR REPLACE -- FUNCTIONS_V1/_AUDIT_INSERT stay exactly as
+#: c4d81e2a9f63 shipped them, so that migration still replays unchanged.
+BUSINESS_AUDIT_ACTIONS_V2 = BUSINESS_AUDIT_ACTIONS + ("generation.%",)
+_AUDIT_INSERT_V2 = _build_audit_insert(BUSINESS_AUDIT_ACTIONS_V2)
 
 _PROJECTS_INSERT = _trigger_fn(
     "guard_projects_insert",
@@ -592,7 +604,7 @@ _CREDENTIALS_UPDATE = _trigger_fn(
     declare="    v_project text;",
 )
 
-_ITEMS_INSERT = _trigger_fn(
+_ITEMS_INSERT_V1 = _trigger_fn(
     "guard_content_items_insert",
     f"""
         v_user := public.guard_require_owner(NEW.project_id, 'creating content');
@@ -604,10 +616,40 @@ _ITEMS_INSERT = _trigger_fn(
     declare="    v_user uuid;",
 )
 
-_ITEMS_UPDATE = _trigger_fn(
+_ITEMS_UPDATE_V1 = _trigger_fn(
     "guard_content_items_update",
     """
         PERFORM public.guard_require_owner(OLD.project_id, 'changing content');
+""",
+)
+
+# v2 (SMM-026A/2.1-FIX): a business/API-created item can never claim
+# generation provenance, and provenance is immutable after insertion. Keep
+# the V1 definitions above frozen because c4d81e2a9f63 imports them.
+_ITEMS_INSERT_V2 = _trigger_fn(
+    "guard_content_items_insert",
+    f"""
+        v_user := public.guard_require_owner(NEW.project_id, 'creating content');
+
+        IF NEW.created_by_user_id IS DISTINCT FROM v_user THEN
+            {_raise('the creator must be the bound user')}
+        END IF;
+
+        IF NEW.generation_job_id IS NOT NULL THEN
+            {_raise('generation provenance belongs to the generation worker')}
+        END IF;
+""",
+    declare="    v_user uuid;",
+)
+
+_ITEMS_UPDATE_V2 = _trigger_fn(
+    "guard_content_items_update",
+    f"""
+        PERFORM public.guard_require_owner(OLD.project_id, 'changing content');
+
+        IF NEW.generation_job_id IS DISTINCT FROM OLD.generation_job_id THEN
+            {_raise('generation provenance is immutable')}
+        END IF;
 """,
 )
 
@@ -829,8 +871,8 @@ FUNCTIONS_V1: tuple[GuardFunction, ...] = (
     GuardFunction("guard_social_accounts_update", "", _ACCOUNTS_UPDATE),
     GuardFunction("guard_credentials_insert", "", _CREDENTIALS_INSERT),
     GuardFunction("guard_credentials_update", "", _CREDENTIALS_UPDATE),
-    GuardFunction("guard_content_items_insert", "", _ITEMS_INSERT),
-    GuardFunction("guard_content_items_update", "", _ITEMS_UPDATE),
+    GuardFunction("guard_content_items_insert", "", _ITEMS_INSERT_V1),
+    GuardFunction("guard_content_items_update", "", _ITEMS_UPDATE_V1),
     GuardFunction(
         "guard_content_items_approved_check", "", _ITEMS_APPROVED_CHECK
     ),
@@ -842,6 +884,96 @@ FUNCTIONS_V1: tuple[GuardFunction, ...] = (
         "guard_publications_lineage_check", "", _PUBLICATIONS_LINEAGE_CHECK
     ),
     GuardFunction("guard_publications_update", "", _PUBLICATIONS_UPDATE),
+)
+
+
+# -- generation jobs (SMM-026A/2.1) -----------------------------------------
+# Business role writes two shapes only: "queue a fresh job for my project"
+# and "cancel one I haven't lost the right to touch". Claim, lease,
+# attempt and result bookkeeping is the generation worker's, exactly as
+# the equivalent publications columns are the publish worker's -- the
+# worker runs as the table owner and never reaches these triggers.
+
+_GENERATION_JOBS_INSERT = _trigger_fn(
+    "guard_generation_jobs_insert",
+    f"""
+        v_user := public.guard_require_owner(NEW.project_id, 'starting a generation job');
+
+        IF NEW.requested_by_user_id IS DISTINCT FROM v_user THEN
+            {_raise('the requester must be the bound user')}
+        END IF;
+
+        IF NEW.status <> 'queued'
+           OR NEW.claimed_by IS NOT NULL
+           OR NEW.claimed_at IS NOT NULL
+           OR NEW.lease_expires_at IS NOT NULL
+           OR NEW.next_attempt_at IS NOT NULL
+           OR NEW.last_error IS NOT NULL
+           OR NEW.attempt_count <> 0
+           OR NEW.finished_at IS NOT NULL
+           OR NEW.result <> '{{}}'::jsonb THEN
+            {_raise('a new generation job is freshly queued, nothing more')}
+        END IF;
+
+        NEW.created_at := now();
+        NEW.updated_at := now();
+""",
+    declare="    v_user uuid;",
+)
+
+_GENERATION_JOBS_UPDATE = _trigger_fn(
+    "guard_generation_jobs_update",
+    f"""
+        PERFORM public.guard_require_owner(OLD.project_id, 'changing a generation job');
+
+        -- The only Control Center command: cancel a job that has not
+        -- already finished. Never a claim, a retry or an outcome.
+        IF NOT (
+            OLD.status IN ('queued', 'claimed') AND NEW.status = 'cancelled'
+        ) THEN
+            {_raise('generation job %: % -> % is not a Control Center command', 'OLD.id', 'OLD.status', 'NEW.status')}
+        END IF;
+
+        IF NEW.claimed_by IS DISTINCT FROM OLD.claimed_by
+           OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+           OR NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at
+           OR NEW.next_attempt_at IS DISTINCT FROM OLD.next_attempt_at
+           OR NEW.attempt_count IS DISTINCT FROM OLD.attempt_count
+           OR NEW.result IS DISTINCT FROM OLD.result
+           OR NEW.last_error IS DISTINCT FROM OLD.last_error
+           OR NEW.requested_by_user_id IS DISTINCT FROM OLD.requested_by_user_id
+           OR NEW.project_id IS DISTINCT FROM OLD.project_id THEN
+            {_raise('generation job %: claim, lease, attempt and result columns belong to the worker', 'OLD.id')}
+        END IF;
+
+        NEW.updated_at := now();
+        NEW.finished_at := now();
+""",
+)
+
+#: Added after FUNCTIONS_V1/TRIGGERS_V1 shipped: a separate tuple, not an
+#: extension of them, so the migration that created V1 still replays
+#: unchanged against a database that does not yet have
+#: content_generation_jobs. Depends on guard_require_owner (FUNCTIONS_V1),
+#: so the migration that creates these must run after c4d81e2a9f63.
+GENERATION_FUNCTIONS: tuple[GuardFunction, ...] = (
+    GuardFunction("guard_generation_jobs_insert", "", _GENERATION_JOBS_INSERT),
+    GuardFunction("guard_generation_jobs_update", "", _GENERATION_JOBS_UPDATE),
+)
+
+#: Not a new function -- CREATE OR REPLACE of guard_audit_log_insert
+#: (FUNCTIONS_V1), same trigger, so record_audit(action="generation.*")
+#: is accepted. No new GuardTrigger: trg_audit_log_guard_insert already
+#: points at this function name.
+AUDIT_FUNCTIONS_V2: tuple[GuardFunction, ...] = (
+    GuardFunction("guard_audit_log_insert", "", _AUDIT_INSERT_V2),
+)
+
+# CREATE OR REPLACE after the generation column exists. The trigger objects
+# keep pointing at the same function names.
+CONTENT_ITEM_FUNCTIONS_V2: tuple[GuardFunction, ...] = (
+    GuardFunction("guard_content_items_insert", "", _ITEMS_INSERT_V2),
+    GuardFunction("guard_content_items_update", "", _ITEMS_UPDATE_V2),
 )
 
 
@@ -957,6 +1089,23 @@ TRIGGERS_V1: tuple[GuardTrigger, ...] = (
         "publications",
         "UPDATE",
         "guard_publications_update",
+    ),
+)
+
+#: SMM-026A/2.1, shipped in a later migration than TRIGGERS_V1 (see
+#: GENERATION_FUNCTIONS).
+GENERATION_TRIGGERS: tuple[GuardTrigger, ...] = (
+    _before(
+        "trg_generation_jobs_guard_insert",
+        "content_generation_jobs",
+        "INSERT",
+        "guard_generation_jobs_insert",
+    ),
+    _before(
+        "trg_generation_jobs_guard_update",
+        "content_generation_jobs",
+        "UPDATE",
+        "guard_generation_jobs_update",
     ),
 )
 

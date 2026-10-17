@@ -10,6 +10,7 @@ import argparse
 import getpass
 import json
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1377,6 +1378,162 @@ def cmd_stats(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+# -- generation jobs (SMM-026A/2.1) ---------------------------------------
+# Agent → Draft, for local testing without the HTTP API: the operator role
+# bypasses the database guards exactly as every other command in this
+# file does (ai_smm.db.guards -- the owner, the worker, migrations and
+# this CLI are trusted; see the docstring there), so there is no login or
+# RBAC check here, only --requested-by naming whose job this is.
+
+
+def cmd_generation_enqueue(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.application.generation import (
+        InvalidGenerationParams,
+        create_generation_job,
+    )
+    from ai_smm.application.users import get_user_by_email, normalize_email
+
+    with session_scope(settings) as session:
+        user = get_user_by_email(session, normalize_email(args.requested_by))
+
+        if user is None:
+            print(f"ERROR: no user with email {args.requested_by!r}", file=sys.stderr)
+
+            return 1
+
+        try:
+            job = create_generation_job(
+                session,
+                project_id=args.project,
+                requested_by_user=user,
+                # The CLI is a trusted operator path, like every other
+                # command here; it does not read the API's own mutation switch.
+                mutations_enabled=True,
+                series_size=args.series_size,
+                publishing_strategy=args.strategy,
+                topic_hint=args.topic_hint,
+            )
+        except (ValueError, InvalidGenerationParams) as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+
+            return 1
+
+        print(f"Generation job {job.id} queued for project {job.project_id!r}.")
+
+    return 0
+
+
+def cmd_generation_status(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.generation_queue import get_generation_job
+
+    with session_scope(settings) as session:
+        job = get_generation_job(session, job_id=args.job_id)
+
+        if job is None:
+            print(f"ERROR: no generation job {args.job_id}", file=sys.stderr)
+
+            return 1
+
+        print(f"id               : {job.id}")
+        print(f"project          : {job.project_id}")
+        print(f"status           : {job.status.value}")
+        print(f"attempt_count    : {job.attempt_count}")
+        print(f"params           : {json.dumps(job.params, ensure_ascii=False)}")
+
+        if job.last_error:
+            print(f"last_error       : {job.last_error}")
+
+        if job.result:
+            print(f"result           : {json.dumps(job.result, ensure_ascii=False)}")
+
+    return 0
+
+
+def cmd_generation_list(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.db.models import ContentGenerationJob
+
+    with session_scope(settings) as session:
+        stmt = select(ContentGenerationJob)
+
+        if args.project:
+            stmt = stmt.where(ContentGenerationJob.project_id == args.project)
+
+        rows = session.scalars(
+            stmt.order_by(ContentGenerationJob.created_at.desc()).limit(args.limit)
+        ).all()
+
+        for job in rows:
+            print(
+                f"{job.id}  {job.project_id:<24} {job.status.value:<10} "
+                f"attempts={job.attempt_count}"
+            )
+
+    return 0
+
+
+def cmd_generation_cancel(args: argparse.Namespace, settings: Settings) -> int:
+    from ai_smm.application.generation import (
+        InvalidGenerationTransition,
+        cancel_generation_job,
+    )
+    from ai_smm.application.users import get_user_by_email, normalize_email
+
+    with session_scope(settings) as session:
+        user = get_user_by_email(session, normalize_email(args.requested_by))
+
+        if user is None:
+            print(f"ERROR: no user with email {args.requested_by!r}", file=sys.stderr)
+
+            return 1
+
+        try:
+            job = cancel_generation_job(
+                session,
+                job_id=args.job_id,
+                expected_project_id=args.project,
+                actor_user=user,
+                mutations_enabled=True,
+            )
+        except InvalidGenerationTransition as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+
+            return 1
+
+        print(f"Generation job {job.id} cancelled.")
+
+    return 0
+
+
+def cmd_generation_run_once(args: argparse.Namespace, settings: Settings) -> int:
+    """Process exactly one due generation job, synchronously, in this
+    process -- no scheduler loop. For a local end-to-end check: enqueue a
+    job, then run this until it prints "no due job", then inspect it with
+    `generation status`."""
+
+    from dataclasses import replace
+
+    from ai_smm.generation_worker import GenerationWorker
+
+    worker_settings = settings
+
+    if args.max_revisions is not None:
+        worker_settings = replace(
+            worker_settings, generation_max_revisions=args.max_revisions
+        )
+
+    worker = GenerationWorker(settings=worker_settings)
+    status = worker.process_one()
+
+    if status is None:
+        print("no due generation job")
+
+        return 0
+
+    print(f"processed one job: {status}")
+
+    return 0
+
+
 # -- parser ---------------------------------------------------------------
 
 
@@ -1628,6 +1785,59 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("stats", help="Queue counters")
     p.set_defaults(func=cmd_stats)
+
+    p = sub.add_parser(
+        "generation", help="Agent-generation jobs (Agent -> Draft, SMM-026A/2.1)"
+    )
+    generation_sub = p.add_subparsers(dest="generation_command", required=True)
+
+    p = generation_sub.add_parser(
+        "enqueue", help="Queue an agent-generation job for a project"
+    )
+    p.add_argument("--project", required=True)
+    p.add_argument(
+        "--requested-by", required=True, help="Email of an existing owner"
+    )
+    p.add_argument("--series-size", type=int, default=3)
+    p.add_argument(
+        "--strategy", choices=("standalone_series", "reply_thread"), default=None
+    )
+    p.add_argument("--topic-hint")
+    p.set_defaults(func=cmd_generation_enqueue)
+
+    p = generation_sub.add_parser("status", help="Show one generation job")
+    p.add_argument("job_id", type=uuid.UUID)
+    p.set_defaults(func=cmd_generation_status)
+
+    p = generation_sub.add_parser("list", help="List generation jobs")
+    p.add_argument("--project")
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(func=cmd_generation_list)
+
+    p = generation_sub.add_parser(
+        "cancel", help="Cancel a job that has not finished"
+    )
+    p.add_argument("job_id", type=uuid.UUID)
+    p.add_argument("--project", required=True)
+    p.add_argument(
+        "--requested-by", required=True, help="Email of an existing owner"
+    )
+    p.set_defaults(func=cmd_generation_cancel)
+
+    p = generation_sub.add_parser(
+        "run-once",
+        help=(
+            "Process exactly one due job in this process, synchronously "
+            "-- no scheduler loop; for local end-to-end checks"
+        ),
+    )
+    p.add_argument(
+        "--max-revisions",
+        type=int,
+        default=None,
+        help="Override AI_SMM_GENERATION_MAX_REVISIONS for this run",
+    )
+    p.set_defaults(func=cmd_generation_run_once)
 
     return parser
 

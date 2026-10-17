@@ -386,8 +386,10 @@ def test_a_session_token_hash_column_is_not_the_token(
 CONTROL_PLANE_HEAD = "2964ac9ceea7"
 EDITORIAL_REVISION = "3d4ac1986f07"
 SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
-#: The head: SMM-025D's business-mutation guards.
+#: Kept separately because guard migration tests upgrade to this revision.
 GUARDS_REVISION = "c4d81e2a9f63"
+#: Current migration head: SMM-026A/2.1 generation jobs.
+HEAD_REVISION = "e04cb3a748f5"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",
@@ -830,7 +832,7 @@ def test_a_lock_timeout_rolls_back_every_pending_revision(
         with engine.connect() as connection:
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == GUARDS_REVISION
+                == HEAD_REVISION
             )
     finally:
         engine.dispose()

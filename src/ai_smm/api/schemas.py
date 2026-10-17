@@ -16,6 +16,7 @@ from ai_smm.db.models import (
     AttemptOutcome,
     AttemptPhase,
     ContentStatus,
+    GenerationJobStatus,
     MembershipRole,
     PublicationStatus,
     PublishingStrategy,
@@ -617,3 +618,35 @@ class MaterializeOut(BaseModel):
     platform: str
     revision_id: uuid.UUID
     publication: PublicationDetail
+
+
+# -- generation jobs (SMM-026A/2.1) ---------------------------------------
+# Agent → Draft. A job only ever produces draft content items (see
+# ai_smm.generation_worker); approving, materialising, scheduling and
+# publishing stay exactly the existing content/publications routes.
+
+
+class GenerationJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    series_size: int = Field(default=3, ge=1, le=5)
+    publishing_strategy: Literal["standalone_series", "reply_thread"] | None = None
+    topic_hint: str | None = Field(default=None, max_length=500)
+
+
+class GenerationJobOut(BaseModel):
+    id: uuid.UUID
+    project_id: str
+    requested_by_user_id: uuid.UUID
+    status: GenerationJobStatus
+    params: dict[str, Any]
+    result: dict[str, Any]
+    last_error: str | None
+    attempt_count: int
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None
+
+
+class GenerationJobList(PageMeta):
+    items: list[GenerationJobOut]

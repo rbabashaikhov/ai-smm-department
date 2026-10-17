@@ -41,7 +41,9 @@ DECLARE
         'publications', 'publication_attempts', 'content_series',
         'content_items', 'content_revisions', 'content_approvals',
         'content_publication_links', 'audit_log', 'users', 'user_sessions',
-        'social_accounts', 'social_account_credentials'
+        'social_accounts', 'social_account_credentials',
+        -- SMM-026A/2.1
+        'content_generation_jobs'
     ];
     missing text[];
     owners text[];
@@ -141,7 +143,8 @@ GRANT SELECT ON
     content_items, content_revisions, content_approvals,
     content_publication_links,
     audit_log, user_sessions,
-    social_accounts
+    social_accounts,
+    content_generation_jobs
 TO ai_smm_cc;
 
 -- SMM-025D, grants G2 (ADR-024C-3A §6.2, correction 1): users column by
