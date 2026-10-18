@@ -25,6 +25,10 @@ import type {
   PageParams,
   Credential,
   CredentialInput,
+  GenerationJob,
+  GenerationJobCreate,
+  GenerationJobFilters,
+  GenerationJobList,
   Project,
   ProjectCreate,
   ProjectPatch,
@@ -90,7 +94,24 @@ export function createEndpoints(client: ApiClient) {
       audit: (projectId: string, page: PageParams, action?: string) =>
         client.get<Page<AuditEntry>>(`${V1}/projects/${enc(projectId)}/audit`, {
           query: { ...page, action },
-        }),
+      }),
+    },
+
+    generation: {
+      create: (projectId: string, body: GenerationJobCreate) =>
+        client.post<GenerationJob>(
+          `${V1}/projects/${enc(projectId)}/generation-jobs`,
+          body,
+        ),
+      list: (projectId: string, filters: GenerationJobFilters, page: PageParams) =>
+        client.get<GenerationJobList>(
+          `${V1}/projects/${enc(projectId)}/generation-jobs`,
+          { query: { ...page, status: filters.status } },
+        ),
+      get: (jobId: string) =>
+        client.get<GenerationJob>(`${V1}/generation-jobs/${enc(jobId)}`),
+      cancel: (jobId: string) =>
+        client.post<GenerationJob>(`${V1}/generation-jobs/${enc(jobId)}/cancel`),
     },
 
     publications: {

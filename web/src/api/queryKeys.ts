@@ -2,7 +2,12 @@
 // subtree it affected: ["projects", id, "content"] covers every content
 // list of one project and nothing else.
 
-import type { ContentFilters, PageParams, PublicationFilters } from "../types/api";
+import type {
+  ContentFilters,
+  GenerationJobFilters,
+  PageParams,
+  PublicationFilters,
+} from "../types/api";
 
 export const qk = {
   projects: () => ["projects"] as const,
@@ -18,6 +23,16 @@ export const qk = {
     ["projects", projectId, "operations", "attention", page] as const,
   audit: (projectId: string, page: PageParams, action: string) =>
     ["projects", projectId, "audit", { ...page, action }] as const,
+
+  generationJobs: (projectId: string) =>
+    ["projects", projectId, "generation-jobs"] as const,
+  generationJobList: (
+    projectId: string,
+    filters: GenerationJobFilters,
+    page: PageParams,
+  ) => ["projects", projectId, "generation-jobs", "list", { ...filters, ...page }] as const,
+  generationJob: (projectId: string, jobId: string) =>
+    ["projects", projectId, "generation-jobs", jobId] as const,
 
   projectContent: (projectId: string) => ["projects", projectId, "content"] as const,
   contentList: (projectId: string, filters: ContentFilters, page: PageParams) =>
