@@ -643,6 +643,7 @@ class GenerationJobOut(BaseModel):
     result: dict[str, Any]
     last_error: str | None
     attempt_count: int
+    max_attempts: int
     created_at: datetime
     updated_at: datetime
     finished_at: datetime | None

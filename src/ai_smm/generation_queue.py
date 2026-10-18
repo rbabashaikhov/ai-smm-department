@@ -11,11 +11,10 @@ instead of publications:
   quarantine state. Nothing is written to content_items/content_revisions
   until the very end of processing, in the same transaction that marks the
   job succeeded, so a lost claim is always safe to retry from scratch;
-* these functions run as the table owner (the same role the publish
-  worker, the CLI and the importer already use), exactly like
-  ai_smm.queue's claim/mark functions do for publications. They are never
-  called by the HTTP API, which only ever creates or cancels a job through
-  ai_smm.application.generation, as the guarded ai_smm_cc_rw role.
+* the generation worker invokes narrow SECURITY DEFINER contracts and has
+  no table privileges. They are never called by the HTTP API, which only
+  ever creates or cancels a job through ai_smm.application.generation, as
+  the guarded ai_smm_cc_rw role.
 """
 from __future__ import annotations
 
@@ -43,7 +42,6 @@ def claim_due_generation_job(
     *,
     worker_id: str,
     lease_seconds: int,
-    max_attempts: int = 3,
     now: datetime | None = None,
 ) -> ContentGenerationJob | None:
     """Atomically reserve one due job, or return None.
@@ -60,12 +58,11 @@ def claim_due_generation_job(
     row = session.execute(
         text(
             "SELECT * FROM public.generation_claim("
-            ":worker_id, :lease_seconds, :max_attempts)"
+            ":worker_id, :lease_seconds)"
         ),
         {
             "worker_id": worker_id,
             "lease_seconds": lease_seconds,
-            "max_attempts": max_attempts,
         },
     ).mappings().one_or_none()
     if row is None:
@@ -95,6 +92,7 @@ def claim_due_generation_job(
         status=GenerationJobStatus(row["status"]),
         params=row["params"],
         attempt_count=row["attempt_count"],
+        max_attempts=row["max_attempts"],
         claimed_by=row["claimed_by"],
         claimed_at=row["claimed_at"],
         lease_expires_at=row["lease_expires_at"],
@@ -106,7 +104,6 @@ def release_expired_generation_leases(
     *,
     actor: str,
     now: datetime | None = None,
-    max_attempts: int = 3,
 ) -> list[str]:
     """Return claimed-but-abandoned jobs to queued.
 
@@ -124,7 +121,8 @@ def release_expired_generation_leases(
             ContentGenerationJob.status == GenerationJobStatus.CLAIMED,
             ContentGenerationJob.lease_expires_at.is_not(None),
             ContentGenerationJob.lease_expires_at <= now,
-            ContentGenerationJob.attempt_count >= max_attempts,
+            ContentGenerationJob.attempt_count
+            >= ContentGenerationJob.max_attempts,
         )
         .values(
             status=GenerationJobStatus.FAILED,
@@ -147,7 +145,8 @@ def release_expired_generation_leases(
             ContentGenerationJob.status == GenerationJobStatus.CLAIMED,
             ContentGenerationJob.lease_expires_at.is_not(None),
             ContentGenerationJob.lease_expires_at <= now,
-            ContentGenerationJob.attempt_count < max_attempts,
+            ContentGenerationJob.attempt_count
+            < ContentGenerationJob.max_attempts,
         )
         .values(
             status=GenerationJobStatus.QUEUED,
@@ -177,7 +176,7 @@ def release_expired_generation_leases(
             actor=actor,
             action="generation.failed",
             subject=f"generation_job:{job_id}",
-            details={"reason": "lease_expired", "max_attempts": max_attempts},
+            details={"reason": "lease_expired", "retry_limit": "job"},
         )
 
     return released
@@ -238,7 +237,6 @@ def mark_generation_failure(
     *,
     reason: str,
     actor: str,
-    max_attempts: int,
     backoff_base_seconds: int = 30,
     backoff_cap_seconds: int = 600,
     error_type: str | None = None,
@@ -258,7 +256,7 @@ def mark_generation_failure(
     status = session.execute(
         text(
             "SELECT public.generation_fail("
-            ":job_id, :worker_id, :reason, :retryable, :max_attempts, "
+            ":job_id, :worker_id, :reason, :retryable, "
             ":error_type, :base, :cap)"
         ),
         {
@@ -266,7 +264,6 @@ def mark_generation_failure(
             "worker_id": job.claimed_by,
             "reason": reason,
             "retryable": retryable,
-            "max_attempts": max_attempts,
             "error_type": error_type,
             "base": backoff_base_seconds,
             "cap": backoff_cap_seconds,

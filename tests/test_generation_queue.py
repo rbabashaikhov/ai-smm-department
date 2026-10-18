@@ -29,6 +29,7 @@ def _make_job(
     status: GenerationJobStatus = GenerationJobStatus.QUEUED,
     next_attempt_at: datetime | None = None,
     attempt_count: int = 0,
+    max_attempts: int = 2,
 ) -> ContentGenerationJob:
     job = ContentGenerationJob(
         id=uuid.uuid4(),
@@ -37,6 +38,7 @@ def _make_job(
         status=status,
         next_attempt_at=next_attempt_at,
         attempt_count=attempt_count,
+        max_attempts=max_attempts,
     )
     if status is GenerationJobStatus.CLAIMED:
         job.claimed_by = "gw-0"
@@ -216,17 +218,18 @@ def test_an_expired_final_claim_is_terminal_and_never_claimed_again(
 ) -> None:
     requester = make_user()
     job = _make_job(
-        session, project_id=project, requested_by=requester, attempt_count=2
+        session, project_id=project, requested_by=requester,
+        attempt_count=2, max_attempts=3,
     )
     claimed = claim_due_generation_job(
-        session, worker_id="gw-final", lease_seconds=600, max_attempts=3
+        session, worker_id="gw-final", lease_seconds=600
     )
     assert claimed is not None and claimed.attempt_count == 3
     claimed.lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
     session.commit()
 
     assert claim_due_generation_job(
-        session, worker_id="gw-next", lease_seconds=600, max_attempts=3
+        session, worker_id="gw-next", lease_seconds=600
     ) is None
     session.expire_all()
     stored = session.get(ContentGenerationJob, job.id)
@@ -242,7 +245,9 @@ def test_mark_succeeded_clears_claim_and_stores_the_result(
     session: Session, project: str, make_user
 ) -> None:
     requester = make_user()
-    job = _make_job(session, project_id=project, requested_by=requester)
+    job = _make_job(
+        session, project_id=project, requested_by=requester, max_attempts=3
+    )
     claimed = claim_due_generation_job(session, worker_id="gw-1", lease_seconds=600)
     session.commit()
 
@@ -282,7 +287,6 @@ def test_a_retryable_failure_is_requeued_with_backoff(
         claimed,
         reason="openai timeout",
         actor="worker:gw-1",
-        max_attempts=3,
         error_type="TimeoutError",
     )
     session.commit()
@@ -309,7 +313,6 @@ def test_attempts_exhausted_fails_permanently(
         claimed,
         reason="openai timeout",
         actor="worker:gw-1",
-        max_attempts=2,
         error_type="TimeoutError",
     )
     session.commit()
@@ -327,7 +330,9 @@ def test_a_non_retryable_failure_skips_straight_to_failed(
     """An unknown project or missing knowledge: retrying changes nothing."""
 
     requester = make_user()
-    job = _make_job(session, project_id=project, requested_by=requester)
+    job = _make_job(
+        session, project_id=project, requested_by=requester, max_attempts=5
+    )
     claimed = claim_due_generation_job(session, worker_id="gw-1", lease_seconds=600)
     session.commit()
     claimed.attempt_count = 1  # well under max_attempts
@@ -337,7 +342,6 @@ def test_a_non_retryable_failure_skips_straight_to_failed(
         claimed,
         reason="knowledge unavailable: no such project",
         actor="worker:gw-1",
-        max_attempts=5,
         retryable=False,
     )
     session.commit()

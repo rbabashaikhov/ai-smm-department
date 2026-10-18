@@ -890,11 +890,10 @@ FUNCTIONS_V1: tuple[GuardFunction, ...] = (
 # -- generation jobs (SMM-026A/2.1) -----------------------------------------
 # Business role writes two shapes only: "queue a fresh job for my project"
 # and "cancel one I haven't lost the right to touch". Claim, lease,
-# attempt and result bookkeeping is the generation worker's, exactly as
-# the equivalent publications columns are the publish worker's -- the
-# worker runs as the table owner and never reaches these triggers.
+# attempt and result bookkeeping belongs to the EXECUTE-only generation
+# worker's SECURITY DEFINER contracts; the worker has no table privileges.
 
-_GENERATION_JOBS_INSERT = _trigger_fn(
+_GENERATION_JOBS_INSERT_V1 = _trigger_fn(
     "guard_generation_jobs_insert",
     f"""
         v_user := public.guard_require_owner(NEW.project_id, 'starting a generation job');
@@ -921,7 +920,7 @@ _GENERATION_JOBS_INSERT = _trigger_fn(
     declare="    v_user uuid;",
 )
 
-_GENERATION_JOBS_UPDATE = _trigger_fn(
+_GENERATION_JOBS_UPDATE_V1 = _trigger_fn(
     "guard_generation_jobs_update",
     f"""
         PERFORM public.guard_require_owner(OLD.project_id, 'changing a generation job');
@@ -956,6 +955,74 @@ _GENERATION_JOBS_UPDATE = _trigger_fn(
 #: unchanged against a database that does not yet have
 #: content_generation_jobs. Depends on guard_require_owner (FUNCTIONS_V1),
 #: so the migration that creates these must run after c4d81e2a9f63.
+GENERATION_FUNCTIONS_V1: tuple[GuardFunction, ...] = (
+    GuardFunction("guard_generation_jobs_insert", "", _GENERATION_JOBS_INSERT_V1),
+    GuardFunction("guard_generation_jobs_update", "", _GENERATION_JOBS_UPDATE_V1),
+)
+
+# v2 (SMM-026A/2.1-FU): max_attempts is selected by the authenticated
+# backend when a job is created.  It is bounded at insert and immutable
+# afterwards; the EXECUTE-only generation role cannot write the table.
+_GENERATION_JOBS_INSERT = _trigger_fn(
+    "guard_generation_jobs_insert",
+    f"""
+        v_user := public.guard_require_owner(NEW.project_id, 'starting a generation job');
+
+        IF NEW.requested_by_user_id IS DISTINCT FROM v_user THEN
+            {_raise('the requester must be the bound user')}
+        END IF;
+
+        IF NEW.max_attempts NOT BETWEEN 1 AND 10 THEN
+            {_raise('generation max_attempts must be between 1 and 10')}
+        END IF;
+
+        IF NEW.status <> 'queued'
+           OR NEW.claimed_by IS NOT NULL
+           OR NEW.claimed_at IS NOT NULL
+           OR NEW.lease_expires_at IS NOT NULL
+           OR NEW.next_attempt_at IS NOT NULL
+           OR NEW.last_error IS NOT NULL
+           OR NEW.attempt_count <> 0
+           OR NEW.finished_at IS NOT NULL
+           OR NEW.result <> '{{}}'::jsonb THEN
+            {_raise('a new generation job is freshly queued, nothing more')}
+        END IF;
+
+        NEW.created_at := now();
+        NEW.updated_at := now();
+""",
+    declare="    v_user uuid;",
+)
+
+_GENERATION_JOBS_UPDATE = _trigger_fn(
+    "guard_generation_jobs_update",
+    f"""
+        PERFORM public.guard_require_owner(OLD.project_id, 'changing a generation job');
+
+        IF NOT (
+            OLD.status IN ('queued', 'claimed') AND NEW.status = 'cancelled'
+        ) THEN
+            {_raise('generation job %: % -> % is not a Control Center command', 'OLD.id', 'OLD.status', 'NEW.status')}
+        END IF;
+
+        IF NEW.claimed_by IS DISTINCT FROM OLD.claimed_by
+           OR NEW.claimed_at IS DISTINCT FROM OLD.claimed_at
+           OR NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at
+           OR NEW.next_attempt_at IS DISTINCT FROM OLD.next_attempt_at
+           OR NEW.attempt_count IS DISTINCT FROM OLD.attempt_count
+           OR NEW.max_attempts IS DISTINCT FROM OLD.max_attempts
+           OR NEW.result IS DISTINCT FROM OLD.result
+           OR NEW.last_error IS DISTINCT FROM OLD.last_error
+           OR NEW.requested_by_user_id IS DISTINCT FROM OLD.requested_by_user_id
+           OR NEW.project_id IS DISTINCT FROM OLD.project_id THEN
+            {_raise('generation job %: claim, lease, attempt and result columns belong to the worker', 'OLD.id')}
+        END IF;
+
+        NEW.updated_at := now();
+        NEW.finished_at := now();
+""",
+)
+
 GENERATION_FUNCTIONS: tuple[GuardFunction, ...] = (
     GuardFunction("guard_generation_jobs_insert", "", _GENERATION_JOBS_INSERT),
     GuardFunction("guard_generation_jobs_update", "", _GENERATION_JOBS_UPDATE),

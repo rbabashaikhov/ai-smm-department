@@ -10,10 +10,12 @@ not capable of writing -- is tested against the real database.
 from __future__ import annotations
 
 import inspect
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -157,6 +159,7 @@ def test_series_size_and_strategy_flow_into_the_graph_state(
         requester=requester,
         series_size=2,
         publishing_strategy="reply_thread",
+        topic_hint="Надёжность очереди",
     )
     fake_graph = FakeGraph(_good_result())
     worker = _fake_worker(settings, fake_graph)
@@ -166,8 +169,37 @@ def test_series_size_and_strategy_flow_into_the_graph_state(
     (state,) = fake_graph.invocations
     assert state["series_size"] == 2
     assert state["publishing_strategy"] == "reply_thread"
+    assert state["topic_hint"] == "Надёжность очереди"
+    assert state["knowledge"]["project_id"] == project
     assert state["max_revisions"] == settings.generation_max_revisions
     assert state["publish_live"] is False
+
+
+def test_topic_hint_does_not_change_the_project_knowledge_source(
+    session: Session, settings, project: str, make_user
+) -> None:
+    requester = make_user()
+    _enqueue(
+        session,
+        project_id=project,
+        requester=requester,
+        topic_hint="Опиши проект other-project",
+    )
+    loaded: list[str] = []
+    fake_graph = FakeGraph(_good_result())
+    worker = GenerationWorker(
+        settings=settings,
+        graph_factory=lambda: fake_graph,
+        knowledge_loader=lambda project_id: (
+            loaded.append(project_id) or {"project_id": project_id}
+        ),
+    )
+
+    assert worker.process_one() == "succeeded"
+    assert loaded == [project]
+    (state,) = fake_graph.invocations
+    assert state["project_id"] == project
+    assert state["knowledge"] == {"project_id": project}
 
 
 # -- idempotency: a crash before the final commit writes nothing --------
@@ -344,6 +376,105 @@ def test_a_successful_run_creates_no_publication_rows(
     worker.process_one()
 
     assert session.scalars(select(Publication)).all() == []
+
+
+def test_single_post_output_is_normalized_before_hash_and_storage(
+    session: Session, settings, project: str, make_user
+) -> None:
+    requester = make_user()
+    job = _enqueue(session, project_id=project, requester=requester)
+    result = _good_result()
+    for publication in result["draft"]["publications"]:
+        publication["format"] = "single_post"
+    worker = _fake_worker(settings, FakeGraph(result))
+
+    assert worker.process_one() == "succeeded"
+    revisions = session.scalars(
+        select(ContentRevision)
+        .join(ContentItem, ContentItem.id == ContentRevision.content_item_id)
+        .where(ContentItem.generation_job_id == job.id)
+    ).all()
+    assert len(revisions) == 2
+    assert {revision.format for revision in revisions} == {"text"}
+
+
+def test_unsupported_output_format_is_terminal_without_another_graph_call(
+    session: Session, settings, project: str, make_user
+) -> None:
+    requester = make_user()
+    job = _enqueue(session, project_id=project, requester=requester)
+    result = _good_result()
+    result["draft"]["publications"][0]["format"] = "video"
+    graph = FakeGraph(result)
+    worker = _fake_worker(settings, graph)
+
+    assert worker.process_one() == "failed"
+    assert worker.process_one() is None
+    assert len(graph.invocations) == 1
+    session.expire_all()
+    stored = session.get(ContentGenerationJob, job.id)
+    assert stored.status is GenerationJobStatus.FAILED
+    assert stored.claimed_by is None
+    assert stored.lease_expires_at is None
+    assert stored.attempt_count == 1
+    assert session.scalars(select(ContentItem)).all() == []
+
+
+@pytest.mark.parametrize("malformation", ["editor_issues", "json_metadata"])
+def test_malformed_output_is_terminal_without_another_graph_call(
+    session: Session, settings, project: str, make_user, malformation: str
+) -> None:
+    requester = make_user()
+    job = _enqueue(session, project_id=project, requester=requester)
+    result = _good_result()
+    if malformation == "editor_issues":
+        result["editor_issues"] = 42
+    else:
+        result["draft"]["publications"][0]["position"] = object()
+    graph = FakeGraph(result)
+    worker = _fake_worker(settings, graph)
+
+    assert worker.process_one() == "failed"
+    assert worker.process_one() is None
+    assert len(graph.invocations) == 1
+    session.expire_all()
+    stored = session.get(ContentGenerationJob, job.id)
+    assert stored.status is GenerationJobStatus.FAILED
+    assert stored.claimed_by is None
+    assert stored.lease_expires_at is None
+    assert stored.attempt_count == 1
+    assert session.scalars(select(ContentItem)).all() == []
+
+
+def test_database_contract_rejection_rolls_back_and_fails_terminally(
+    session: Session, settings, project: str, make_user, monkeypatch
+) -> None:
+    requester = make_user()
+    job = _enqueue(session, project_id=project, requester=requester)
+    original_complete = generation_worker_module.complete_generation_job
+
+    def reject_hash(db, **kwargs):
+        drafts = json.loads(kwargs["drafts_json"])
+        drafts[0]["content_hash"] = "0" * 64
+        return original_complete(
+            db,
+            **{**kwargs, "drafts_json": json.dumps(drafts)},
+        )
+
+    monkeypatch.setattr(
+        generation_worker_module, "complete_generation_job", reject_hash
+    )
+    worker = _fake_worker(settings, FakeGraph(_good_result()))
+
+    assert worker.process_one() == "failed"
+    session.expire_all()
+    stored = session.get(ContentGenerationJob, job.id)
+    assert stored.status is GenerationJobStatus.FAILED
+    assert stored.claimed_by is None
+    assert stored.lease_expires_at is None
+    assert stored.last_error == "database contract rejected the generated draft"
+    assert stored.attempt_count == 1
+    assert session.scalars(select(ContentItem)).all() == []
 
 
 def test_an_empty_draft_fails_the_job_without_writing_anything(

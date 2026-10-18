@@ -31,7 +31,7 @@ _COMPLETE_SQL = text(
 
 _FAIL_SQL = text(
     "SELECT public.generation_fail("
-    ":job_id, :worker_id, 'forced failure', false, 3, "
+    ":job_id, :worker_id, 'forced failure', false, "
     "'DirectContractTest', 1, 1)"
 )
 
@@ -82,6 +82,117 @@ def test_generation_role_definition_and_operator_verify(
     assert pg_roles.failures(pg_roles.verify_generation(admin_database_url)) == []
 
 
+def test_generation_role_cannot_override_the_job_retry_ceiling(
+    session: Session,
+    generation_session_factory: sessionmaker[Session],
+    project: str,
+    make_user,
+) -> None:
+    job = ContentGenerationJob(
+        id=uuid.uuid4(),
+        project_id=project,
+        requested_by_user_id=make_user().id,
+        status=GenerationJobStatus.QUEUED,
+        max_attempts=1,
+    )
+    session.add(job)
+    session.commit()
+
+    with generation_session_factory() as worker_db:
+        claimed = claim_due_generation_job(
+            worker_db, worker_id="bounded-worker", lease_seconds=600
+        )
+        assert claimed is not None and claimed.attempt_count == 1
+        assert claimed.max_attempts == 1
+        worker_db.commit()
+
+        # The legacy signature was the bypass: an EXECUTE-only worker could
+        # choose an arbitrary retry ceiling. It no longer exists.
+        with pytest.raises(DBAPIError):
+            worker_db.execute(
+                text(
+                    "SELECT * FROM public.generation_claim("
+                    "'bounded-worker', 600, 999999)"
+                )
+            ).all()
+        worker_db.rollback()
+
+        status = worker_db.execute(
+            text(
+                "SELECT public.generation_fail("
+                ":job_id, 'bounded-worker', 'timeout', true, "
+                "'TimeoutError', 1, 1)"
+            ),
+            {"job_id": job.id},
+        ).scalar_one()
+        assert status == "failed"
+        worker_db.commit()
+
+        assert claim_due_generation_job(
+            worker_db, worker_id="bounded-worker", lease_seconds=600
+        ) is None
+
+    session.expire_all()
+    stored = session.get(ContentGenerationJob, job.id)
+    assert stored is not None
+    assert stored.status is GenerationJobStatus.FAILED
+    assert stored.attempt_count == stored.max_attempts == 1
+
+
+def test_generation_role_cannot_request_unbounded_lease_or_backoff(
+    session: Session,
+    generation_session_factory: sessionmaker[Session],
+    project: str,
+    make_user,
+) -> None:
+    job = ContentGenerationJob(
+        id=uuid.uuid4(),
+        project_id=project,
+        requested_by_user_id=make_user().id,
+        status=GenerationJobStatus.QUEUED,
+        max_attempts=2,
+    )
+    session.add(job)
+    session.commit()
+
+    with generation_session_factory() as worker_db:
+        with pytest.raises(DBAPIError, match="invalid claim parameters"):
+            worker_db.execute(
+                text("SELECT * FROM public.generation_claim('bounded-worker', 3601)")
+            ).all()
+        worker_db.rollback()
+
+        claimed = claim_due_generation_job(
+            worker_db, worker_id="bounded-worker", lease_seconds=600
+        )
+        assert claimed is not None and claimed.id == job.id
+        worker_db.commit()
+
+        with pytest.raises(DBAPIError, match="invalid retry parameters"):
+            worker_db.execute(
+                text(
+                    "SELECT public.generation_fail("
+                    ":job_id, 'bounded-worker', 'timeout', true, "
+                    "'TimeoutError', 1, 3601)"
+                ),
+                {"job_id": job.id},
+            ).scalar_one()
+        worker_db.rollback()
+
+        status = worker_db.execute(
+            _FAIL_SQL,
+            {"job_id": job.id, "worker_id": "bounded-worker"},
+        ).scalar_one()
+        assert status == "failed"
+        worker_db.commit()
+
+    session.expire_all()
+    stored = session.get(ContentGenerationJob, job.id)
+    assert stored is not None
+    assert stored.status is GenerationJobStatus.FAILED
+    assert stored.attempt_count == 1
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -117,7 +228,7 @@ def test_generation_contract_derives_project_and_provenance_from_job(
 
     with generation_session_factory() as worker_db:
         claimed = claim_due_generation_job(
-            worker_db, worker_id="role-worker", lease_seconds=600, max_attempts=3
+            worker_db, worker_id="role-worker", lease_seconds=600
         )
         assert claimed is not None
         worker_db.commit()
@@ -164,7 +275,7 @@ def test_generation_contract_rejects_empty_text_directly_for_generation_role(
 
     with generation_session_factory() as worker_db:
         claimed = claim_due_generation_job(
-            worker_db, worker_id="hash-worker", lease_seconds=600, max_attempts=3
+            worker_db, worker_id="hash-worker", lease_seconds=600
         )
         assert claimed is not None
         worker_db.commit()
@@ -199,7 +310,7 @@ def test_generation_contract_rejects_hash_for_another_text(
 
     with generation_session_factory() as worker_db:
         claimed = claim_due_generation_job(
-            worker_db, worker_id="hash-worker", lease_seconds=600, max_attempts=3
+            worker_db, worker_id="hash-worker", lease_seconds=600
         )
         assert claimed is not None
         worker_db.commit()
@@ -243,7 +354,7 @@ def test_generation_contract_rejects_nonempty_rich_content_directly(
 
     with generation_session_factory() as worker_db:
         claimed = claim_due_generation_job(
-            worker_db, worker_id="hash-worker", lease_seconds=600, max_attempts=3
+            worker_db, worker_id="hash-worker", lease_seconds=600
         )
         assert claimed is not None
         worker_db.commit()
@@ -282,7 +393,7 @@ def test_generation_contract_hashes_unicode_and_multiple_drafts_in_database(
 
     with generation_session_factory() as worker_db:
         claimed = claim_due_generation_job(
-            worker_db, worker_id="hash-worker", lease_seconds=600, max_attempts=3
+            worker_db, worker_id="hash-worker", lease_seconds=600
         )
         assert claimed is not None
         worker_db.commit()
@@ -330,7 +441,7 @@ def test_generation_fail_rejects_wrong_worker_or_expired_lease_directly(
 
     with generation_session_factory() as worker_db:
         claimed = claim_due_generation_job(
-            worker_db, worker_id="lease-owner", lease_seconds=600, max_attempts=3
+            worker_db, worker_id="lease-owner", lease_seconds=600
         )
         assert claimed is not None
         worker_db.commit()

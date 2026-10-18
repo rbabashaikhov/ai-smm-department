@@ -1,15 +1,15 @@
 -- Dedicated least-privilege login for the Agent -> Draft worker.
 -- Run against the application database as a role with CREATEROLE after the
--- e04cb3a748f5 migration. No password is stored here; set it interactively.
+-- f7a91c2d5e04 migration. No password is stored here; set it interactively.
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 
 DO $preflight$
 DECLARE
     required text[] := ARRAY[
-        'public.generation_claim(text,integer,integer)',
+        'public.generation_claim(text,integer)',
         'public.generation_complete(uuid,text,uuid,jsonb,jsonb)',
-        'public.generation_fail(uuid,text,text,boolean,integer,text,integer,integer)'
+        'public.generation_fail(uuid,text,text,boolean,text,integer,integer)'
     ];
     missing text[];
     owners text[];
@@ -72,9 +72,9 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM ai_smm_generation;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM ai_smm_generation;
 GRANT USAGE ON SCHEMA public TO ai_smm_generation;
 GRANT EXECUTE ON FUNCTION
-    public.generation_claim(text, integer, integer),
+    public.generation_claim(text, integer),
     public.generation_complete(uuid, text, uuid, jsonb, jsonb),
-    public.generation_fail(uuid, text, text, boolean, integer, text, integer, integer)
+    public.generation_fail(uuid, text, text, boolean, text, integer, integer)
 TO ai_smm_generation;
 
 DO $postcheck$

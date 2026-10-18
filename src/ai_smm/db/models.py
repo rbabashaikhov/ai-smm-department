@@ -1157,6 +1157,10 @@ class ContentGenerationJob(Base):
         CheckConstraint(
             "attempt_count >= 0", name="ck_generation_jobs_attempt_count"
         ),
+        CheckConstraint(
+            "max_attempts BETWEEN 1 AND 10",
+            name="ck_generation_jobs_max_attempts",
+        ),
         # A claimed row always carries claim bookkeeping. One-directional
         # on purpose: cancelling a job that is already claimed (the owner,
         # through Control Center) moves status away from 'claimed' but
@@ -1223,6 +1227,9 @@ class ContentGenerationJob(Base):
 
     attempt_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="2"
     )
     next_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)

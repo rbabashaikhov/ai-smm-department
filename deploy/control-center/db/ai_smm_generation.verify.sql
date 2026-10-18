@@ -30,10 +30,15 @@ WITH role AS (
       FROM pg_proc p
       JOIN pg_roles owner_role ON owner_role.oid = p.proowner
      WHERE p.oid IN (
-        'public.generation_claim(text,integer,integer)'::regprocedure,
+        'public.generation_claim(text,integer)'::regprocedure,
         'public.generation_complete(uuid,text,uuid,jsonb,jsonb)'::regprocedure,
-        'public.generation_fail(uuid,text,text,boolean,integer,text,integer,integer)'::regprocedure
+        'public.generation_fail(uuid,text,text,boolean,text,integer,integer)'::regprocedure
      )
+    UNION ALL
+    SELECT 'legacy_contracts_absent',
+           to_regprocedure('public.generation_claim(text,integer,integer)') IS NULL
+           AND to_regprocedure('public.generation_fail(uuid,text,text,boolean,integer,text,integer,integer)') IS NULL,
+           'worker-controlled retry-policy signatures are absent'
     UNION ALL
     SELECT 'public_cannot_execute', NOT EXISTS (
         SELECT 1 FROM information_schema.routine_privileges rp

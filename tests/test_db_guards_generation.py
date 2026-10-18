@@ -2,9 +2,9 @@
 
 Same fixtures and style as tests/test_db_guards.py: a session-bound
 ai_smm_cc_rw transaction (`rw`/`bound`) for the business-mutation path the
-API uses, and the plain owner-role `session` fixture for what the
-generation worker does -- claiming, writing results, as the table owner,
-exactly like ai_smm.worker already does for publications.
+API uses, and the plain owner-role `session` fixture for administrative
+setup. The real generation role is independently exercised in
+tests/test_db_generation_role.py.
 """
 from __future__ import annotations
 
@@ -294,6 +294,48 @@ def test_the_worker_owned_columns_cannot_be_tampered_with_through_cancel(
         )
 
     _refused(raised, "belong to the worker")
+
+
+def test_job_retry_ceiling_is_immutable_after_creation(
+    rw, session: Session, owner, project: str, token_for  # noqa: F811
+) -> None:
+    with bound(rw, token_for(owner)) as db:
+        job = create_generation_job(
+            db,
+            project_id=project,
+            requested_by_user=owner,
+            mutations_enabled=True,
+            max_attempts=2,
+        )
+        db.commit()
+        job_id = job.id
+
+    session.execute(
+        text(
+            "GRANT UPDATE (max_attempts) ON content_generation_jobs"
+            " TO ai_smm_cc_rw"
+        )
+    )
+    session.commit()
+    try:
+        with bound(rw, token_for(owner)) as db, pytest.raises(DBAPIError) as raised:
+            db.execute(
+                text(
+                    "UPDATE content_generation_jobs"
+                    " SET status = 'cancelled', max_attempts = 10"
+                    " WHERE id = :id"
+                ),
+                {"id": str(job_id)},
+            )
+        _refused(raised, "belong to the worker")
+    finally:
+        session.execute(
+            text(
+                "REVOKE UPDATE (max_attempts) ON content_generation_jobs"
+                " FROM ai_smm_cc_rw"
+            )
+        )
+        session.commit()
 
 
 def test_an_owner_bound_session_may_cancel_their_own_job(

@@ -206,6 +206,7 @@ column_grants(relname, attname, privilege) AS (
         ('content_generation_jobs', 'requested_by_user_id', 'INSERT'),
         ('content_generation_jobs', 'status', 'INSERT'),
         ('content_generation_jobs', 'params', 'INSERT'),
+        ('content_generation_jobs', 'max_attempts', 'INSERT'),
         ('content_generation_jobs', 'last_error', 'INSERT'),
         ('content_generation_jobs', 'next_attempt_at', 'INSERT'),
         ('content_generation_jobs', 'claimed_by', 'INSERT'),

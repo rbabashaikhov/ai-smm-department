@@ -123,7 +123,8 @@ BUSINESS_WRITES: dict[tuple[str, str], frozenset[str]] = {
     # last_error, finished_at) go in as NULL -- the guard's insert trigger
     # refuses any of them carrying a real value regardless of this grant.
     ("content_generation_jobs", "INSERT"): _cols(
-        "id, project_id, requested_by_user_id, status, params, last_error,"
+        "id, project_id, requested_by_user_id, status, params, max_attempts,"
+        " last_error,"
         " next_attempt_at, claimed_by, claimed_at, lease_expires_at,"
         " created_at, updated_at, finished_at"
     ),
@@ -161,7 +162,9 @@ NEVER_UPDATED = {
     "social_account_credentials": {"social_account_id", "key_id", "fingerprint"},
     "projects": {"id", "knowledge_path", "default_platform", "is_active"},
     "content_items": {"project_id"},
-    "content_generation_jobs": {"project_id", "requested_by_user_id", "params"},
+    "content_generation_jobs": {
+        "project_id", "requested_by_user_id", "params", "max_attempts"
+    },
 }
 
 

@@ -1409,6 +1409,7 @@ def cmd_generation_enqueue(args: argparse.Namespace, settings: Settings) -> int:
                 # The CLI is a trusted operator path, like every other
                 # command here; it does not read the API's own mutation switch.
                 mutations_enabled=True,
+                max_attempts=settings.generation_max_attempts,
                 series_size=args.series_size,
                 publishing_strategy=args.strategy,
                 topic_hint=args.topic_hint,

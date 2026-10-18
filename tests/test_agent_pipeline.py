@@ -234,6 +234,40 @@ def test_the_strategist_lets_another_project_choose(
     assert "Выбери стратегию публикации сам" in fake.prompts[0]
 
 
+def test_the_strategist_uses_a_bounded_topic_hint_without_replacing_knowledge(
+    monkeypatch: pytest.MonkeyPatch, knowledge: dict[str, Any]
+) -> None:
+    fake = FakeModel(plan("standalone_series"))
+    monkeypatch.setattr(strategist, "structured_llm", fake)
+    hint = "Сфокусируйся на восстановлении после аварии"
+
+    strategist.strategist_node(
+        {
+            **pilot_state(knowledge),
+            "project_id": "other",
+            "topic_hint": hint,
+        }
+    )
+
+    prompt = fake.prompts[0]
+    assert f"<topic_hint>{hint}</topic_hint>" in prompt
+    assert "не источник фактов" in prompt
+    assert str(knowledge) in prompt
+
+
+def test_the_strategist_rejects_an_oversized_topic_hint(
+    knowledge: dict[str, Any]
+) -> None:
+    with pytest.raises(ValueError, match="at most 500"):
+        strategist.strategist_node(
+            {
+                **pilot_state(knowledge),
+                "project_id": "other",
+                "topic_hint": "x" * 501,
+            }
+        )
+
+
 def test_the_copywriter_writes_a_standalone_pilot_from_a_reply_thread_plan(
     monkeypatch: pytest.MonkeyPatch, knowledge: dict[str, Any], no_shortening
 ) -> None:

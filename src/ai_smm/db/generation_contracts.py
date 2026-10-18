@@ -9,13 +9,17 @@ from __future__ import annotations
 from ai_smm.db.guards import GuardFunction
 
 
+MAX_GENERATION_LEASE_SECONDS = 3600
+MAX_GENERATION_BACKOFF_SECONDS = 3600
+
+
 _HEADER = """LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 """
 
 
-_CLAIM = f"""
+_CLAIM_V1 = f"""
 CREATE OR REPLACE FUNCTION public.generation_claim(
     p_worker_id text, p_lease_seconds integer, p_max_attempts integer
 ) RETURNS TABLE (
@@ -233,7 +237,7 @@ $contract$
 """
 
 
-_FAIL = f"""
+_FAIL_V1 = f"""
 CREATE OR REPLACE FUNCTION public.generation_fail(
     p_job_id uuid, p_worker_id text, p_reason text, p_retryable boolean,
     p_max_attempts integer, p_error_type text,
@@ -297,12 +301,169 @@ $contract$
 """
 
 
-GENERATION_CONTRACTS: tuple[GuardFunction, ...] = (
-    GuardFunction("generation_claim", "text, integer, integer", _CLAIM),
+_CLAIM = f"""
+CREATE OR REPLACE FUNCTION public.generation_claim(
+    p_worker_id text, p_lease_seconds integer
+) RETURNS TABLE (
+    id uuid, project_id text, requested_by_user_id uuid, status text,
+    params jsonb, attempt_count integer, max_attempts integer, claimed_by text,
+    claimed_at timestamptz, lease_expires_at timestamptz
+)
+{_HEADER}AS $contract$
+DECLARE
+    v_job_id uuid;
+BEGIN
+    IF p_worker_id IS NULL OR btrim(p_worker_id) = '' OR length(p_worker_id) > 120
+       OR p_lease_seconds IS NULL
+       OR p_lease_seconds NOT BETWEEN 1 AND {MAX_GENERATION_LEASE_SECONDS} THEN
+        RAISE EXCEPTION 'generation contract: invalid claim parameters'
+            USING ERRCODE = '22023';
+    END IF;
+
+    -- max_attempts belongs to the job and is never supplied by this role.
+    -- A claim consumes one attempt, so the final expired claim is terminal.
+    UPDATE public.content_generation_jobs AS j
+       SET status = 'failed', claimed_by = NULL, claimed_at = NULL,
+           lease_expires_at = NULL, next_attempt_at = NULL,
+           last_error = coalesce(
+               j.last_error, 'generation lease expired after final attempt'),
+           updated_at = now(), finished_at = now()
+     WHERE j.status = 'claimed' AND j.lease_expires_at <= now()
+       AND j.attempt_count >= j.max_attempts;
+
+    UPDATE public.content_generation_jobs AS j
+       SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
+           lease_expires_at = NULL, next_attempt_at = NULL, updated_at = now()
+     WHERE j.status = 'claimed' AND j.lease_expires_at <= now()
+       AND j.attempt_count < j.max_attempts;
+
+    UPDATE public.content_generation_jobs AS j
+       SET status = 'failed', next_attempt_at = NULL,
+           last_error = coalesce(j.last_error, 'generation attempts exhausted'),
+           updated_at = now(), finished_at = now()
+     WHERE j.status = 'queued' AND j.attempt_count >= j.max_attempts;
+
+    SELECT j.id INTO v_job_id
+      FROM public.content_generation_jobs AS j
+     WHERE j.status = 'queued'
+       AND j.attempt_count < j.max_attempts
+       AND (j.next_attempt_at IS NULL OR j.next_attempt_at <= now())
+     ORDER BY j.created_at, j.id
+     LIMIT 1 FOR UPDATE SKIP LOCKED;
+
+    IF v_job_id IS NULL THEN
+        RETURN;
+    END IF;
+
+    UPDATE public.content_generation_jobs AS j
+       SET status = 'claimed', claimed_by = p_worker_id, claimed_at = now(),
+           lease_expires_at = now() + make_interval(secs => p_lease_seconds),
+           attempt_count = j.attempt_count + 1, next_attempt_at = NULL,
+           updated_at = now()
+     WHERE j.id = v_job_id;
+
+    INSERT INTO public.audit_log (actor, action, subject, details)
+    VALUES ('worker:' || p_worker_id, 'generation.claimed',
+            'generation_job:' || v_job_id::text,
+            jsonb_build_object('lease_seconds', p_lease_seconds));
+
+    RETURN QUERY
+    SELECT j.id, j.project_id::text, j.requested_by_user_id, j.status::text,
+           j.params, j.attempt_count, j.max_attempts, j.claimed_by::text,
+           j.claimed_at, j.lease_expires_at
+      FROM public.content_generation_jobs AS j WHERE j.id = v_job_id;
+END
+$contract$
+"""
+
+
+_FAIL = f"""
+CREATE OR REPLACE FUNCTION public.generation_fail(
+    p_job_id uuid, p_worker_id text, p_reason text, p_retryable boolean,
+    p_error_type text, p_backoff_base_seconds integer,
+    p_backoff_cap_seconds integer
+) RETURNS text
+{_HEADER}AS $contract$
+DECLARE
+    v_job public.content_generation_jobs%ROWTYPE;
+    v_delay integer;
+BEGIN
+    IF p_backoff_base_seconds IS NULL OR p_backoff_cap_seconds IS NULL
+       OR p_backoff_base_seconds NOT BETWEEN 1 AND {MAX_GENERATION_BACKOFF_SECONDS}
+       OR p_backoff_cap_seconds NOT BETWEEN 1 AND {MAX_GENERATION_BACKOFF_SECONDS}
+       OR p_backoff_base_seconds > p_backoff_cap_seconds THEN
+        RAISE EXCEPTION 'generation contract: invalid retry parameters'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT * INTO v_job FROM public.content_generation_jobs AS j
+     WHERE j.id = p_job_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'generation contract: job not found' USING ERRCODE = 'P0002';
+    END IF;
+    IF v_job.status <> 'claimed' OR v_job.claimed_by IS DISTINCT FROM p_worker_id
+       OR v_job.lease_expires_at <= now() THEN
+        RETURN v_job.status::text;
+    END IF;
+
+    IF NOT p_retryable OR v_job.attempt_count >= v_job.max_attempts THEN
+        UPDATE public.content_generation_jobs AS j
+           SET status = 'failed', claimed_by = NULL, claimed_at = NULL,
+               lease_expires_at = NULL, next_attempt_at = NULL,
+               last_error = left(p_reason, 4000), updated_at = now(),
+               finished_at = now()
+         WHERE j.id = v_job.id;
+        INSERT INTO public.audit_log (actor, action, subject, details)
+        VALUES ('worker:' || p_worker_id, 'generation.failed',
+                'generation_job:' || v_job.id::text,
+                jsonb_build_object('attempt_count', v_job.attempt_count,
+                                   'max_attempts', v_job.max_attempts,
+                                   'error_type', p_error_type,
+                                   'retryable', p_retryable));
+        RETURN 'failed';
+    END IF;
+
+    v_delay := least(
+        p_backoff_base_seconds * (2 ^ (v_job.attempt_count - 1))::integer,
+        p_backoff_cap_seconds);
+    UPDATE public.content_generation_jobs AS j
+       SET status = 'queued', claimed_by = NULL, claimed_at = NULL,
+           lease_expires_at = NULL,
+           next_attempt_at = now() + make_interval(secs => v_delay),
+           last_error = left(p_reason, 4000), updated_at = now()
+     WHERE j.id = v_job.id;
+    INSERT INTO public.audit_log (actor, action, subject, details)
+    VALUES ('worker:' || p_worker_id, 'generation.retry_scheduled',
+            'generation_job:' || v_job.id::text,
+            jsonb_build_object('delay_seconds', v_delay,
+                               'attempt_count', v_job.attempt_count,
+                               'max_attempts', v_job.max_attempts,
+                               'error_type', p_error_type));
+    RETURN 'queued';
+END
+$contract$
+"""
+
+
+# Frozen signatures installed by e04cb3a748f5.  The follow-up migration
+# replaces them only after adding content_generation_jobs.max_attempts.
+GENERATION_CONTRACTS_V1: tuple[GuardFunction, ...] = (
+    GuardFunction("generation_claim", "text, integer, integer", _CLAIM_V1),
     GuardFunction("generation_complete", "uuid, text, uuid, jsonb, jsonb", _COMPLETE),
     GuardFunction(
         "generation_fail",
         "uuid, text, text, boolean, integer, text, integer, integer",
+        _FAIL_V1,
+    ),
+)
+
+
+GENERATION_CONTRACTS: tuple[GuardFunction, ...] = (
+    GuardFunction("generation_claim", "text, integer", _CLAIM),
+    GuardFunction("generation_complete", "uuid, text, uuid, jsonb, jsonb", _COMPLETE),
+    GuardFunction(
+        "generation_fail",
+        "uuid, text, text, boolean, text, integer, integer",
         _FAIL,
     ),
 )

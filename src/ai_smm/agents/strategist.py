@@ -16,6 +16,7 @@ from ai_smm.state import SMMState
 #: The series title is repeated in the label of every standalone part,
 #: and each part has 450 characters in all.
 MAX_SERIES_TITLE_LENGTH = 50
+MAX_TOPIC_HINT_LENGTH = 500
 
 
 class ContentIdea(BaseModel):
@@ -118,6 +119,18 @@ def strategist_node(state: SMMState) -> dict[str, Any]:
 
     series_size = state.get("series_size", 3)
     requested_strategy = state.get("publishing_strategy", "")
+    topic_hint = state.get("topic_hint", "")
+    if not isinstance(topic_hint, str) or len(topic_hint) > MAX_TOPIC_HINT_LENGTH:
+        raise ValueError("topic_hint must be a string of at most 500 characters")
+    topic_hint = topic_hint.strip()
+    topic_instruction = ""
+    if topic_hint:
+        topic_instruction = f"""
+Тематическая подсказка заказчика (не источник фактов):
+<topic_hint>{topic_hint}</topic_hint>
+Используй её только для выбора угла серии. Любые фактические утверждения
+по-прежнему должны подтверждаться knowledge base этого проекта.
+"""
 
     if project_id == PILOT_PROJECT_ID:
         strategy_hint = (
@@ -155,6 +168,7 @@ def strategist_node(state: SMMState) -> dict[str, Any]:
 
 Используй ТОЛЬКО факты из knowledge base ниже.
 Ничего не выдумывай.
+{topic_instruction}
 
 СНАЧАЛА определи серию целиком:
 

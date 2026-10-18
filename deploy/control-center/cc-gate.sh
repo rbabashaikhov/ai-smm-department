@@ -80,7 +80,7 @@ readonly CC_PINNED_VERIFY_SHA256=6d92adc48e35fe60dadda54a8c4026ee643754e10c38da7
 # mutation role, and the verify file of that role.
 readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
 readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
-readonly CC_PINNED_RW_VERIFY_SHA256=2692ac864bd8c9e9790417f880225ce8d75080b16f812587834c694b1d0a91b9
+readonly CC_PINNED_RW_VERIFY_SHA256=bbc37e760c56755e38f7c67c668538c2fb74d7abed92796b6853d0b97aba05b3
 # Whether THIS release may run business mutations at all. `no` in every
 # release until the owner has reviewed one that may: SMM-025D closes
 # FU-025C-1, FU-024C2-1, FU-024C2-2 and FU-025C-2 in code

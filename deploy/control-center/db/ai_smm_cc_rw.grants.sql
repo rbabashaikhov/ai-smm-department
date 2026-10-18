@@ -282,7 +282,7 @@ GRANT INSERT (content_item_id, revision_id, platform, publication_id, created_at
 -- server defaults. The guard's own insert trigger refuses any of them
 -- carrying a real value, so granting the column here does not let this
 -- role actually set one.
-GRANT INSERT (id, project_id, requested_by_user_id, status, params,
+GRANT INSERT (id, project_id, requested_by_user_id, status, params, max_attempts,
               last_error, next_attempt_at, claimed_by, claimed_at,
               lease_expires_at, created_at, updated_at, finished_at)
     ON content_generation_jobs TO ai_smm_cc_rw;

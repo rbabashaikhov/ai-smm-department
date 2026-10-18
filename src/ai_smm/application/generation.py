@@ -44,6 +44,8 @@ LOCK_TIMEOUT_MS = 3000
 #: a mistake or an attempt to run up the LLM bill unbounded.
 MAX_SERIES_SIZE = 5
 MIN_SERIES_SIZE = 1
+MAX_GENERATION_ATTEMPTS = 10
+MAX_TOPIC_HINT_LENGTH = 500
 
 PUBLISHING_STRATEGIES = frozenset({"standalone_series", "reply_thread"})
 
@@ -75,7 +77,11 @@ class InvalidGenerationParams(ValueError):
 
 
 def _validate_params(
-    *, series_size: int, publishing_strategy: str | None
+    *,
+    series_size: int,
+    publishing_strategy: str | None,
+    max_attempts: int,
+    topic_hint: str | None,
 ) -> None:
     if not MIN_SERIES_SIZE <= series_size <= MAX_SERIES_SIZE:
         raise InvalidGenerationParams(
@@ -90,6 +96,18 @@ def _validate_params(
         raise InvalidGenerationParams(
             "publishing_strategy must be one of "
             f"{sorted(PUBLISHING_STRATEGIES)} or omitted."
+        )
+
+    if not 1 <= max_attempts <= MAX_GENERATION_ATTEMPTS:
+        raise InvalidGenerationParams(
+            f"max_attempts must be between 1 and {MAX_GENERATION_ATTEMPTS}."
+        )
+
+    if topic_hint is not None and (
+        not isinstance(topic_hint, str) or len(topic_hint) > MAX_TOPIC_HINT_LENGTH
+    ):
+        raise InvalidGenerationParams(
+            f"topic_hint must be at most {MAX_TOPIC_HINT_LENGTH} characters."
         )
 
 
@@ -135,6 +153,7 @@ def create_generation_job(
     project_id: str,
     requested_by_user: User,
     mutations_enabled: bool,
+    max_attempts: int = 2,
     series_size: int = 3,
     publishing_strategy: str | None = None,
     topic_hint: str | None = None,
@@ -145,7 +164,10 @@ def create_generation_job(
 
     require_mutations_enabled(mutations_enabled, command="start generation")
     _validate_params(
-        series_size=series_size, publishing_strategy=publishing_strategy
+        series_size=series_size,
+        publishing_strategy=publishing_strategy,
+        max_attempts=max_attempts,
+        topic_hint=topic_hint,
     )
 
     now = now or utcnow()
@@ -155,6 +177,7 @@ def create_generation_job(
         project_id=project_id,
         requested_by_user_id=requested_by_user.id,
         status=GenerationJobStatus.QUEUED,
+        max_attempts=max_attempts,
         params={
             "series_size": series_size,
             "publishing_strategy": publishing_strategy,
@@ -175,6 +198,7 @@ def create_generation_job(
             "project_id": project_id,
             "series_size": series_size,
             "publishing_strategy": publishing_strategy,
+            "max_attempts": max_attempts,
         },
     )
 

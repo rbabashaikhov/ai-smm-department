@@ -40,6 +40,7 @@ def test_an_owner_can_queue_a_job(client, login, member, project: str) -> None:
     assert body["params"]["series_size"] == 2
     assert body["params"]["topic_hint"] == "рецепты"
     assert body["attempt_count"] == 0
+    assert body["max_attempts"] == 2
     assert body["finished_at"] is None
 
 

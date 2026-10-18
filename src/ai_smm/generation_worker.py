@@ -28,6 +28,7 @@ needs_review) because nothing external or irreversible has happened.
 from __future__ import annotations
 
 import json
+import math
 import signal
 import threading
 import uuid
@@ -38,6 +39,7 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from langchain_core.callbacks import get_usage_metadata_callback
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
 from ai_smm.application.content import content_hash
@@ -66,6 +68,9 @@ HEARTBEAT_PATH = Path("/tmp/ai-smm-generation-worker-heartbeat")
 #: content_items.status='approved', and does not import anything that
 #: could.
 REVISION_METADATA_VERSION = 1
+_PERSISTED_FORMATS = frozenset({"text", "image", "carousel", "thread"})
+_MAX_DRAFTS_PER_JOB = 20
+_MAX_TOPIC_HINT_LENGTH = 500
 
 #: Indicative only, for the job's own result.cost_usd -- not a billing
 #: record. gpt-4.1-mini, USD per 1M tokens (input, cached input, output).
@@ -256,7 +261,6 @@ class GenerationWorker:
                 session,
                 worker_id=self.settings.generation_worker_id,
                 lease_seconds=self.settings.generation_lease_seconds,
-                max_attempts=self.settings.generation_max_attempts,
             )
 
             if job is None:
@@ -274,16 +278,10 @@ class GenerationWorker:
 
         try:
             draft, content_plan, usage_report = self._generate(job)
-            run_id, drafts_payload = self._build_drafts_payload(
-                job=job,
-                draft=draft,
-                content_plan=content_plan,
-                usage_report=usage_report,
-            )
         except GenerationFailed as exc:
             self._fail(session, job_id, reason=str(exc), retryable=False)
             return GenerationJobStatus.FAILED.value
-        except Exception as exc:  # noqa: BLE001 -- never let one job take the process down
+        except Exception as exc:  # noqa: BLE001 -- runtime failures may be transient
             logger.exception(
                 "Generation job raised", extra={"context": {"job_id": str(job_id)}}
             )
@@ -296,13 +294,17 @@ class GenerationWorker:
             )
             return GenerationJobStatus.FAILED.value
 
-        result = complete_generation_job(
-            session,
-            job_id=job_id,
-            worker_id=self.settings.generation_worker_id,
-            run_id=run_id,
-            drafts_json=json.dumps(drafts_payload, ensure_ascii=False),
-            result_json=json.dumps(
+        try:
+            run_id, drafts_payload = self._build_drafts_payload(
+                job=job,
+                draft=draft,
+                content_plan=content_plan,
+                usage_report=usage_report,
+            )
+            drafts_json = json.dumps(
+                drafts_payload, ensure_ascii=False, allow_nan=False
+            )
+            result_json = json.dumps(
                 {
                     "series_title": draft.get("series_title", ""),
                     "revision_count": usage_report["revision_count"],
@@ -311,8 +313,47 @@ class GenerationWorker:
                     "seconds": usage_report["seconds"],
                 },
                 ensure_ascii=False,
-            ),
-        )
+                allow_nan=False,
+            )
+        except Exception as exc:  # noqa: BLE001 -- all output-shape errors are terminal
+            self._fail(
+                session,
+                job_id,
+                reason=f"invalid agent output: {type(exc).__name__}: {exc}",
+                retryable=False,
+                error_type="GenerationOutputInvalid",
+            )
+            return GenerationJobStatus.FAILED.value
+
+        try:
+            result = complete_generation_job(
+                session,
+                job_id=job_id,
+                worker_id=self.settings.generation_worker_id,
+                run_id=run_id,
+                drafts_json=drafts_json,
+                result_json=result_json,
+            )
+        except DBAPIError as exc:
+            # PostgreSQL aborts the transaction after a contract exception.
+            # The claim was committed before generation, so rollback only
+            # clears this failed completion attempt and lets us record the
+            # terminal outcome in a fresh transaction.
+            session.rollback()
+            if is_transient_db_error(exc):
+                raise
+            logger.warning(
+                "Generation result rejected by database contract",
+                extra={"context": {"job_id": str(job_id)}},
+            )
+            self._fail(
+                session,
+                job_id,
+                reason="database contract rejected the generated draft",
+                retryable=False,
+                error_type="GenerationContractRejected",
+            )
+            return GenerationJobStatus.FAILED.value
         status = str(result["status"])
 
         if status != GenerationJobStatus.SUCCEEDED.value:
@@ -350,7 +391,6 @@ class GenerationWorker:
             job,
             reason=reason,
             actor=f"worker:{self.settings.generation_worker_id}",
-            max_attempts=self.settings.generation_max_attempts,
             error_type=error_type,
             retryable=retryable,
         )
@@ -385,6 +425,17 @@ class GenerationWorker:
         if publishing_strategy:
             state["publishing_strategy"] = publishing_strategy
 
+        topic_hint = params.get("topic_hint")
+        if topic_hint is not None:
+            if (
+                not isinstance(topic_hint, str)
+                or len(topic_hint) > _MAX_TOPIC_HINT_LENGTH
+            ):
+                raise GenerationFailed("topic_hint is invalid")
+            topic_hint = topic_hint.strip()
+            if topic_hint:
+                state["topic_hint"] = topic_hint
+
         graph = self.graph_factory()
         started = time.monotonic()
 
@@ -394,11 +445,32 @@ class GenerationWorker:
 
         seconds = round(time.monotonic() - started, 2)
 
+        if not isinstance(result, dict):
+            raise GenerationFailed("the agent pipeline returned an invalid result")
+
         draft = result.get("draft")
 
         if not isinstance(draft, dict) or not draft.get("publications"):
             raise GenerationFailed(
                 "the agent pipeline produced no usable draft publications"
+            )
+
+        content_plan = result.get("content_plan") or {}
+        if not isinstance(content_plan, dict):
+            raise GenerationFailed(
+                "the agent pipeline returned an invalid content plan"
+            )
+
+        editor_issues = result.get("editor_issues") or []
+        if not isinstance(editor_issues, list) or not all(
+            isinstance(issue, str) for issue in editor_issues
+        ):
+            raise GenerationFailed("the agent pipeline returned invalid editor issues")
+
+        editor_feedback = result.get("editor_feedback") or ""
+        if not isinstance(editor_feedback, str):
+            raise GenerationFailed(
+                "the agent pipeline returned invalid editor feedback"
             )
 
         usage_report = {
@@ -409,12 +481,12 @@ class GenerationWorker:
             "editor_approved": bool(result.get("editor_approved", False)),
             "editor_score": result.get("editor_score"),
             "editor_narrative_score": result.get("editor_narrative_score"),
-            "editor_issues": list(result.get("editor_issues") or []),
-            "editor_feedback": result.get("editor_feedback") or "",
+            "editor_issues": editor_issues,
+            "editor_feedback": editor_feedback,
             "model": "gpt-4.1-mini",
         }
 
-        return draft, result.get("content_plan") or {}, usage_report
+        return draft, content_plan, usage_report
 
     def _build_drafts_payload(
         self,
@@ -425,6 +497,19 @@ class GenerationWorker:
         usage_report: dict[str, Any],
     ) -> tuple[uuid.UUID, list[dict[str, Any]]]:
         publications = draft.get("publications", [])
+        if not isinstance(publications, list) or not (
+            1 <= len(publications) <= _MAX_DRAFTS_PER_JOB
+        ):
+            raise GenerationFailed("draft publications must contain 1..20 items")
+
+        editor_score = usage_report.get("editor_score")
+        if editor_score is not None and (
+            isinstance(editor_score, bool)
+            or not isinstance(editor_score, (int, float))
+            or not math.isfinite(float(editor_score))
+        ):
+            raise GenerationFailed("editor_score must be a finite number or null")
+
         series_title = draft.get("series_title") or content_plan.get(
             "series_title", ""
         )
@@ -433,17 +518,27 @@ class GenerationWorker:
 
         payload: list[dict[str, Any]] = []
 
-        for publication in publications:
+        for position, publication in enumerate(publications, start=1):
+            if not isinstance(publication, dict):
+                raise GenerationFailed(
+                    f"publication {position} has an invalid structure"
+                )
             items = publication.get("items", [])
-            body = "\n\n".join(
-                str(item.get("text", "")).strip() for item in items
-            ).strip()
-
-            if not body:
-                # The Editor already reports an empty item as an issue;
-                # a job must still finish with whatever is usable rather
-                # than fail the whole series over one empty part.
-                continue
+            if not isinstance(items, list) or not items:
+                raise GenerationFailed(f"publication {position} has no items")
+            texts: list[str] = []
+            for item_position, item in enumerate(items, start=1):
+                if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+                    raise GenerationFailed(
+                        f"publication {position} item {item_position} is invalid"
+                    )
+                text_value = item["text"].strip()
+                if not text_value:
+                    raise GenerationFailed(
+                        f"publication {position} item {item_position} is empty"
+                    )
+                texts.append(text_value)
+            body = "\n\n".join(texts)
 
             metadata = {
                 "version": REVISION_METADATA_VERSION,
@@ -472,8 +567,19 @@ class GenerationWorker:
                 },
             }
 
-            title = str(publication.get("title") or series_title or "Untitled")
-            format_ = str(publication.get("format") or "text")
+            title_value = publication.get("title") or series_title or "Untitled"
+            title = title_value if isinstance(title_value, str) else "Untitled"
+            title = title.strip() or "Untitled"
+            raw_format = publication.get("format")
+            if not isinstance(raw_format, str):
+                raise GenerationFailed(
+                    f"publication {position} has no supported format"
+                )
+            format_ = "text" if raw_format == "single_post" else raw_format
+            if format_ not in _PERSISTED_FORMATS:
+                raise GenerationFailed(
+                    f"publication {position} has unsupported format {raw_format!r}"
+                )
             payload.append(
                 {
                     "title": title,
@@ -492,11 +598,6 @@ class GenerationWorker:
                         items=[],
                     ),
                 }
-            )
-
-        if not payload:
-            raise GenerationFailed(
-                "every generated publication had empty text"
             )
 
         return run_id, payload

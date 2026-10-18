@@ -36,14 +36,14 @@ from __future__ import annotations
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-from ai_smm.db.generation_contracts import GENERATION_CONTRACTS
+from ai_smm.db.generation_contracts import GENERATION_CONTRACTS_V1
 from ai_smm.db.guards import (
     _AUDIT_INSERT,
     _ITEMS_INSERT_V1,
     _ITEMS_UPDATE_V1,
     AUDIT_FUNCTIONS_V2,
     CONTENT_ITEM_FUNCTIONS_V2,
-    GENERATION_FUNCTIONS,
+    GENERATION_FUNCTIONS_V1,
     GENERATION_TRIGGERS,
     drop_function_statements,
     revoke_public_statements,
@@ -170,10 +170,10 @@ def upgrade() -> None:
 
     # Guard functions, PUBLIC's default EXECUTE taken away, then the
     # triggers -- the same order c4d81e2a9f63 used for FUNCTIONS_V1.
-    for function in GENERATION_FUNCTIONS:
+    for function in GENERATION_FUNCTIONS_V1:
         op.execute(function.ddl)
 
-    for statement in revoke_public_statements(GENERATION_FUNCTIONS):
+    for statement in revoke_public_statements(GENERATION_FUNCTIONS_V1):
         op.execute(statement)
 
     for trigger in GENERATION_TRIGGERS:
@@ -191,14 +191,14 @@ def upgrade() -> None:
     for function in CONTENT_ITEM_FUNCTIONS_V2:
         op.execute(function.ddl)
 
-    for function in GENERATION_CONTRACTS:
+    for function in GENERATION_CONTRACTS_V1:
         op.execute(function.ddl)
-    for statement in revoke_public_statements(GENERATION_CONTRACTS):
+    for statement in revoke_public_statements(GENERATION_CONTRACTS_V1):
         op.execute(statement)
 
 
 def downgrade() -> None:
-    for statement in drop_function_statements(GENERATION_CONTRACTS):
+    for statement in drop_function_statements(GENERATION_CONTRACTS_V1):
         op.execute(statement)
 
     # Restore the exact previous-revision bodies before dropping the column
@@ -214,7 +214,7 @@ def downgrade() -> None:
             f"DROP TRIGGER IF EXISTS {trigger.name} ON public.{trigger.table}"
         )
 
-    for statement in drop_function_statements(GENERATION_FUNCTIONS):
+    for statement in drop_function_statements(GENERATION_FUNCTIONS_V1):
         op.execute(statement)
 
     op.drop_index(
