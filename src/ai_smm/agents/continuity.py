@@ -10,6 +10,7 @@ database and without contacting any model.
 """
 from __future__ import annotations
 
+import copy
 import re
 from typing import Any
 
@@ -47,9 +48,32 @@ SERIES_BOILERPLATE = frozenset(
 #: read as continuing one another.
 MIN_SHARED_SUBJECT_WORDS = 2
 
+#: A coarse, truncation-based Russian "stem": not a morphological
+#: analyzer, just enough that "решение"/"решения"/"решений" collapse to
+#: one token for a word-overlap heuristic. Over-collapsing is an accepted
+#: risk of this approach; it only ever adds matches, so it cannot turn a
+#: genuinely unrelated part into one that looks continuous, and the test
+#: suite below checks that it does not.
+STEM_LENGTH = 5
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().lower()
+
+
+def _stem(word: str) -> str:
+    """Truncate to a fixed prefix so common endings stop mattering.
+
+    "товар", "товара", "товаров" and "товарами" all truncate to "товар";
+    a word no longer than STEM_LENGTH is returned whole. This is cheap and
+    wrong in plenty of individual cases (two unrelated words can share a
+    prefix), but for the one thing it is used for here -- does the next
+    part pick up roughly the same subject -- collapsing too much only
+    ever adds a match, never removes a real link, so it cannot report two
+    genuinely unrelated parts as continuing one another.
+    """
+
+    return word if len(word) <= STEM_LENGTH else word[:STEM_LENGTH]
 
 
 def _words(text: str, *, exclude: frozenset[str] | None = None) -> set[str]:
@@ -61,11 +85,14 @@ def _words(text: str, *, exclude: frozenset[str] | None = None) -> set[str]:
     """
 
     excluded = SERIES_BOILERPLATE | (exclude or frozenset())
+    excluded_stems = {_stem(word) for word in excluded}
 
     return {
-        word
+        _stem(word)
         for word in re.findall(r"\w+", _normalize(text))
-        if len(word) > 3 and word not in excluded
+        if len(word) > 3
+        and word not in excluded
+        and _stem(word) not in excluded_stems
     }
 
 
@@ -97,13 +124,278 @@ def _mentions_part_number(text: str, position: int, total: int) -> bool:
     return any(re.search(p, normalized) for p in patterns)
 
 
+#: The body of a series label: the part number, with or without
+#: brackets, in any of the accepted phrasings.
+_PART_LABEL_BODY = (
+    r"[\(\[]?\s*(?:часть|part)\s*\d+\s*(?:из|of|/)\s*\d+\s*[\)\]]?"
+    r"|[\(\[]?\s*\d+\s*/\s*\d+\s*[\)\]]?"
+)
+
+#: The label a standalone part opens with: «<series> — часть N из M».
+_PART_LABEL = re.compile(rf"^\s*(?:{_PART_LABEL_BODY})", re.IGNORECASE)
+
+#: The same body, anchored to the end instead, for a label the Copywriter
+#: wrote as a closing line rather than an opening one.
+_PART_LABEL_TAIL = re.compile(
+    rf"(?:{_PART_LABEL_BODY})\s*\.?\s*$", re.IGNORECASE
+)
+
+_LABEL_SEPARATORS = " \t—–-:|·.,"
+
+
+def split_series_label(text: str, series_title: str = "") -> tuple[str, str]:
+    """Split the leading series label off a part: (label, rest).
+
+    The label is the series title followed by the part number, or the part
+    number alone, at the very start of the text. It is scaffolding the
+    Copywriter is told to put there, identical in every part except for
+    the number, so it says nothing about how a part opens. Returns
+    ("", text) when the text does not start with one.
+    """
+
+    rest = text.lstrip()
+    title = series_title.strip()
+
+    if title and rest.casefold().startswith(title.casefold()):
+        rest = rest[len(title):].lstrip(_LABEL_SEPARATORS)
+
+    match = _PART_LABEL.match(rest)
+
+    if match is None:
+        return "", text
+
+    rest = rest[match.end():].lstrip(_LABEL_SEPARATORS + "\n")
+
+    return text[: len(text) - len(rest)].rstrip(), rest
+
+
+def format_series_label(series_title: str, position: int, total: int) -> str:
+    """The one deterministic label every standalone part opens with.
+
+    Earlier versions left the Copywriter to word this itself, which
+    produced several formats within the same series -- sometimes with the
+    title, sometimes without, sometimes at the end of the text instead of
+    the start. The Copywriter no longer writes this: the system puts it
+    at the front of the body and checks the combined length, so there is
+    exactly one format and it is always where the checks below expect it.
+    """
+
+    title = series_title.strip()
+
+    if title:
+        return f"{title} — часть {position} из {total}"
+
+    return f"Часть {position} из {total}"
+
+
+def strip_series_label(text: str, series_title: str = "") -> str:
+    """Remove a series label from wherever it was written, start or end.
+
+    split_series_label only looks at the start of the text, which is
+    where a part is meant to carry its label. The Copywriter sometimes
+    puts an equivalent phrase at the very end instead, which the
+    start-anchored check does not recognise as a label at all, so it is
+    compared, shortened and reported as ordinary body text. This looks at
+    both ends and returns the body alone either way, so the canonical
+    label this module writes is never stacked on top of one the model
+    already wrote.
+    """
+
+    label, body = split_series_label(text, series_title)
+
+    if label:
+        return body
+
+    stripped = text.rstrip()
+    match = _PART_LABEL_TAIL.search(stripped)
+
+    if match is None:
+        return text
+
+    head = stripped[: match.start()].rstrip(_LABEL_SEPARATORS + ".")
+    title = series_title.strip()
+
+    if title and head.casefold().endswith(title.casefold()):
+        head = head[: len(head) - len(title)].rstrip(_LABEL_SEPARATORS)
+
+    return head
+
+
+#: Phrases that promise a sequel: a next part, episode, or "to be
+#: continued". Matched only against the tail of the last part, so a
+#: mid-series "Далее — ..." transition toward an existing next part (the
+#: Copywriter is told to write exactly that) is never confused with one.
+_SEQUEL_TEASER_PATTERNS = (
+    re.compile(r"следующ\w*\s+(част\w*|публикаци\w*|пост\w*)", re.IGNORECASE),
+    re.compile(r"в\s+следующ\w*\s+(раз|части)", re.IGNORECASE),
+    re.compile(r"продолжени\w*\s+(скоро|следует)", re.IGNORECASE),
+    re.compile(r"\bдалее\s*[—:-]\s*\S", re.IGNORECASE),
+    re.compile(r"to\s+be\s+continued", re.IGNORECASE),
+)
+
+#: How much of the end of the last part is checked for a teaser. A short
+#: window keeps a legitimate mid-text mention (how a feature continues to
+#: behave, say) from being read as a promise of a sequel.
+SEQUEL_TEASER_WINDOW_CHARS = 160
+
+
+def _announces_a_sequel(text: str) -> bool:
+    tail = _normalize(text)[-SEQUEL_TEASER_WINDOW_CHARS:]
+
+    return any(pattern.search(tail) for pattern in _SEQUEL_TEASER_PATTERNS)
+
+
+#: A sentence boundary: one of .!? followed by whitespace. Not a
+#: linguistic parser -- good enough to split off the last sentence of a
+#: part from the real content before it.
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+")
+
+#: Below this many characters, what is left after removing a teaser
+#: sentence is treated as having nothing meaningful left to publish --
+#: closer to an accidental empty post than a conclusion.
+MIN_BODY_AFTER_TEASER_REMOVAL = 20
+
+
+def _trailing_sentence(text: str) -> tuple[str, str]:
+    """Split a text's last sentence off: (everything before it, it).
+
+    An empty first element means the whole text is one sentence (or has
+    no sentence-ending punctuation at all).
+    """
+
+    stripped = text.rstrip()
+    parts = _SENTENCE_BOUNDARY.split(stripped)
+
+    if len(parts) < 2:
+        return "", stripped
+
+    *head, last = parts
+
+    return " ".join(head), last
+
+
+def remove_safe_sequel_teaser(
+    text: str, *, series_title: str = ""
+) -> tuple[str, bool]:
+    """Deterministically drop a trailing sequel teaser, only when doing so
+    is unambiguous: the teaser is its own sentence and nothing else.
+
+    "Продолжение скоро." at the end of the last part is pure scaffolding
+    the Copywriter was told not to write; dropping that one sentence is a
+    mechanical edit with no judgement call in it. "Следующая часть
+    расскажет о новых решениях." is the same trigger phrase, but fused
+    with a real claim about what comes next -- removing just the trigger
+    would leave a dangling fragment ("расскажет о новых решениях"), so
+    this refuses to touch it at all.
+
+    Returns (text, False) unchanged whenever removal is not unambiguously
+    safe: nothing to remove, the teaser sentence also carries real
+    content, or too little would be left to call it a conclusion. Only
+    when it returns (new_text, True) has anything actually changed; the
+    caller still has to re-run every other check against the result, not
+    trust this in isolation.
+    """
+
+    if not _announces_a_sequel(text):
+        return text, False
+
+    label, body = split_series_label(text, series_title)
+    head, last_sentence = _trailing_sentence(body)
+
+    if not head:
+        return text, False  # the whole body was (or reduces to) the teaser
+
+    # Strip every teaser pattern out of the trailing sentence; whatever
+    # survives is content the sentence also carried.
+    remainder = last_sentence
+
+    for pattern in _SEQUEL_TEASER_PATTERNS:
+        remainder = pattern.sub("", remainder)
+
+    if _words(remainder):
+        return text, False  # fused with real content: not a safe cut
+
+    cleaned_body = head.strip()
+
+    if len(cleaned_body) < MIN_BODY_AFTER_TEASER_REMOVAL:
+        return text, False  # next to nothing left to call a conclusion
+
+    separator = "\n\n" if label else ""
+    cleaned = f"{label}{separator}{cleaned_body}"
+
+    # Belt and suspenders: the edit must actually have worked. A second,
+    # still-unremoved teaser earlier in the text (rare, but not
+    # impossible) means this is not a complete fix, so it is not applied.
+    if _announces_a_sequel(cleaned):
+        return text, False
+
+    return cleaned, True
+
+
+def remove_safe_sequel_teaser_from_draft(
+    draft: dict[str, Any],
+    *,
+    series_title: str = "",
+    expects_sequel: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    """Apply remove_safe_sequel_teaser to the last item of the last part.
+
+    Returns (draft, False) -- the exact same object, untouched -- unless
+    a safe removal both applies and fully resolves the check; only then
+    does it return a deep copy with that one item's text edited. The
+    caller (the Editor) runs its normal validate_draft and
+    check_series_continuity pass on whatever comes back either way, so a
+    draft this leaves unchanged is reported and blocked exactly as before.
+    """
+
+    publications = draft.get("publications")
+
+    if expects_sequel or not isinstance(publications, list) or not publications:
+        return draft, False
+
+    last_publication = publications[-1]
+    items = last_publication.get("items")
+
+    if not isinstance(items, list) or not items:
+        return draft, False
+
+    last_item = items[-1]
+    original_text = last_item.get("text", "")
+
+    if not isinstance(original_text, str):
+        return draft, False
+
+    cleaned_text, removed = remove_safe_sequel_teaser(
+        original_text, series_title=series_title
+    )
+
+    if not removed:
+        return draft, False
+
+    candidate = copy.deepcopy(draft)
+    candidate["publications"][-1]["items"][-1]["text"] = cleaned_text
+
+    # The publication as a whole (every item joined), not just the one
+    # edited item, must no longer trip the check.
+    if _announces_a_sequel(_publication_text(candidate["publications"][-1])):
+        return draft, False
+
+    return candidate, True
+
+
 def check_series_continuity(
     draft: dict[str, Any],
     *,
     strategy: str = "standalone_series",
     series_title: str = "",
+    expects_sequel: bool = False,
 ) -> list[str]:
-    """Return every continuity problem found, in reading order."""
+    """Return every continuity problem found, in reading order.
+
+    expects_sequel is a hook for a content plan that explicitly schedules a
+    continuation beyond this series; nothing currently sets one, so unless
+    a caller says otherwise the last part is checked as the series' end.
+    """
 
     issues: list[str] = []
     publications = draft.get("publications")
@@ -163,8 +455,13 @@ def check_series_continuity(
                 )
 
     # --- repeated openings ----------------------------------------------
+    # The series label is compared away: with a long series title it fills
+    # the whole comparison window, and every part "opens the same way".
     openings = [
-        _normalize(text)[:OPENING_COMPARISON_CHARS] for text in texts
+        _normalize(split_series_label(text, series_title)[1])[
+            :OPENING_COMPARISON_CHARS
+        ]
+        for text in texts
     ]
 
     for index, opening in enumerate(openings):
@@ -202,6 +499,17 @@ def check_series_continuity(
                     f"Parts {index + 1} and {other_index + 1} argue nearly "
                     "the same thesis; the series should develop, not repeat."
                 )
+
+    # --- no unannounced continuation -------------------------------------
+    # Nothing in the data model currently lets a plan say more parts are
+    # coming, so unless a caller says otherwise the last part has to read
+    # as an ending, not a cliffhanger.
+    if not expects_sequel and texts and _announces_a_sequel(texts[-1]):
+        issues.append(
+            f"Part {total} promises a sequel, but the series has no "
+            "further parts planned; the last part must conclude it "
+            "instead of announcing one."
+        )
 
     # --- per-strategy requirements --------------------------------------
     if strategy == "standalone_series":

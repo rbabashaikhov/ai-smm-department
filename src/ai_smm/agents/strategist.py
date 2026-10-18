@@ -5,7 +5,18 @@ from langfuse import observe
 from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
+from ai_smm.agents.pilot import (
+    PILOT_PROJECT_ID,
+    PILOT_STRATEGY_REASON,
+    resolve_publishing_strategy,
+)
 from ai_smm.state import SMMState
+
+
+#: The series title is repeated in the label of every standalone part,
+#: and each part has 450 characters in all.
+MAX_SERIES_TITLE_LENGTH = 50
+MAX_TOPIC_HINT_LENGTH = 500
 
 
 class ContentIdea(BaseModel):
@@ -51,7 +62,10 @@ class ContentPlan(BaseModel):
     # --- the series as a whole -------------------------------------------
     series_title: str = Field(
         default="",
-        description="Общая тема серии, одна строка",
+        description=(
+            "Общая тема серии, одна короткая строка, не длиннее "
+            f"{MAX_SERIES_TITLE_LENGTH} символов"
+        ),
     )
     series_description: str = Field(
         default="",
@@ -101,15 +115,35 @@ structured_llm = llm.with_structured_output(ContentPlan)
 @observe(name="strategist", as_type="agent")
 def strategist_node(state: SMMState) -> dict[str, Any]:
     knowledge = state["knowledge"]
+    project_id = state.get("project_id", "")
 
     series_size = state.get("series_size", 3)
     requested_strategy = state.get("publishing_strategy", "")
+    topic_hint = state.get("topic_hint", "")
+    if not isinstance(topic_hint, str) or len(topic_hint) > MAX_TOPIC_HINT_LENGTH:
+        raise ValueError("topic_hint must be a string of at most 500 characters")
+    topic_hint = topic_hint.strip()
+    topic_instruction = ""
+    if topic_hint:
+        topic_instruction = f"""
+Тематическая подсказка заказчика (не источник фактов):
+<topic_hint>{topic_hint}</topic_hint>
+Используй её только для выбора угла серии. Любые фактические утверждения
+по-прежнему должны подтверждаться knowledge base этого проекта.
+"""
 
-    strategy_hint = (
-        f"\nЗаказчик уже выбрал стратегию публикации: "
-        f"{requested_strategy}. Используй именно её.\n"
-        if requested_strategy
-        else """
+    if project_id == PILOT_PROJECT_ID:
+        strategy_hint = (
+            "\nСтратегия публикации зафиксирована: standalone_series. "
+            f"{PILOT_STRATEGY_REASON}\n"
+        )
+    elif requested_strategy:
+        strategy_hint = (
+            f"\nЗаказчик уже выбрал стратегию публикации: "
+            f"{requested_strategy}. Используй именно её.\n"
+        )
+    else:
+        strategy_hint = """
 Выбери стратегию публикации сам и объясни выбор:
 
 - standalone_series — части выходят как отдельные посты.
@@ -121,7 +155,6 @@ def strategist_node(state: SMMState) -> dict[str, Any]:
   по отдельности и важен непрерывный разбор.
   Внимание: ответы в Threads — только текст, без изображений.
 """
-    )
 
     prompt = f"""
 Ты — Strategist в AI SMM-команде.
@@ -135,10 +168,13 @@ def strategist_node(state: SMMState) -> dict[str, Any]:
 
 Используй ТОЛЬКО факты из knowledge base ниже.
 Ничего не выдумывай.
+{topic_instruction}
 
 СНАЧАЛА определи серию целиком:
 
-1. series_title — общая тема.
+1. series_title — общая тема, коротко: не длиннее
+   {MAX_SERIES_TITLE_LENGTH} символов. Она повторяется в каждой части,
+   а на часть отведено всего 450 символов.
 2. series_description — о чём серия.
 3. target_audience — для кого.
 4. narrative_goal — что читатель должен понять,
@@ -199,11 +235,15 @@ Knowledge base:
     total = len(plan.get("ideas", []))
     plan["planned_total"] = total
 
-    if plan.get("publishing_strategy") not in {
-        "standalone_series",
-        "reply_thread",
-    }:
-        plan["publishing_strategy"] = "standalone_series"
+    strategy = resolve_publishing_strategy(
+        project_id, plan.get("publishing_strategy")
+    )
+
+    if strategy != plan.get("publishing_strategy"):
+        plan["publishing_strategy"] = strategy
+
+        if project_id == PILOT_PROJECT_ID:
+            plan["publishing_strategy_reason"] = PILOT_STRATEGY_REASON
 
     # The last part announces nothing; the first follows nothing.
     if plan.get("ideas"):

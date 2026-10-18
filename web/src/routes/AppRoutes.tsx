@@ -15,6 +15,8 @@ import { CreateContentPage } from "../pages/CreateContentPage";
 import { CreateProjectPage } from "../pages/CreateProjectPage";
 import { CredentialsPage } from "../pages/CredentialsPage";
 import { DashboardPage } from "../pages/DashboardPage";
+import { GenerationJobPage } from "../pages/GenerationJobPage";
+import { GenerationJobsPage } from "../pages/GenerationJobsPage";
 import { LoginPage } from "../pages/LoginPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { ProjectSettingsPage } from "../pages/ProjectSettingsPage";
@@ -79,6 +81,8 @@ export function AppRoutes() {
             <Route index element={<DashboardPage />} />
             <Route path="content" element={<ContentListPage />} />
             <Route path="content/new" element={<CreateContentPage />} />
+            <Route path="generation" element={<GenerationJobsPage />} />
+            <Route path="generation/:jobId" element={<GenerationJobPage />} />
             <Route path="publications" element={<PublicationsPage />} />
             <Route path="attention" element={<AttentionPage />} />
             <Route path="audit" element={<AuditPage />} />

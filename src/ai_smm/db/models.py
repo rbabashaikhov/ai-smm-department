@@ -195,6 +195,40 @@ class AttemptPhase(str, enum.Enum):
     VERIFY = "verify"
 
 
+class GenerationJobStatus(str, enum.Enum):
+    """Lifecycle of one agent-generation job.
+
+        queued    -> claimed | cancelled
+        claimed   -> succeeded | failed | queued (lease expired) | cancelled
+        failed    -> queued (retried) | terminal (attempts exhausted)
+        succeeded -> terminal
+        cancelled -> terminal
+
+    Unlike a Publication, a job has no irreversible external side effect:
+    nothing is ever written to content_items/content_revisions until the
+    very end of processing, in the same transaction that marks the job
+    succeeded (ai_smm.generation_queue). A process that dies mid-job
+    therefore never needs reconciliation -- there is deliberately no
+    needs_review-equivalent status here; the lease simply expires and the
+    job is retried from scratch.
+    """
+
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+#: Statuses a generation worker may never resume on its own.
+GENERATION_TERMINAL_STATUSES = frozenset(
+    {
+        GenerationJobStatus.SUCCEEDED,
+        GenerationJobStatus.CANCELLED,
+    }
+)
+
+
 publication_status_enum = SAEnum(
     PublicationStatus,
     name="publication_status",
@@ -246,6 +280,12 @@ publishing_strategy_enum = SAEnum(
 series_status_enum = SAEnum(
     SeriesStatus,
     name="series_status",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
+generation_job_status_enum = SAEnum(
+    GenerationJobStatus,
+    name="generation_job_status",
     values_callable=lambda enum_cls: [m.value for m in enum_cls],
 )
 
@@ -1096,6 +1136,127 @@ class SocialAccountCredential(Base):
 CONTENT_FORMATS = ("text", "image", "carousel", "thread")
 
 
+class ContentGenerationJob(Base):
+    """One request to run the agent pipeline (Strategist/Copywriter/Editor)
+    for a project and turn its result into draft content items.
+
+    Claimed and processed the same way publications are (FOR UPDATE SKIP
+    LOCKED, a lease, bounded retries -- ai_smm.generation_queue): any
+    number of generation workers can run without double-claiming, and a
+    crashed worker's claim simply expires and is retried.
+
+    requested_by_user_id is who asked for it, not who wrote the resulting
+    text: the content_items it produces are agent-authored
+    (created_by_user_id NULL, source=copywriter), exactly like one the
+    operator CLI imports. A generation job never approves or schedules
+    anything; it only ever calls create_content_item.
+    """
+
+    __tablename__ = "content_generation_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_count >= 0", name="ck_generation_jobs_attempt_count"
+        ),
+        CheckConstraint(
+            "max_attempts BETWEEN 1 AND 10",
+            name="ck_generation_jobs_max_attempts",
+        ),
+        # A claimed row always carries claim bookkeeping. One-directional
+        # on purpose: cancelling a job that is already claimed (the owner,
+        # through Control Center) moves status away from 'claimed' but
+        # must not touch claimed_by/claimed_at/lease_expires_at -- the
+        # guard trigger forbids exactly that write -- so those columns are
+        # left as a harmless record of who last held the lease.
+        CheckConstraint(
+            "status <> 'claimed' OR (claimed_by IS NOT NULL "
+            "AND claimed_at IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_generation_jobs_claim_shape",
+        ),
+        CheckConstraint(
+            "status <> 'succeeded' OR finished_at IS NOT NULL",
+            name="ck_generation_jobs_succeeded_finished",
+        ),
+        Index(
+            "ix_generation_jobs_due",
+            "next_attempt_at",
+            postgresql_where=(
+                "status IN ('queued', 'claimed')"
+            ),
+        ),
+        Index("ix_generation_jobs_project", "project_id"),
+        Index("ix_generation_jobs_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey(
+            "projects.id",
+            ondelete="RESTRICT",
+            name="fk_generation_jobs_project_id",
+        ),
+        nullable=False,
+    )
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_generation_jobs_requested_by",
+        ),
+        nullable=False,
+    )
+    status: Mapped[GenerationJobStatus] = mapped_column(
+        generation_job_status_enum,
+        nullable=False,
+        server_default=GenerationJobStatus.QUEUED.value,
+    )
+    #: {"series_size": int, "publishing_strategy": str | None,
+    #:  "topic_hint": str | None} -- validated by the API, not here.
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    #: {"content_item_ids": [...], "series_title": str, "revision_count":
+    #:  int, "tokens": {...}, "cost_usd": float, "seconds": float}.
+    result: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="2"
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(120))
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    content_items: Mapped[list[ContentItem]] = relationship(
+        back_populates="generation_job"
+    )
+
+
 class ContentItem(Base):
     """One piece of content and where it stands editorially.
 
@@ -1153,6 +1314,7 @@ class ContentItem(Base):
         CheckConstraint("version >= 1", name="ck_content_items_version"),
         Index("ix_content_items_project", "project_id"),
         Index("ix_content_items_status", "status"),
+        Index("ix_content_items_generation_job", "generation_job_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1196,6 +1358,17 @@ class ContentItem(Base):
             name="fk_content_items_created_by",
         ),
     )
+    #: Which generation job produced this item, if any. NULL for every
+    #: item a human created directly or the importer brought in -- the
+    #: same "optional, additive" shape content_series has on Publication.
+    generation_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "content_generation_jobs.id",
+            ondelete="SET NULL",
+            name="fk_content_items_generation_job",
+        ),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -1211,6 +1384,9 @@ class ContentItem(Base):
         foreign_keys="ContentRevision.content_item_id",
         order_by="ContentRevision.revision_number",
         viewonly=True,
+    )
+    generation_job: Mapped[ContentGenerationJob | None] = relationship(
+        back_populates="content_items"
     )
 
 
@@ -1718,6 +1894,9 @@ event.listen(
 # -- in the migration's order: functions, PUBLIC's default EXECUTE taken
 # away, then the triggers.
 from ai_smm.db import guards as _guards  # noqa: E402  (after the models)
+from ai_smm.db.generation_contracts import (  # noqa: E402
+    GENERATION_CONTRACTS as _GENERATION_CONTRACTS,
+)
 
 
 for _statement in (
@@ -1736,6 +1915,72 @@ for _statement in _guards.drop_function_statements(_guards.FUNCTIONS_V1):
         Base.metadata,
         "before_drop",
         DDL(_statement + " CASCADE").execute_if(dialect="postgresql"),
+    )
+
+
+# Generation-job guards (SMM-026A/2.1): a separate, later tuple -- see
+# ai_smm.db.guards.GENERATION_FUNCTIONS. guard_require_owner (FUNCTIONS_V1)
+# already exists in the same after_create batch above, and SQLAlchemy
+# fires before_create/after_create listeners for a given event in the
+# order they were registered, so these run after it.
+for _statement in (
+    [_function.ddl for _function in _guards.GENERATION_FUNCTIONS]
+    + _guards.revoke_public_statements(_guards.GENERATION_FUNCTIONS)
+    + [_trigger.ddl for _trigger in _guards.GENERATION_TRIGGERS]
+):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+for _statement in _guards.drop_function_statements(_guards.GENERATION_FUNCTIONS):
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement + " CASCADE").execute_if(dialect="postgresql"),
+    )
+
+
+# guard_audit_log_insert v2 (SMM-026A/2.1): CREATE OR REPLACE of the same
+# function FUNCTIONS_V1 created above, so generation.* audit actions are
+# accepted. Must run after the FUNCTIONS_V1 batch; no new trigger, no new
+# drop statement (FUNCTIONS_V1's DROP FUNCTION ... CASCADE above already
+# removes it by name).
+for _function in _guards.AUDIT_FUNCTIONS_V2:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_function.ddl.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+# Provenance guard v2 is installed only after content_generation_jobs and
+# content_items.generation_job_id exist. It replaces the V1 bodies while
+# retaining their already-created triggers.
+for _function in _guards.CONTENT_ITEM_FUNCTIONS_V2:
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_function.ddl.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+# The generation worker receives EXECUTE on these narrow SECURITY DEFINER
+# contracts, never privileges on their underlying tables.
+for _statement in (
+    [_function.ddl for _function in _GENERATION_CONTRACTS]
+    + _guards.revoke_public_statements(_GENERATION_CONTRACTS)
+):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+for _statement in _guards.drop_function_statements(_GENERATION_CONTRACTS):
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="postgresql"),
     )
 
 

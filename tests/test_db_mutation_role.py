@@ -87,7 +87,8 @@ BUSINESS_WRITES: dict[tuple[str, str], frozenset[str]] = {
     ),
     ("content_items", "INSERT"): _cols(
         "id, project_id, title, content_type, status, current_revision_id,"
-        " approved_revision_id, version, created_by_user_id, created_at,"
+        " approved_revision_id, version, created_by_user_id,"
+        " generation_job_id, created_at,"
         " updated_at, archived_at"
     ),
     ("content_items", "UPDATE"): _cols(
@@ -117,6 +118,27 @@ BUSINESS_WRITES: dict[tuple[str, str], frozenset[str]] = {
         "status, scheduled_at, next_attempt_at, claimed_by, claimed_at,"
         " lease_expires_at, last_error, attempt_count, updated_at"
     ),
+    # POST /projects/{id}/generation-jobs (SMM-026A/2.1). The ORM sends
+    # every column; the worker-owned ones (claimed_*, next_attempt_at,
+    # last_error, finished_at) go in as NULL -- the guard's insert trigger
+    # refuses any of them carrying a real value regardless of this grant.
+    ("content_generation_jobs", "INSERT"): _cols(
+        "id, project_id, requested_by_user_id, status, params, max_attempts,"
+        " last_error,"
+        " next_attempt_at, claimed_by, claimed_at, lease_expires_at,"
+        " created_at, updated_at, finished_at"
+    ),
+    # POST /generation-jobs/{id}/cancel: queued|claimed -> cancelled only.
+    # claimed_by/claimed_at/lease_expires_at/next_attempt_at/attempt_count/
+    # result/last_error are granted too, same as publications' own claim
+    # columns, so tampering with them reaches the trigger's refusal
+    # instead of a bare permission error; the trigger never lets any of
+    # them actually change through this role.
+    ("content_generation_jobs", "UPDATE"): _cols(
+        "status, updated_at, finished_at, claimed_by, claimed_at,"
+        " lease_expires_at, next_attempt_at, attempt_count, result,"
+        " last_error"
+    ),
 }
 
 #: Columns no API command may ever change after the row exists.
@@ -140,6 +162,9 @@ NEVER_UPDATED = {
     "social_account_credentials": {"social_account_id", "key_id", "fingerprint"},
     "projects": {"id", "knowledge_path", "default_platform", "is_active"},
     "content_items": {"project_id"},
+    "content_generation_jobs": {
+        "project_id", "requested_by_user_id", "params", "max_attempts"
+    },
 }
 
 

@@ -32,6 +32,7 @@ from ai_smm.application.auth import (
 from ai_smm.application.projects import get_membership
 from ai_smm.config import Settings, get_settings
 from ai_smm.db.models import (
+    ContentGenerationJob,
     ContentItem,
     ContentSeries,
     MembershipRole,
@@ -474,6 +475,85 @@ OwnerContentItem = Annotated[
 #: PostgreSQL). Reads stay open to every member (Viewer*).
 OwnerProject = Annotated[
     ProjectContext, Depends(require_project_role(MembershipRole.OWNER))
+]
+
+
+# -- generation jobs (SMM-026A/2.1) --------------------------------------
+
+
+class GenerationJobContext:
+    """A generation job, the project it belongs to, and the caller's role."""
+
+    def __init__(
+        self,
+        *,
+        job: ContentGenerationJob,
+        project: Project,
+        role: MembershipRole,
+        authenticated: AuthenticatedSession,
+    ) -> None:
+        self.job = job
+        self.project = project
+        self.role = role
+        self.authenticated = authenticated
+
+    @property
+    def user(self) -> User:
+        return self.authenticated.user
+
+
+def require_generation_job_role(
+    minimum: MembershipRole,
+) -> Callable[..., GenerationJobContext]:
+    """Row first: load the job, then authorise against its own project.
+
+    A job in a project the caller is not a member of answers 404 with
+    the same body as an id that does not exist -- the same rule
+    require_content_item_role follows.
+    """
+
+    def dependency(
+        job_id: uuid.UUID,
+        db: DbSession,
+        authenticated: CurrentSession,
+    ) -> GenerationJobContext:
+        job = db.get(ContentGenerationJob, job_id)
+
+        if job is None:
+            raise not_found("Generation job not found.")
+
+        try:
+            project, role = _authorise_project(
+                db,
+                project_id=job.project_id,
+                authenticated=authenticated,
+                minimum=minimum,
+            )
+        except ApiError as exc:
+            if exc.code == ErrorCode.NOT_FOUND:
+                raise not_found("Generation job not found.") from exc
+
+            raise
+
+        return GenerationJobContext(
+            job=job,
+            project=project,
+            role=role,
+            authenticated=authenticated,
+        )
+
+    return dependency
+
+
+ViewerGenerationJob = Annotated[
+    GenerationJobContext,
+    Depends(require_generation_job_role(MembershipRole.VIEWER)),
+]
+#: Starting or cancelling a job is a business mutation, same tier as
+#: every content command (OwnerContentItem/OwnerProject above).
+OwnerGenerationJob = Annotated[
+    GenerationJobContext,
+    Depends(require_generation_job_role(MembershipRole.OWNER)),
 ]
 
 

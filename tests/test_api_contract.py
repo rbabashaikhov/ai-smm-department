@@ -53,6 +53,11 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/series/{series_id}",
             # SMM-022C: the editorial layer and its bridge into delivery.
             "/api/v1/projects/{project_id}/content-items",
+            # SMM-026A/2.1: enqueue and inspect generation; execution remains
+            # worker-only and there is still no HTTP publish operation.
+            "/api/v1/projects/{project_id}/generation-jobs",
+            "/api/v1/generation-jobs/{job_id}",
+            "/api/v1/generation-jobs/{job_id}/cancel",
             "/api/v1/content-items/{content_item_id}",
             "/api/v1/content-items/{content_item_id}/revisions",
             "/api/v1/content-items/{content_item_id}/approvals",

@@ -252,6 +252,39 @@ def mutation_session_factory(mutation_engine: Engine) -> sessionmaker[Session]:
 
 
 @pytest.fixture
+def generation_role(
+    engine: Engine,
+    admin_database_url: str,
+    database_url: str,
+) -> Iterator[pg_roles.ApiRole]:
+    """EXECUTE-only Agent -> Draft role, isolated from other ACL snapshots."""
+
+    del engine  # contracts must exist before grants are provisioned
+    role = pg_roles.provision_generation(admin_database_url, database_url)
+    yield role
+    # GenerationWorker uses the application's cached engine; close its pool
+    # before the operator rollback proves there are no live role sessions.
+    from ai_smm.db.session import reset_engine
+
+    reset_engine()
+    pg_roles.retire_generation(admin_database_url)
+
+
+@pytest.fixture
+def generation_engine(generation_role: pg_roles.ApiRole) -> Iterator[Engine]:
+    role_engine = create_db_engine(generation_role.url, settings=_base_settings())
+    yield role_engine
+    role_engine.dispose()
+
+
+@pytest.fixture
+def generation_session_factory(
+    generation_engine: Engine,
+) -> sessionmaker[Session]:
+    return sessionmaker(bind=generation_engine, expire_on_commit=False, future=True)
+
+
+@pytest.fixture
 def settings(database_url: str, tmp_path: Path) -> Settings:
     return replace(
         load_settings(),

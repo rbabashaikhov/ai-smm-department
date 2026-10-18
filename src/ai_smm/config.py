@@ -141,6 +141,21 @@ class Settings:
     #: operator CLI. Several during a key rotation.
     credentials_private_key_files: tuple[Path, ...] = ()
 
+    # Generation worker (SMM-026A/2.1). A separate process from the
+    # publish worker above; see ai_smm.generation_worker. It never reads
+    # dry_run/worker_id/lease_seconds -- those belong to publishing.
+    generation_worker_id: str = "generation-worker-1"
+    generation_poll_interval_seconds: int = 15
+    #: Generous margin over the slowest real run observed
+    #: (docs/reports/smm-026a/part1b-e2e-20261015, ~90s worst case): a
+    #: job that is merely slow is never mistaken for an abandoned one.
+    generation_lease_seconds: int = 600
+    generation_max_attempts: int = 2
+    #: Caps the agent graph's own revision loop (SMMState.max_revisions),
+    #: regardless of what a caller might ask for -- bounds the number of
+    #: LLM calls, and so the cost, of one job.
+    generation_max_revisions: int = 3
+
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
         default=(
@@ -224,6 +239,22 @@ def load_settings() -> Settings:
         credentials_private_key_files=tuple(
             Path(item).expanduser()
             for item in _env_list("AI_SMM_CREDENTIALS_PRIVATE_KEY_FILES")
+        ),
+        generation_worker_id=(
+            _env("AI_SMM_GENERATION_WORKER_ID", "generation-worker-1")
+            or "generation-worker-1"
+        ),
+        generation_poll_interval_seconds=_env_int(
+            "AI_SMM_GENERATION_POLL_INTERVAL_SECONDS", 15
+        ),
+        generation_lease_seconds=_env_int(
+            "AI_SMM_GENERATION_LEASE_SECONDS", 600
+        ),
+        generation_max_attempts=_env_int(
+            "AI_SMM_GENERATION_MAX_ATTEMPTS", 2
+        ),
+        generation_max_revisions=_env_int(
+            "AI_SMM_GENERATION_MAX_REVISIONS", 3
         ),
     )
 

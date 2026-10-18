@@ -31,6 +31,7 @@ from ai_smm.api.mutation_gate import mutation_gate
 from ai_smm.api.request_id import RequestIdMiddleware
 from ai_smm.api.routers import auth as auth_router
 from ai_smm.api.routers import content as content_router
+from ai_smm.api.routers import generation as generation_router
 from ai_smm.api.routers import health as health_router
 from ai_smm.api.routers import operations as operations_router
 from ai_smm.api.routers import projects as projects_router
@@ -122,6 +123,7 @@ def create_app(
     v1.include_router(operations_router.router)
     v1.include_router(content_router.router)
     v1.include_router(social_accounts_router.router)
+    v1.include_router(generation_router.router)
 
     app.include_router(v1)
 

@@ -386,8 +386,10 @@ def test_a_session_token_hash_column_is_not_the_token(
 CONTROL_PLANE_HEAD = "2964ac9ceea7"
 EDITORIAL_REVISION = "3d4ac1986f07"
 SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
-#: The head: SMM-025D's business-mutation guards.
+#: Kept separately because guard migration tests upgrade to this revision.
 GUARDS_REVISION = "c4d81e2a9f63"
+#: Current migration head: DB-enforced generation retry policy.
+HEAD_REVISION = "f7a91c2d5e04"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",
@@ -403,6 +405,64 @@ EDITORIAL_ENUMS = {
     "content_revision_source",
     "content_approval_decision",
 }
+
+
+def test_generation_retry_policy_upgrade_and_downgrade(
+    migration_db: str,
+) -> None:
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+    command.upgrade(config, "e04cb3a748f5")
+    engine = create_engine(migration_db)
+
+    try:
+        assert "max_attempts" not in {
+            column["name"]
+            for column in inspect(engine).get_columns("content_generation_jobs")
+        }
+
+        command.upgrade(config, "head")
+        columns = {
+            column["name"]: column
+            for column in inspect(engine).get_columns("content_generation_jobs")
+        }
+        assert columns["max_attempts"]["nullable"] is False
+        assert "2" in str(columns["max_attempts"]["default"])
+        constraints = {
+            item["name"]
+            for item in inspect(engine).get_check_constraints(
+                "content_generation_jobs"
+            )
+        }
+        assert "ck_generation_jobs_max_attempts" in constraints
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT to_regprocedure("
+                    "'public.generation_claim(text,integer)') IS NOT NULL"
+                )
+            ).scalar_one()
+            assert not connection.execute(
+                text(
+                    "SELECT to_regprocedure("
+                    "'public.generation_claim(text,integer,integer)') IS NOT NULL"
+                )
+            ).scalar_one()
+
+        command.downgrade(config, "e04cb3a748f5")
+        assert "max_attempts" not in {
+            column["name"]
+            for column in inspect(engine).get_columns("content_generation_jobs")
+        }
+        with engine.connect() as connection:
+            assert connection.execute(
+                text(
+                    "SELECT to_regprocedure("
+                    "'public.generation_claim(text,integer,integer)') IS NOT NULL"
+                )
+            ).scalar_one()
+    finally:
+        engine.dispose()
 
 
 def _schema_snapshot(engine) -> dict[str, object]:
@@ -830,7 +890,7 @@ def test_a_lock_timeout_rolls_back_every_pending_revision(
         with engine.connect() as connection:
             assert (
                 MigrationContext.configure(connection).get_current_revision()
-                == GUARDS_REVISION
+                == HEAD_REVISION
             )
     finally:
         engine.dispose()

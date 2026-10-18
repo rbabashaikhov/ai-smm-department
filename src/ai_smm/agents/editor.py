@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -8,7 +9,11 @@ from langfuse import observe
 from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
-from ai_smm.agents.continuity import check_series_continuity
+from ai_smm.agents.continuity import (
+    check_series_continuity,
+    remove_safe_sequel_teaser_from_draft,
+)
+from ai_smm.agents.pilot import PILOT_PROJECT_ID, resolve_publishing_strategy
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
 
@@ -16,11 +21,41 @@ from ai_smm.state import SMMState
 logger = get_logger(__name__)
 
 MAX_ITEM_LENGTH = 450
-PILOT_PROJECT_ID = "ai-catalog-consultant"
 
 FORBIDDEN_PILOT_TERMS = (
     "samsung",
     "самсунг",
+)
+
+#: A backstop for the Copywriter's own explicit forbidden list (its
+#: prompt rule #5), not a fact-checker: these are the handful of blatant,
+#: unconditional claims the editorial policy already names by name, kept
+#: here as well so approval does not depend on the Editor's LLM noticing
+#: them on a given pass. Subtler unsupported claims ("обеспечивает
+#: точность и надёжность" with nothing behind it) are not something a
+#: regex can tell from a legitimate engineering sentence; those stay the
+#: Editor's own judgement call, with the prompt below pointing at them.
+UNSUPPORTED_CLAIM_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"лучш\w*\b.{0,40}?\bна\s+рынке", re.IGNORECASE),
+        'an unqualified "best on the market" claim',
+    ),
+    (
+        re.compile(r"гарантир\w*", re.IGNORECASE),
+        "a guarantee the knowledge base does not make",
+    ),
+    (
+        re.compile(r"без\s+ошибок\b", re.IGNORECASE),
+        "a claim of working without errors",
+    ),
+    (
+        re.compile(r"100\s*%", re.IGNORECASE),
+        "a 100% precision or accuracy claim",
+    ),
+    (
+        re.compile(r"никогда\s+не\s+ошиба\w*", re.IGNORECASE),
+        "a claim of never making mistakes",
+    ),
 )
 
 
@@ -143,12 +178,36 @@ def validate_draft(
                 continue
 
             if len(text) > MAX_ITEM_LENGTH:
-                issues.append(
+                issue = (
                     f"Publication {pub_index}, item "
                     f"{item_index}: {len(text)} characters; "
                     f"maximum {MAX_ITEM_LENGTH}. "
                     "Shorten this text."
                 )
+
+                # The Copywriter already tried its bounded, automatic
+                # shortening pass and did not converge: a controlled
+                # rejection, not a crash and not a silent truncation.
+                # Asking for the same "shorten it" again would just
+                # repeat what already failed, so the next revision needs
+                # a different instruction: write it shorter from the
+                # start.
+                if item.get("shortening_failed"):
+                    issue += (
+                        " Automatic shortening was attempted and could "
+                        "not fit it; rewrite this part shorter from "
+                        "scratch instead of trimming it further."
+                    )
+
+                issues.append(issue)
+
+            for pattern, description in UNSUPPORTED_CLAIM_PATTERNS:
+                if pattern.search(text):
+                    issues.append(
+                        f"Publication {pub_index}, item "
+                        f"{item_index}: {description}; editorial policy "
+                        "forbids unsupported absolute claims."
+                    )
 
             if project_id == PILOT_PROJECT_ID:
                 normalized = text.casefold()
@@ -176,10 +235,10 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 
     content_plan = state.get("content_plan") or {}
 
-    strategy = (
+    strategy = resolve_publishing_strategy(
+        project_id,
         draft.get("publishing_strategy")
-        or content_plan.get("publishing_strategy")
-        or "standalone_series"
+        or content_plan.get("publishing_strategy"),
     )
     series_title = (
         draft.get("series_title")
@@ -188,6 +247,24 @@ def editor_node(state: SMMState) -> dict[str, Any]:
     )
     narrative_goal = content_plan.get("narrative_goal", "")
 
+    # Nothing currently sets this on a content plan; the lookup is a hook
+    # for when one does, not a guess at what the plan means.
+    expects_sequel = bool(content_plan.get("expects_sequel"))
+
+    # A trailing "Продолжение скоро" is scaffolding the Copywriter was
+    # told not to write for the last part, and mechanically separable
+    # from the real content around it -- drop it before anything else
+    # looks at the draft, rather than spend a whole revision loop
+    # regenerating three publications to fix one sentence. When it is
+    # not cleanly separable (the sentence also makes a real claim about
+    # what comes next), this makes no change at all, and the continuity
+    # check below reports and blocks the draft exactly as it did before.
+    draft, _sequel_teaser_removed = remove_safe_sequel_teaser_from_draft(
+        draft,
+        series_title=series_title,
+        expects_sequel=expects_sequel,
+    )
+
     deterministic_issues = validate_draft(
         draft=draft,
         project_id=project_id,
@@ -195,12 +272,24 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 
     # Continuity is checked deterministically before the model sees the
     # draft, so a judgement call cannot wave through a missing part
-    # number or two parts with identical text.
+    # number or two parts with identical text. This also re-verifies the
+    # removal above: length, non-emptiness and every other guard run
+    # again against whatever the draft now actually is.
     continuity_issues = check_series_continuity(
         draft,
         strategy=strategy,
         series_title=series_title,
+        expects_sequel=expects_sequel,
     )
+
+    # validate_draft already names every over-long item, with the
+    # instruction to shorten it; the same fact twice only made the
+    # feedback longer.
+    continuity_issues = [
+        issue
+        for issue in continuity_issues
+        if f"over the {MAX_ITEM_LENGTH} limit" not in issue
+    ]
 
     prompt = f"""
 Ты — Editor технического блога AI SMM Department.
@@ -242,9 +331,11 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 4. Нет ненужных повторов: вступление и описание
    проекта не дублируются в каждой части.
 5. Заголовки понятны и различимы.
-6. Между частями есть переходы:
-   связь с предыдущей и анонс следующей
-   там, где они существуют.
+6. Между частями есть переходы: связь
+   с предыдущей и анонс следующей там, где
+   они существуют. У ПОСЛЕДНЕЙ части анонса
+   быть не должно: она завершает серию, а не
+   обещает продолжение.
 7. Каждая часть имеет самостоятельную ценность:
    читатель, увидевший только её, получает
    законченную мысль.
@@ -275,6 +366,23 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 - Не объединяй результаты разных тестов.
 - Не используй исторический бренд проекта
   в публичных публикациях.
+- Неподтверждённые оценочные обещания — тоже
+  issue, даже без явно запрещённого слова:
+  «обеспечивает точность и надёжность»,
+  «повышает эффективность», «гарантирует
+  качество» без конкретного основания из
+  knowledge base — ничем не лучше прямой
+  рекламы, просто без восклицательного знака.
+- Semantic guard в этом проекте убирает
+  выдуманное моделью ограничение из обращения
+  к каталогу — и в этом успешен. Известное,
+  задокументированное ограничение в другом:
+  формулировка финального ответа всё равно
+  может его повторить. Текст не должен путать
+  эти два утверждения: «guard иногда не
+  справляется» или «ограничение не устранено» —
+  искажение, даже если сама отсылка к guard
+  присутствует.
 
 Если есть существенные ошибки,
 установи approved=false и объясни,
@@ -365,11 +473,17 @@ DRAFT:
                 "issues": len(all_issues),
                 "continuity_issues": len(continuity_issues),
                 "strategy": strategy,
+                "sequel_teaser_removed": _sequel_teaser_removed,
             }
         },
     )
 
     return {
+        # Possibly the same dict Copywriter produced, possibly a copy
+        # with the last part's teaser sentence removed; either way, this
+        # is the version every check above actually ran against, and the
+        # one the Publisher must see too.
+        "draft": draft,
         "editor_approved": approved,
         "editor_score": score,
         "editor_narrative_score": narrative_score,

@@ -43,6 +43,7 @@ from ai_smm.application.control_plane import (
     WorkerMode,
     observed_worker_mode,
 )
+from ai_smm.application.generation import create_generation_job
 from ai_smm.application.publications import (
     cancel_publication,
     reschedule_publication,
@@ -108,6 +109,7 @@ class World:
     account: uuid.UUID
     disabled_account: uuid.UUID
     credential: uuid.UUID
+    generation_job: uuid.UUID
 
 
 @pytest.fixture
@@ -174,10 +176,19 @@ def world(
         )
     ).one()
 
+    generation_job = create_generation_job(
+        session,
+        project_id=project,
+        requested_by_user=reviewer,
+        mutations_enabled=True,
+    )
+    session.commit()
+
     return World(
         account=account.id,
         disabled_account=disabled_account.id,
         credential=credential,
+        generation_job=generation_job.id,
         approved_publication=approved_publication.id,
         scheduled_publication=scheduled_publication.id,
         draft_item=draft.id,
@@ -340,6 +351,20 @@ GATED: dict[str, tuple[str, str, Any]] = {
         "/api/v1/social-account-credentials/{credential_id}/revoke",
         lambda w, p: (
             f"/api/v1/social-account-credentials/{w.credential}/revoke",
+            None,
+        ),
+    ),
+    # SMM-026A/2.1: generation jobs.
+    "create_generation_job": (
+        "POST",
+        "/api/v1/projects/{project_id}/generation-jobs",
+        lambda w, p: (f"/api/v1/projects/{p}/generation-jobs", {}),
+    ),
+    "cancel_generation_job": (
+        "POST",
+        "/api/v1/generation-jobs/{job_id}/cancel",
+        lambda w, p: (
+            f"/api/v1/generation-jobs/{w.generation_job}/cancel",
             None,
         ),
     ),

@@ -247,6 +247,79 @@ export interface ProjectSettings {
   updated_at: string | null;
 }
 
+// -- generation --------------------------------------------------------
+
+export type GenerationJobStatus =
+  | "queued"
+  | "claimed"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export const GENERATION_JOB_STATUSES: readonly GenerationJobStatus[] = [
+  "queued",
+  "claimed",
+  "succeeded",
+  "failed",
+  "cancelled",
+];
+
+export type GenerationPublishingStrategy = "standalone_series" | "reply_thread";
+
+export interface GenerationJobCreate {
+  series_size: number;
+  publishing_strategy?: GenerationPublishingStrategy;
+  topic_hint?: string;
+}
+
+/** The backend deliberately exposes params/result as arbitrary JSON. */
+export interface GenerationResult extends JsonObject {
+  content_item_ids?: unknown;
+  series_title?: unknown;
+  revision_count?: unknown;
+  tokens?: unknown;
+  cost_usd?: unknown;
+  seconds?: unknown;
+}
+
+export interface GenerationJob {
+  id: string;
+  project_id: string;
+  requested_by_user_id: string;
+  status: GenerationJobStatus;
+  params: JsonObject;
+  result: GenerationResult;
+  last_error: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export type GenerationJobList = Page<GenerationJob>;
+
+export interface GenerationJobFilters {
+  status?: GenerationJobStatus[];
+}
+
+/** Validated usage projection for presentation; raw result remains arbitrary JSON. */
+export interface GenerationTokenUsage {
+  input: number;
+  output: number;
+  cached: number;
+}
+
+export interface ParsedGenerationResult {
+  /** null means absent or malformed; consumers must not create draft links. */
+  contentItemIds: string[] | null;
+  seriesTitle?: string;
+  revisionCount?: number;
+  tokens?: GenerationTokenUsage;
+  costUsd?: number;
+  seconds?: number;
+}
+
 // -- publications ------------------------------------------------------
 
 export interface PublicationSummary {

@@ -75,12 +75,12 @@ readonly CC_API_VERIFY_MIN_CHECKS=200
 # 2026-10-11 one gives smm-api control-center.env -- would start the API
 # on the owner URL whatever control-center.api.env says.
 readonly CC_PINNED_COMPOSE_SHA256=dc30a11525a5d56e4944d047de90fb660d2917b9a939ce7a2c62320067e1ac8b
-readonly CC_PINNED_VERIFY_SHA256=d086f99a7c8f077261f4f92b16cd4501cc16ecda04767b61e4057070ca8a96c3
+readonly CC_PINNED_VERIFY_SHA256=6d92adc48e35fe60dadda54a8c4026ee643754e10c38da7fbb2025a34f6cfe95
 # Mutation mode (SMM-025C): the override that switches smm-api to the
 # mutation role, and the verify file of that role.
 readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
 readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
-readonly CC_PINNED_RW_VERIFY_SHA256=421806af8d2124811947b2c2523a3d46b2797e614ae5ada7965b7226e930bdfb
+readonly CC_PINNED_RW_VERIFY_SHA256=bbc37e760c56755e38f7c67c668538c2fb74d7abed92796b6853d0b97aba05b3
 # Whether THIS release may run business mutations at all. `no` in every
 # release until the owner has reviewed one that may: SMM-025D closes
 # FU-025C-1, FU-024C2-1, FU-024C2-2 and FU-025C-2 in code

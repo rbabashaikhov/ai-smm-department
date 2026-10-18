@@ -20,6 +20,10 @@ from tests.test_migrations import migration_db as migration_db  # noqa: F401  (f
 
 SOCIAL = "a7c2e5f19b40"
 GUARDS = "c4d81e2a9f63"
+#: Whatever is above GUARDS today (through f7a91c2d5e04, additive):
+#: a downgrade refused at GUARDS rolls back the whole multi-step command,
+#: landing back at head, not at GUARDS itself.
+HEAD = "f7a91c2d5e04"
 SWITCH = "AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS"
 
 _BODIES = text(
@@ -28,7 +32,8 @@ _BODIES = text(
            md5(p.prosrc) || '|' || p.prosecdef::text || '|' || p.provolatile::text
            || '|' || coalesce(array_to_string(p.proconfig, ','), '')
       FROM pg_proc p
-     WHERE p.pronamespace = 'public'::regnamespace AND p.proname LIKE 'guard\\_%'
+     WHERE p.pronamespace = 'public'::regnamespace
+       AND (p.proname LIKE 'guard\\_%' OR p.proname LIKE 'generation\\_%')
     UNION ALL
     SELECT 'trigger:' || t.tgname,
            pg_get_triggerdef(t.oid) || '|deferrable=' || t.tgdeferrable::text
@@ -77,10 +82,12 @@ def test_the_migrated_guards_are_those_create_all_builds(
         from_models = guard_bodies(connection)
 
     assert from_migration == from_models
-    assert len([n for n, _ in from_migration if n.startswith("trigger:")]) == 18
+    # 18 from c4d81e2a9f63 + trg_generation_jobs_guard_insert/update
+    # (e04cb3a748f5, SMM-026A/2.1).
+    assert len([n for n, _ in from_migration if n.startswith("trigger:")]) == 20
 
 
-def test_public_can_execute_no_guard_function(migration_db: str) -> None:  # noqa: F811
+def test_public_can_execute_no_security_contract(migration_db: str) -> None:  # noqa: F811
     os.environ["AI_SMM_DATABASE_URL"] = migration_db
     command.upgrade(_alembic_config(migration_db), "head")
 
@@ -92,7 +99,8 @@ def test_public_can_execute_no_guard_function(migration_db: str) -> None:  # noq
                     text(
                         "SELECT p.proname FROM pg_proc p"
                         " WHERE p.pronamespace = 'public'::regnamespace"
-                        " AND p.proname LIKE 'guard\\_%'"
+                        " AND (p.proname LIKE 'guard\\_%'"
+                        "      OR p.proname LIKE 'generation\\_%')"
                         " AND has_function_privilege('public', p.oid, 'EXECUTE')"
                     )
                 )
@@ -123,7 +131,7 @@ def test_the_downgrade_refuses_without_its_switch(
         with pytest.raises(RuntimeError, match="removes the database guards"):
             command.downgrade(config, SOCIAL)
 
-        assert _at(migration_db) == GUARDS
+        assert _at(migration_db) == HEAD
 
 
 def test_down_and_up_again_with_the_switch(
@@ -161,7 +169,7 @@ def test_down_and_up_again_with_the_switch(
 
     command.upgrade(config, "head")
 
-    assert _at(migration_db) == GUARDS
+    assert _at(migration_db) == HEAD
 
 
 def test_existing_audit_rows_get_no_invented_provenance(

@@ -8,16 +8,39 @@ from langfuse import observe
 from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
+from ai_smm.agents.continuity import (
+    format_series_label,
+    split_series_label,
+    strip_series_label,
+)
+from ai_smm.agents.pilot import PILOT_PROJECT_ID, resolve_publishing_strategy
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
 
 
 logger = get_logger(__name__)
 
-PILOT_PROJECT_ID = "ai-catalog-consultant"
-
 #: Threads caption limit for a post carrying media.
 MAX_ITEM_LENGTH = 450
+
+#: What the Copywriter is asked for. The model does not count characters
+#: and overshoots, so it aims below the hard limit.
+TARGET_ITEM_LENGTH = 400
+
+#: Room reserved for the series label the system adds after the model
+#: writes the body (MAX_SERIES_TITLE_LENGTH plus the longest phrasing of
+#: "— часть N из M" and the blank line). Only used to tell the model a
+#: realistic body-only target; the actual combined text is what gets
+#: measured against MAX_ITEM_LENGTH.
+LABEL_ALLOWANCE = 90
+
+#: Focused rewrites of one over-long item before the Editor sees it. Kept
+#: small and fixed: this is a bounded number of extra LLM calls per item,
+#: not a loop that keeps trying until it works.
+MAX_SHORTEN_ATTEMPTS = 3
+
+#: Slack under the limit asked of a shortening rewrite, for the same reason.
+SHORTEN_MARGIN = 40
 
 
 class DraftItem(BaseModel):
@@ -54,7 +77,90 @@ llm = ChatOpenAI(
 
 structured_llm = llm.with_structured_output(DraftPackage)
 
+#: Shortens one text and nothing else: no knowledge base, no new facts.
+shorten_llm = ChatOpenAI(
+    model="gpt-4.1-mini",
+    temperature=0,
+    timeout=30,
+    max_retries=1,
+)
+
 langfuse_handler = CallbackHandler()
+
+
+def shorten_text(
+    text: str,
+    *,
+    limit: int = MAX_ITEM_LENGTH,
+    series_title: str = "",
+) -> str:
+    """Bring one item under the limit by cutting, not by rewriting the package.
+
+    Regenerating the whole package to fix a length does not converge: the
+    model fixes one part and lengthens another. Here only the over-long
+    text is rewritten, with its exact length and a target, and only
+    removal is allowed. The series label is split off first and put back
+    verbatim, so shortening can never lose the part number.
+
+    Returns the shortest acceptable version, which may still be over the
+    limit; the Editor reports it then, as before.
+    """
+
+    if len(text) <= limit:
+        return text
+
+    label, body = split_series_label(text, series_title)
+    separator = "\n\n" if label else ""
+    budget = limit - len(label) - len(separator)
+    best = body.strip()
+
+    for _ in range(MAX_SHORTEN_ATTEMPTS):
+        if len(best) <= budget:
+            break
+
+        target = max(budget - SHORTEN_MARGIN, budget // 2)
+        prompt = f"""
+Сократи текст публикации для Threads.
+
+Сейчас в тексте {len(best)} символов. Нужно не больше {target}
+символов, считая пробелы.
+
+Правила:
+- только сокращай: не добавляй фактов, цифр, названий и выводов,
+  которых нет в тексте;
+- сохрани главный тезис и все цифры, которые оставляешь, без изменений;
+- убирай повторы, вводные слова и общие фразы;
+- если в конце есть анонс следующей части, оставь его одной короткой
+  фразой;
+- верни только сокращённый текст, без кавычек и пояснений.
+
+ТЕКСТ:
+{best}
+"""
+
+        result = shorten_llm.invoke(
+            prompt,
+            config={"callbacks": [langfuse_handler]},
+        )
+        candidate = str(result.content).strip()
+
+        if candidate and len(candidate) < len(best):
+            best = candidate
+
+    shortened = f"{label}{separator}{best}"
+
+    logger.info(
+        "Copywriter shortened an item",
+        extra={
+            "context": {
+                "before": len(text),
+                "after": len(shortened),
+                "limit": limit,
+            }
+        },
+    )
+
+    return shortened
 
 
 @observe(name="copywriter", as_type="agent")
@@ -68,8 +174,8 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 
     pilot_mode = project_id == PILOT_PROJECT_ID
 
-    strategy = (
-        content_plan.get("publishing_strategy") or "standalone_series"
+    strategy = resolve_publishing_strategy(
+        project_id, content_plan.get("publishing_strategy")
     )
     series_title = content_plan.get("series_title") or ""
     planned_total = content_plan.get("planned_total") or len(
@@ -123,32 +229,47 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 Каждая часть — самостоятельный пост. Читатель может
 увидеть любую из них первой.
 
+Строку «{series_title or "Название серии"} — часть N из {planned_total}»
+НЕ пиши сам: систeма добавляет её перед текстом
+автоматически, одинаково для всех частей. Начинай
+текст сразу с сути, без заголовка-дубля этой строки.
+
 Для КАЖДОЙ части обязательно:
 
-1. Понятный заголовок в начале текста.
-
-2. Обозначение серии и номера части в формате:
-   «{series_title or "Название серии"} — часть N из {planned_total}»
-   Используй это ровно один раз, рядом с заголовком.
-
-3. Если это НЕ первая часть — одно короткое
+1. Если это НЕ первая часть — одно короткое
    предложение о том, на чём остановились
    в предыдущей части. Не пересказывай её целиком.
 
-4. Один главный тезис. Не пытайся вместить всё.
+2. Один главный тезис. Не пытайся вместить всё.
 
-5. Логичное завершение: часть не должна обрываться.
+3. Логичное завершение: часть не должна обрываться.
 
-6. Если следующая часть существует — одна короткая
-   строка о том, что будет в ней.
-   Для последней части анонса нет.
+4. Анонс следующей части — одна короткая строка —
+   пишется ТОЛЬКО когда номер этой части МЕНЬШЕ
+   общего числа частей. Прежде чем писать анонс,
+   сверь номер части с {planned_total}: если часть
+   последняя (номер равен {planned_total}), анонса
+   не будет вообще, ни в каком виде.
 
-7. Текст должен быть понятен тому, кто не читал
+5. Для ПОСЛЕДНЕЙ части (номер = {planned_total})
+   ЗАПРЕЩЕНО писать «следующая часть…», «продолжение
+   скоро», «продолжение следует», «далее — …» и любые
+   другие слова об ожидающемся продолжении. Серия
+   заканчивается на последней части — заверши мысль,
+   а не анонс.
+
+6. Текст должен быть понятен тому, кто не читал
    остальные части.
+
+7. Приведённая выше строка серии добавляется системой
+   отдельно и не входит в лимит, который ты считаешь
+   сам: пиши тело так, чтобы в него поместился главный
+   тезис, связь с предыдущей частью и короткий анонс,
+   примерно в {TARGET_ITEM_LENGTH - LABEL_ALLOWANCE} символов.
 """
 
     if pilot_mode:
-        format_instructions = """
+        format_instructions = f"""
 Это пилотная серия из трёх публикаций с реальными
 скриншотами проекта AI Catalog Consultant.
 
@@ -158,7 +279,9 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 - ровно один DraftItem;
 - order = 1;
 - format = "carousel";
-- текст не длиннее 450 символов;
+- длина тела — как указано выше в СТРАТЕГИЯ: строку серии
+  не пиши сам, жёсткий предел {MAX_ITEM_LENGTH} — на текст
+  целиком, уже вместе с добавленной системой строкой;
 - не включай ссылки на изображения в текст;
 - не перечисляй имена файлов.
 
@@ -174,7 +297,21 @@ Publisher самостоятельно распределит изображен
 Не изменяй порядок публикаций в content plan.
 """
     else:
-        format_instructions = """
+        if strategy == "standalone_series":
+            length_note = (
+                "Длина тела — как указано выше в СТРАТЕГИЯ: строку "
+                "серии не пиши сам, жёсткий предел "
+                f"{MAX_ITEM_LENGTH} — на текст целиком, уже вместе с "
+                "добавленной системой строкой."
+            )
+        else:
+            length_note = (
+                f"Каждый item — около {TARGET_ITEM_LENGTH} символов; "
+                f"жёсткий предел — {MAX_ITEM_LENGTH}, превышение не "
+                "принимается."
+            )
+
+        format_instructions = f"""
 Подготовь публикации в форматах content plan.
 
 Допустимые форматы:
@@ -191,7 +328,7 @@ carousel:
 - ровно один DraftItem с подписью;
 - визуальные материалы добавляются отдельно.
 
-Каждый item должен содержать максимум 450 символов.
+{length_note}
 """
 
     prompt = f"""
@@ -315,28 +452,59 @@ REVISION NUMBER:
         publication["position"] = index
         publication["series_total"] = len(draft["publications"])
 
-    if pilot_mode:
-        if len(draft["publications"]) != 3:
-            raise ValueError(
-                "Pilot requires exactly 3 publications."
+    # A wrong shape is the Editor's to report, not a reason to stop the
+    # graph: validate_draft names it, the revision loop gets to fix it, and
+    # the Publisher refuses a package that still has it.
+    if pilot_mode and len(draft["publications"]) != 3:
+        logger.warning(
+            "Pilot draft has the wrong number of publications",
+            extra={"context": {"publications": len(draft["publications"])}},
+        )
+
+    # The label is the one piece of scaffolding the system writes itself
+    # rather than trusting the model with: wherever the model put its own
+    # attempt (start, end, or not at all), it is stripped and the single
+    # canonical form is put at the front, before the length is checked.
+    # This is what makes "does this part say which one it is" and "do two
+    # parts open the same way" checks reliable instead of a matter of
+    # the model's mood that revision.
+    total_publications = len(draft["publications"])
+
+    for publication in draft["publications"]:
+        position = publication.get("position") or 0
+        label = (
+            format_series_label(
+                draft["series_title"], position, total_publications
             )
+            if strategy == "standalone_series" and total_publications > 1
+            else ""
+        )
 
-        for index, publication in enumerate(
-            draft["publications"],
-            start=1,
-        ):
-            if len(publication["items"]) != 1:
-                raise ValueError(
-                    f"Publication {index} must contain "
-                    "exactly one item in pilot mode."
-                )
+        for item in publication.get("items", []):
+            body = strip_series_label(
+                item.get("text", ""), draft["series_title"]
+            ).strip()
+            combined = f"{label}\n\n{body}" if label else body
 
+            text = shorten_text(combined, series_title=draft["series_title"])
+            item["text"] = text
+
+            # Bounded retries (MAX_SHORTEN_ATTEMPTS), not an open-ended
+            # loop: if the item is still over the limit once they are
+            # spent, that is a controlled rejection, not success wearing
+            # a longer text -- validate_draft names it explicitly below,
+            # the revision loop gets a chance to rewrite it shorter from
+            # scratch, and the Publisher never sees it without that name.
+            if len(text) > MAX_ITEM_LENGTH:
+                item["shortening_failed"] = True
 
     bad_draft_injected = False
 
     if (
         state.get("force_bad_draft", False)
         and revision_count == 0
+        and draft["publications"]
+        and draft["publications"][0]["items"]
     ):
         logger.warning(
             "Injecting an intentionally bad draft for the revision test"

@@ -43,3 +43,4 @@ class SMMState(TypedDict, total=False):
     # Series planning (inputs to Strategist)
     series_size: int
     publishing_strategy: str
+    topic_hint: str
