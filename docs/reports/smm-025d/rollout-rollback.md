@@ -188,8 +188,13 @@ checks, 0 FAIL). That rollback reopens FU-024C2-1 for as long as it lasts
 ## 4. R7 — business mutations (later, separate approval)
 
 Release N still ships `CC_RELEASE_PERMITS_MUTATIONS=no`. After the owner
-accepts SMM-025D, a release N′ = N + that one reviewed line (no schema,
-no image change other than the scripts) lifts it. Then, each approved:
+accepts SMM-025D, a release N′ = N + that one reviewed line lifts it (no
+schema change; the worker image is unchanged; the CC images are rebuilt
+from N′ only because the wrapper requires the image label to equal
+`SMM_CC_VERSION` — their content is N's). **N′ is prepared and rehearsed
+on branch `feat/smm-025d-r7-readiness`; the executable runbook, rollback
+and smoke are [r7/runbook.md](r7/runbook.md), which supersedes the steps
+below.** Then, each approved:
 
 1. **Mutation role**: `ai_smm_cc_rw.grants.sql` N (requires the SMM-025D
    schema; EXECUTE on the six guard functions); `\password ai_smm_cc_rw`;
@@ -216,7 +221,7 @@ enable`; every line is a release gate.
 | 2 | `ai_smm_cc_rw.verify.sql`, `ai_smm_cc.verify.sql`, `ai_smm_auth.verify.sql` | 0 FAIL each |
 | 3 | guard triggers / functions | 18 `trg_*_guard_*` triggers; PUBLIC has no EXECUTE on any `guard_*` function |
 | 4 | direct SQL as `ai_smm_cc_rw` without a bound session (psql, a throwaway transaction, `ROLLBACK`) | `INSERT INTO publications …` refused `guard: …` |
-| 5 | worker preflight | PASS; `accounts.credential_keys` lists the key id of K |
+| 5 | worker preflight; the worker's start log | preflight PASS; the `Worker starting` log line names `credential_keys` = the key id of K (preflight lists key ids only once a credential is stored) |
 | 6 | key id printed by the wrapper | = deployment record (K) |
 | 7 | T-N6 | as in E.5 |
 | 8 | `session-anomalies.sql` | 0 |

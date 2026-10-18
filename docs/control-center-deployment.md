@@ -402,12 +402,15 @@ owner. The compose file and scripts of that release require
 
 ### Business-mutation mode (SMM-025C; not enabled in production)
 
-**Locked in this release** (`CC_RELEASE_PERMITS_MUTATIONS=no` in
-`cc-gate.sh`): `mutations enable` is refused before anything runs, and a
-mode file is never honoured. A normal deployment (`up`, `restart`,
-`migrate`, …) never loads the override or `control-center.api-rw.env`,
-even when both are present. What follows describes a later release that
-has lifted the lock.
+**Permitted from release R7 (N′), off by default.** Every release up to
+SMM-025D ships `CC_RELEASE_PERMITS_MUTATIONS=no` in `cc-gate.sh`:
+`mutations enable` is refused before anything runs, and a mode file is
+never honoured. R7 (N′ = SMM-025D + that one line set to `yes`,
+[reports/smm-025d/r7/](reports/smm-025d/r7/README.md)) permits the mode;
+it still starts read-only. In either release a normal deployment (`up`,
+`restart`, `migrate`, …) never loads the override or
+`control-center.api-rw.env` until `mutations enable` has written the mode
+file for the running release.
 
 A second role, `ai_smm_cc_rw`, holds the column-level business writes
 the editable Control Center needs; `ai_smm_cc` is unchanged. The mode is

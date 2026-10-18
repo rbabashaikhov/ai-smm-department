@@ -49,6 +49,8 @@ ROLLBACK_DOC = ROOT / "docs" / "control-center-rollback.md"
 #: The SMM-025B/025C rollout plan; it also drives the worker's own Compose
 #: project, so only its wrapper and backup invocations are checked here.
 PLAN_DOC = ROOT / "docs" / "reports" / "smm-025b" / "migration-rollback.md"
+# The R7 runbook (release N', business mutations): its wrapper calls too.
+R7_DOC = ROOT / "docs" / "reports" / "smm-025d" / "r7" / "runbook.md"
 
 
 @pytest.fixture
@@ -714,7 +716,7 @@ PLACEHOLDERS = {
 def _documented(script: str) -> list[tuple[str, list[str]]]:
     found = []
 
-    for doc in (DEPLOY_DOC, ROLLBACK_DOC, PLAN_DOC):
+    for doc in (DEPLOY_DOC, ROLLBACK_DOC, PLAN_DOC, R7_DOC):
         text = doc.read_text(encoding="utf-8")
 
         blocks = re.findall(r"```bash\n(.*?)```", text, re.DOTALL)
@@ -766,11 +768,11 @@ def test_every_documented_wrapper_invocation_is_accepted(
 
     assert len(invocations) >= 15
     assert {doc for doc, _ in invocations} == {
-        DEPLOY_DOC.name, ROLLBACK_DOC.name, PLAN_DOC.name,
+        DEPLOY_DOC.name, ROLLBACK_DOC.name, PLAN_DOC.name, R7_DOC.name,
     }
 
-    # Everything `mutations enable` would need is present -- and this
-    # release refuses it anyway (CC_RELEASE_PERMITS_MUTATIONS=no).
+    # Everything `mutations enable` needs is present; this release permits
+    # it (CC_RELEASE_PERMITS_MUTATIONS=yes) and starts read-only otherwise.
     rw_dsn = FIXTURE_API_DSN.replace("ai_smm_cc:fixture-api-pw", "ai_smm_cc_rw:rw-pw")
     shutil.copy(ROOT / "compose.control-center.mutations.yml", deploy_dir)
     shutil.copy(DEPLOY_DIR / "db" / "ai_smm_cc_rw.verify.sql", deploy_dir)
@@ -796,9 +798,13 @@ def test_every_documented_wrapper_invocation_is_accepted(
         result = _run(deploy_dir, stub, *tokens)
 
         if tokens[:2] == ["mutations", "enable"]:
-            assert result.returncode == 2, (doc, tokens, result.stderr)
-            assert "does not permit business mutations" in result.stderr
-            assert stub.calls() == []
+            # Gates (identity, the mutation role), then smm-api alone with the
+            # pinned override; the mode file names this release.
+            assert result.returncode == 0, (doc, tokens, result.stderr)
+            assert len(stub.compose_calls()) == 1, (doc, tokens)
+            started = " ".join(stub.compose_calls()[0])
+            assert "compose.control-center.mutations.yml" in started
+            assert (deploy_dir / "control-center.mutations").exists()
             continue
 
         assert result.returncode == 0, (doc, tokens, result.stderr)

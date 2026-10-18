@@ -18,6 +18,7 @@ credential keys. Baseline `main` `5f32b50`.
 | [Credential keys](../../credential-keys.md) | packaging, backup, restore, rotation, revocation |
 | [Checkpoint](CHECKPOINT.md) | the working log of the sprint |
 | [evidence/](evidence/) | network rehearsal log (passwords redacted) |
+| [r7/](r7/README.md) | R7 readiness (release N′, FU-024C1-5 checklist, runbook, mutation rehearsal) |
 
 **State:** branch `feat/smm-025d-mutations-hardening`, **uncommitted**.
 Nothing committed, pushed, merged or deployed; production, the VPS, its

@@ -167,15 +167,16 @@ provisioned by their own SQL files.
 
 ## 8. Switching the mode: `cc-compose.sh mutations`
 
-> **Locked in this release.** `cc-gate.sh` ships
-> `CC_RELEASE_PERMITS_MUTATIONS=no`: `mutations enable` is refused before
-> anything is read or run, and a `control-center.mutations` file — written
-> by hand or left by another copy — is never honoured (`up`, `restart`,
-> `preflight`, `migrate`, `create-owner` refuse until `mutations disable`).
-> Only a reviewed release that has closed the items of §9 sets it to
-> `yes`; it is not an environment switch. The mechanism below is what
-> such a release gets; its tests run on a copy of the scripts with that
-> one constant changed (`tests/test_control_center_mutations.py`).
+> **Locked up to SMM-025D; permitted from R7.** Up to SMM-025D `cc-gate.sh`
+> ships `CC_RELEASE_PERMITS_MUTATIONS=no`: `mutations enable` is refused
+> before anything is read or run, and a `control-center.mutations` file —
+> written by hand or left by another copy — is never honoured (`up`,
+> `restart`, `preflight`, `migrate`, `create-owner` refuse until
+> `mutations disable`). R7 (N′, [reports/smm-025d/r7/](reports/smm-025d/r7/README.md))
+> ships `yes`: the mechanism below is available, and the Control Center
+> still starts read-only until `mutations enable`. It is not an
+> environment switch. `tests/test_control_center_mutations.py` tests both:
+> the mechanism on the shipped scripts, the lock on a copy set to `no`.
 
 | Verb | What it does |
 |---|---|

@@ -81,22 +81,25 @@ readonly CC_PINNED_VERIFY_SHA256=6d92adc48e35fe60dadda54a8c4026ee643754e10c38da7
 readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
 readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
 readonly CC_PINNED_RW_VERIFY_SHA256=bbc37e760c56755e38f7c67c668538c2fb74d7abed92796b6853d0b97aba05b3
-# Whether THIS release may run business mutations at all. `no` in every
-# release until the owner has reviewed one that may: SMM-025D closes
+# Whether THIS release may run business mutations at all. Every release
+# up to SMM-025D shipped `no`: `mutations enable` was refused before
+# anything ran and a mode file was never honoured. SMM-025D closed
 # FU-025C-1, FU-024C2-1, FU-024C2-2 and FU-025C-2 in code
-# (docs/adr/ADR-025D-database-enforced-mutation-safety.md); what remains
-# is the owner's review, the smm-auth rollout and the FU-024C1-5
-# checklist on this exact release in production. Then a reviewed release
-# changes it. With `no`, `mutations enable` is refused
-# before anything runs and a mode file is never honoured. Not an
-# environment switch on purpose: only a new, reviewed release lifts it.
+# (docs/adr/ADR-025D-database-enforced-mutation-safety.md) and was rolled
+# out read-only with smm-auth; this release (R7, docs/reports/smm-025d/r7)
+# is that release plus this one line. `yes` PERMITS the mode, it does not
+# turn it on: the Control Center still starts read-only, as ai_smm_cc with
+# the compose literal "false", until `mutations enable --approved-by NAME`
+# (role gate on ai_smm_cc_rw) writes the mode file for this release.
+# Not an environment switch on purpose: only a new, reviewed release
+# changes it. CC_MUTATIONS_BLOCKED_BY is what a release with `no` names.
 # The sign-in service (SMM-025D): its role's verify file, and how many
 # checks a complete run makes at the least (one per relation, column,
 # sequence and routine: about 950 on the 2026-10 schema).
 readonly CC_AUTH_VERIFY_FILE_NAME=ai_smm_auth.verify.sql
 readonly CC_AUTH_VERIFY_MIN_CHECKS=400
 readonly CC_PINNED_AUTH_VERIFY_SHA256=8c610b2d7773e2036b589036e0f29571c927630f4bbbeace3dff28706f07c805
-readonly CC_RELEASE_PERMITS_MUTATIONS=no
+readonly CC_RELEASE_PERMITS_MUTATIONS=yes
 readonly CC_MUTATIONS_BLOCKED_BY='owner review of SMM-025D, smm-auth rollout (ADR-024C-3A P3-P6), FU-024C1-5 checklist on this release'
 
 readonly CC_NAME_RE='^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'

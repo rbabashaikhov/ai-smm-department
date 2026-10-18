@@ -961,3 +961,39 @@ switches the worker to the release of the migration in the same window
 No older worker (`5f32b50`, `706b383`, …) may be started on the new
 schema, also not as a rollback: a worker rollback below that release needs
 the schema downgrade first.
+
+---
+
+## From the R7 readiness work (2026-10-15)
+
+Found while preparing and rehearsing R7 (business mutations on) on
+release N′ ([reports/smm-025d/r7/](reports/smm-025d/r7/README.md)). None
+of them blocks R7; each changes how R7 is operated.
+
+### FU-025D-6 — No operator command cancels a scheduled publication while the Control Center is read-only
+
+**Status:** open. **Priority:** P2. **Blocks mutations:** no (procedure in the R7 runbook).
+
+`mutations disable` makes the Control Center read-only and leaves every
+approved, scheduled row scheduled; the LIVE worker publishes them
+(rehearsal R7-6/R7-7). Cancelling is a business command, so once the
+mode is off nothing can cancel such a row: the worker CLI has `schedule`,
+`approve`, `publish-now`, but no `cancel`. Today the R7 runbook says
+"cancel in the UI before `disable`", and the only emergency brake is
+stopping the worker, which stops all publishing. Done when the operator
+CLI (owner role, audited, `--note`) can cancel a `scheduled`/`approved`
+row, with a test, and the runbook names it.
+
+### FU-025D-7 — A blocked row is re-claimed up to BATCH_SIZE times per cycle, each time audited
+
+**Status:** open. **Priority:** P3. **Blocks mutations:** no.
+
+`process_one` releases a row that fails `validate_ready_to_publish`
+(e.g. scheduled but not `human_reviewed`) with an audit entry and a
+WARNING; it is immediately claimable again, so one such row yields
+`BATCH_SIZE` "blocked" results, audit rows and warnings per poll
+interval, indefinitely (rehearsal R7-7: 8 for one row). It is never
+published. Only the owner role (operator CLI, import, SQL) can make such
+a row due: the database guards refuse it to the API roles. Done when a
+blocked row is not claimed again in the same cycle and its repetition is
+rate-limited (or it is moved to a terminal state an operator must clear).

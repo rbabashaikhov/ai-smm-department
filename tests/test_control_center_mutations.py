@@ -12,11 +12,16 @@
 * `disable` deletes the mode file first, then starts smm-api read-only --
   or, if the read-only role does not check out, stops it;
 * none of it works in a release whose cc-gate.sh says
-  CC_RELEASE_PERMITS_MUTATIONS=no -- every release so far, this one
-  included: `enable` is refused before anything runs, a mode file is never
-  honoured. The mechanism is therefore tested on a copy of the scripts
-  with that one constant set to `yes` (the `WRAPPER` this module uses);
-  the shipped scripts are tested as they are under "this release" below.
+  CC_RELEASE_PERMITS_MUTATIONS=no -- every release up to SMM-025D: `enable`
+  is refused before anything runs, a mode file is never honoured. That
+  lock is tested on a copy of the scripts with the constant set to `no`
+  ("a locked release" below), so it stays proven for any later release
+  that ships it again;
+* this release (R7, docs/reports/smm-025d/r7) ships `yes`: it PERMITS the
+  mode and still starts read-only. The mechanism is tested on a copy with
+  the constant set to `yes` (the `WRAPPER` this module uses), which is
+  byte-identical to the shipped scripts; the shipped scripts are tested
+  as they are under "this release" below.
 
 Each refusal exits 2, names the reason and prints no password. Most cases
 answer from the fake `docker` (tests/cc_stub.py); the live ones run the
@@ -69,11 +74,9 @@ SHIPPED_WRAPPER = WRAPPER
 PERMITS = "readonly CC_RELEASE_PERMITS_MUTATIONS="
 
 
-@pytest.fixture(scope="module")
-def permitting_wrapper(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The shipped scripts with only CC_RELEASE_PERMITS_MUTATIONS=yes."""
+def _wrapper_permitting(directory: Path, value: str) -> Path:
+    """The shipped scripts with only CC_RELEASE_PERMITS_MUTATIONS=<value>."""
 
-    directory = tmp_path_factory.mktemp("permitting") / "control-center"
     directory.mkdir()
 
     for script in SHIPPED_WRAPPER.parent.glob("*.sh"):
@@ -81,10 +84,31 @@ def permitting_wrapper(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     gate = directory / "cc-gate.sh"
     text = gate.read_text(encoding="utf-8")
-    assert text.count(f"{PERMITS}no\n") == 1
-    gate.write_text(text.replace(f"{PERMITS}no\n", f"{PERMITS}yes\n"), encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.startswith(PERMITS)]
+    assert len(lines) == 1 and lines[0] in (f"{PERMITS}no", f"{PERMITS}yes"), lines
+    gate.write_text(
+        text.replace(f"{lines[0]}\n", f"{PERMITS}{value}\n"), encoding="utf-8"
+    )
 
     return directory / SHIPPED_WRAPPER.name
+
+
+@pytest.fixture(scope="module")
+def permitting_wrapper(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The scripts with CC_RELEASE_PERMITS_MUTATIONS=yes (= this release)."""
+
+    return _wrapper_permitting(
+        tmp_path_factory.mktemp("permitting") / "control-center", "yes"
+    )
+
+
+@pytest.fixture(scope="module")
+def locked_wrapper(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The scripts with CC_RELEASE_PERMITS_MUTATIONS=no (releases up to SMM-025D)."""
+
+    return _wrapper_permitting(
+        tmp_path_factory.mktemp("locked") / "control-center", "no"
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -854,28 +878,88 @@ def test_the_override_changes_only_the_role_and_the_flag(
     assert FIXTURE_DSN not in json.dumps(services["smm-api"])
 
 
-# -- this release: read-only, whatever is on the host ----------------------------
+# -- this release: mutations permitted, read-only until `mutations enable` -------
 #
-# The scripts exactly as shipped (CC_RELEASE_PERMITS_MUTATIONS=no), with
+# The scripts exactly as shipped (CC_RELEASE_PERMITS_MUTATIONS=yes), with
 # every file mutation mode would need present in the deployment directory.
 
 
-def test_this_release_does_not_permit_mutations() -> None:
+def test_this_release_permits_mutations() -> None:
     gate = (SHIPPED_WRAPPER.parent / "cc-gate.sh").read_text(encoding="utf-8")
 
-    assert f"\n{PERMITS}no\n" in gate
+    assert f"\n{PERMITS}yes\n" in gate
 
 
-def test_this_release_refuses_enable_before_anything_runs(
+def test_the_mechanism_under_test_is_the_shipped_release(
+    permitting_wrapper: Path,
+) -> None:
+    """The `yes` copy the mechanism tests use is byte-identical to what ships."""
+
+    shipped = sorted(SHIPPED_WRAPPER.parent.glob("*.sh"))
+
+    assert [p.name for p in shipped] == sorted(
+        p.name for p in permitting_wrapper.parent.glob("*.sh")
+    )
+    for script in shipped:
+        copied = (permitting_wrapper.parent / script.name).read_bytes()
+
+        assert copied == script.read_bytes(), script.name
+
+
+def test_the_compose_literal_still_says_false() -> None:
+    """Permitting the mode changes no default: only the pinned override says "true"."""
+
+    base = (ROOT / "compose.control-center.yml").read_text(encoding="utf-8")
+
+    assert 'AI_SMM_API_MUTATIONS_ENABLED: "false"' in base
+    assert 'AI_SMM_API_MUTATIONS_ENABLED: "true"' not in base
+    override = MUTATIONS_COMPOSE.read_text(encoding="utf-8")
+
+    assert 'AI_SMM_API_MUTATIONS_ENABLED: "true"' in override
+
+
+def test_this_release_reports_read_only_without_a_mode_file(
     deploy_dir: Path, stub: DockerStub
 ) -> None:
+    _running_api(stub, flag="false", dsn=FIXTURE_API_DSN)
+
+    status = run_script(SHIPPED_WRAPPER, deploy_dir, "mutations", "status", stub=stub)
+    output = _output(status)
+
+    assert status.returncode == 0, output
+    assert "mode: read-only" in output
+    assert "a mode file" not in output
+    assert "does not permit" not in output
+    assert "AI_SMM_API_MUTATIONS_ENABLED=false role=ai_smm_cc" in output
+    assert stub.compose_calls() == []
+
+
+def test_this_release_still_ignores_a_mode_file_of_another_release(
+    deploy_dir: Path, stub: DockerStub
+) -> None:
+    _write_state(deploy_dir, SMM_CC_MUTATIONS_VERSION=OTHER_RELEASE)
+
+    result = run_script(SHIPPED_WRAPPER, deploy_dir, "up", stub=stub)
+
+    _assert_refused(result, stub, "a new release starts read-only")
+    assert _verify_sqls(stub) == []
+
+
+# -- a locked release (CC_RELEASE_PERMITS_MUTATIONS=no) ---------------------------
+#
+# Every release up to SMM-025D, and any later one that ships `no` again.
+
+
+def test_a_locked_release_refuses_enable_before_anything_runs(
+    deploy_dir: Path, stub: DockerStub, locked_wrapper: Path
+) -> None:
     result = run_script(
-        SHIPPED_WRAPPER, deploy_dir, "mutations", "enable", "--approved-by", "o",
+        locked_wrapper, deploy_dir, "mutations", "enable", "--approved-by", "o",
         stub=stub,
     )
 
     _assert_refused(result, stub, "this release does not permit business mutations")
-    # What is still open for this release (SMM-025D closed the code items).
+    # What it names as still open.
     assert "owner review of SMM-025D" in result.stderr
     assert "FU-024C1-5" in result.stderr
     assert stub.calls() == []
@@ -892,32 +976,32 @@ def test_this_release_refuses_enable_before_anything_runs(
         ("migrate", "current"),
     ],
 )
-def test_this_release_never_honours_a_mode_file(
-    deploy_dir: Path, stub: DockerStub, args: tuple[str, ...]
+def test_a_locked_release_never_honours_a_mode_file(
+    deploy_dir: Path, stub: DockerStub, locked_wrapper: Path, args: tuple[str, ...]
 ) -> None:
     """A mode file it did not write -- by hand, or left by another copy."""
 
     _write_state(deploy_dir)
 
-    result = run_script(SHIPPED_WRAPPER, deploy_dir, *args, stub=stub)
+    result = run_script(locked_wrapper, deploy_dir, *args, stub=stub)
 
     _assert_refused(result, stub, "this release does not permit business mutations")
     assert _verify_sqls(stub) == []
 
 
-def test_this_release_reports_and_removes_a_mode_file(
-    deploy_dir: Path, stub: DockerStub
+def test_a_locked_release_reports_and_removes_a_mode_file(
+    deploy_dir: Path, stub: DockerStub, locked_wrapper: Path
 ) -> None:
     _write_state(deploy_dir)
 
-    status = run_script(SHIPPED_WRAPPER, deploy_dir, "mutations", "status", stub=stub)
+    status = run_script(locked_wrapper, deploy_dir, "mutations", "status", stub=stub)
     output = _output(status)
 
     assert status.returncode == 0, output
     assert "mode: read-only -- a mode file" in output
     assert "release: does not permit business mutations" in output
 
-    result = run_script(SHIPPED_WRAPPER, deploy_dir, "mutations", "disable", stub=stub)
+    result = run_script(locked_wrapper, deploy_dir, "mutations", "disable", stub=stub)
 
     assert result.returncode == 0, _output(result)
     assert not (deploy_dir / STATE).exists()
