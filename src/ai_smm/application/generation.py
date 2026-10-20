@@ -19,6 +19,7 @@ Every command first checks the control plane's mutation switch
 (ai_smm.application.control_plane), exactly like every content and
 publication command does.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -47,7 +48,8 @@ MIN_SERIES_SIZE = 1
 MAX_GENERATION_ATTEMPTS = 10
 MAX_TOPIC_HINT_LENGTH = 500
 
-PUBLISHING_STRATEGIES = frozenset({"standalone_series", "reply_thread"})
+# Creation only: historical jobs and their execution retain their strategy.
+PUBLISHING_STRATEGIES = frozenset({"standalone_series"})
 
 
 def utcnow() -> datetime:
@@ -85,8 +87,7 @@ def _validate_params(
 ) -> None:
     if not MIN_SERIES_SIZE <= series_size <= MAX_SERIES_SIZE:
         raise InvalidGenerationParams(
-            f"series_size must be between {MIN_SERIES_SIZE} and "
-            f"{MAX_SERIES_SIZE}."
+            f"series_size must be between {MIN_SERIES_SIZE} and {MAX_SERIES_SIZE}."
         )
 
     if (
@@ -94,8 +95,7 @@ def _validate_params(
         and publishing_strategy not in PUBLISHING_STRATEGIES
     ):
         raise InvalidGenerationParams(
-            "publishing_strategy must be one of "
-            f"{sorted(PUBLISHING_STRATEGIES)} or omitted."
+            "Only standalone_series is supported for new generation jobs."
         )
 
     if not 1 <= max_attempts <= MAX_GENERATION_ATTEMPTS:
@@ -129,14 +129,11 @@ def _lock_generation_job(
         ).one_or_none()
     except OperationalError as exc:
         raise GenerationLocked(
-            f"Generation job {job_id} is locked by another transaction; "
-            "try again."
+            f"Generation job {job_id} is locked by another transaction; try again."
         ) from exc
 
     if job is None:
-        raise GenerationUnavailable(
-            f"Generation job {job_id} no longer exists."
-        )
+        raise GenerationUnavailable(f"Generation job {job_id} no longer exists.")
 
     if job.project_id != expected_project_id:
         raise GenerationUnavailable(
@@ -163,6 +160,9 @@ def create_generation_job(
     one row until a generation worker picks it up."""
 
     require_mutations_enabled(mutations_enabled, command="start generation")
+    # Omitted/null inputs must not inherit an unsupported project strategy.
+    if publishing_strategy is None:
+        publishing_strategy = "standalone_series"
     _validate_params(
         series_size=series_size,
         publishing_strategy=publishing_strategy,
@@ -281,9 +281,7 @@ def list_generation_jobs_page(
         stmt = stmt.where(ContentGenerationJob.status.in_(statuses))
 
     total = int(
-        db.execute(
-            select(func.count()).select_from(stmt.subquery())
-        ).scalar_one()
+        db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
     )
     rows = list(
         db.scalars(

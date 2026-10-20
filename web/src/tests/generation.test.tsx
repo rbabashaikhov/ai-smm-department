@@ -78,7 +78,10 @@ describe("generation jobs page", () => {
     await user.type(screen.getByLabelText("Topic hint"), " Product launch ");
     await user.clear(screen.getByLabelText("Series size"));
     await user.type(screen.getByLabelText("Series size"), "2");
-    await user.selectOptions(screen.getByLabelText("Publishing strategy"), "reply_thread");
+    const strategy = screen.getByLabelText("Publishing strategy");
+    expect(strategy).toHaveValue("standalone_series");
+    expect(within(strategy).getAllByRole("option")).toHaveLength(1);
+    expect(within(strategy).queryByRole("option", { name: "reply_thread" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Generate" }));
 
     await waitFor(() =>
@@ -88,7 +91,7 @@ describe("generation jobs page", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.body).toEqual({
       series_size: 2,
-      publishing_strategy: "reply_thread",
+      publishing_strategy: "standalone_series",
       topic_hint: "Product launch",
     });
     expect(calls[0]!.headers["x-csrf-token"]).toBe(server.csrfToken);
@@ -217,6 +220,24 @@ describe("generation job detail", () => {
     for (const action of ["Approve", "Submit Review", "Publish", "Schedule"]) {
       expect(screen.queryByRole("button", { name: action })).not.toBeInTheDocument();
     }
+  });
+
+  it("still displays the strategy of an existing reply_thread job", async () => {
+    const server = generationServer("viewer").on(
+      "GET",
+      "/api/v1/generation-jobs/:jobId",
+      ok(makeJob("succeeded", {
+        params: { series_size: 2, publishing_strategy: "reply_thread" },
+        result: { content_item_ids: [ITEM_ID] },
+      })),
+    );
+    renderApp(server, `/projects/${PROJECT_ID}/generation/${JOB_ID}`);
+
+    expect(await screen.findByText("reply_thread")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: new RegExp(ITEM_ID) })).toHaveAttribute(
+      "href", `/content/${ITEM_ID}`,
+    );
+    expect(server.calls.filter((call) => call.method === "POST")).toHaveLength(0);
   });
 
   it("shows malformed result safely without draft links", async () => {
