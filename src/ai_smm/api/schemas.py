@@ -3,6 +3,7 @@
 A password arrives as a SecretStr so that an accidental repr, a log line
 or a validation error cannot print it.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -465,7 +466,6 @@ class CancelRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
-
 # -- editorial layer -----------------------------------------------------
 # A revision has no update body anywhere in this API: the only way to
 # change content is to POST a new revision.
@@ -630,7 +630,13 @@ class GenerationJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     series_size: int = Field(default=3, ge=1, le=5)
-    publishing_strategy: Literal["standalone_series", "reply_thread"] | None = None
+    # The application validates strategies so HTTP callers get an actionable
+    # error, rather than the generic (redacted) Pydantic validation message.
+    publishing_strategy: str | None = Field(
+        default="standalone_series",
+        description="New jobs support only standalone_series; null uses it too.",
+        json_schema_extra={"enum": ["standalone_series", None]},
+    )
     topic_hint: str | None = Field(default=None, max_length=500)
 
 

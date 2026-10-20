@@ -17,7 +17,6 @@ import { formatDateTime } from "../lib/time";
 import {
   GENERATION_JOB_STATUSES,
   type GenerationJobStatus,
-  type GenerationPublishingStrategy,
 } from "../types/api";
 
 const PAGE_SIZE = 25;
@@ -45,8 +44,6 @@ export function GenerationJobsPage() {
 
   const [topicHint, setTopicHint] = useState("");
   const [seriesSize, setSeriesSize] = useState("3");
-  const [strategy, setStrategy] =
-    useState<GenerationPublishingStrategy>("standalone_series");
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const update = (changes: Record<string, string | null>) => {
@@ -82,7 +79,7 @@ export function GenerationJobsPage() {
     create.mutate(
       {
         series_size: size,
-        publishing_strategy: strategy,
+        publishing_strategy: "standalone_series",
         ...(topic ? { topic_hint: topic } : {}),
       },
       {
@@ -134,13 +131,10 @@ export function GenerationJobsPage() {
                 Publishing strategy
                 <select
                   aria-label="Publishing strategy"
-                  value={strategy}
-                  onChange={(event) =>
-                    setStrategy(event.target.value as GenerationPublishingStrategy)
-                  }
+                  value="standalone_series"
+                  disabled
                 >
                   <option value="standalone_series">standalone_series</option>
-                  <option value="reply_thread">reply_thread</option>
                 </select>
               </label>
             </div>

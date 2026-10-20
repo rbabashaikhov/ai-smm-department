@@ -264,7 +264,8 @@ export const GENERATION_JOB_STATUSES: readonly GenerationJobStatus[] = [
   "cancelled",
 ];
 
-export type GenerationPublishingStrategy = "standalone_series" | "reply_thread";
+/** Supported strategies for new jobs; stored job params remain arbitrary JSON. */
+export type GenerationPublishingStrategy = "standalone_series";
 
 export interface GenerationJobCreate {
   series_size: number;

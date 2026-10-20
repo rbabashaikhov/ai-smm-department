@@ -6,11 +6,18 @@ Mirrors tests/test_api_content.py's conventions. The guard-level proof
 tests/test_db_guards_generation.py; this module is routes and RBAC only,
 run with mutations enabled (the conftest.py default).
 """
+
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 import pytest
 
-from ai_smm.db.models import GenerationJobStatus, MembershipRole
+from ai_smm.application.generation import (
+    InvalidGenerationParams,
+    create_generation_job,
+)
+from ai_smm.db.models import ContentGenerationJob, GenerationJobStatus, MembershipRole
 
 
 def _create(client, project: str, csrf: str, **overrides):
@@ -31,7 +38,14 @@ def _cancel(client, job_id, csrf: str):
 def test_an_owner_can_queue_a_job(client, login, member, project: str) -> None:
     csrf = login(member(MembershipRole.OWNER))
 
-    response = _create(client, project, csrf, series_size=2, topic_hint="рецепты")
+    response = _create(
+        client,
+        project,
+        csrf,
+        series_size=2,
+        topic_hint="рецепты",
+        publishing_strategy="standalone_series",
+    )
 
     assert response.status_code == 202, response.text
     body = response.json()
@@ -39,18 +53,23 @@ def test_an_owner_can_queue_a_job(client, login, member, project: str) -> None:
     assert body["status"] == "queued"
     assert body["params"]["series_size"] == 2
     assert body["params"]["topic_hint"] == "рецепты"
+    assert body["params"]["publishing_strategy"] == "standalone_series"
     assert body["attempt_count"] == 0
     assert body["max_attempts"] == 2
     assert body["finished_at"] is None
 
 
-def test_defaults_need_no_body(client, login, member, project: str) -> None:
+@pytest.mark.parametrize("params", [{}, {"publishing_strategy": None}])
+def test_defaults_use_standalone_series(
+    client, login, member, project: str, params: dict
+) -> None:
     csrf = login(member(MembershipRole.OWNER))
 
-    response = _create(client, project, csrf)
+    response = _create(client, project, csrf, **params)
 
     assert response.status_code == 202, response.text
     assert response.json()["params"]["series_size"] == 3
+    assert response.json()["params"]["publishing_strategy"] == "standalone_series"
 
 
 @pytest.mark.parametrize("series_size", [0, 6])
@@ -64,14 +83,65 @@ def test_series_size_out_of_range_is_refused(
     assert response.status_code == 422
 
 
-def test_an_unknown_publishing_strategy_is_refused(
-    client, login, member, project: str
+@pytest.mark.parametrize("strategy", ["reply_thread", "nonsense"])
+def test_an_unsupported_publishing_strategy_is_refused(
+    client, login, member, project: str, strategy: str
 ) -> None:
     csrf = login(member(MembershipRole.OWNER))
 
-    response = _create(client, project, csrf, publishing_strategy="nonsense")
+    response = _create(client, project, csrf, publishing_strategy=strategy)
 
     assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "VALIDATION_ERROR"
+    assert error["message"] == (
+        "Only standalone_series is supported for new generation jobs."
+    )
+    listing = client.get(f"/api/v1/projects/{project}/generation-jobs")
+    assert listing.json()["total"] == 0
+
+
+def test_application_rejects_reply_thread_before_database_access() -> None:
+    # Invalid creation must be refused even when bypassing the HTTP schema.
+    with pytest.raises(InvalidGenerationParams, match="Only standalone_series"):
+        create_generation_job(
+            None,
+            project_id="test-project",
+            requested_by_user=None,
+            mutations_enabled=True,
+            publishing_strategy="reply_thread",
+        )
+
+
+def test_existing_reply_thread_job_remains_readable(
+    client, login, member, project: str, session
+) -> None:
+    import uuid
+
+    owner = member(MembershipRole.OWNER)
+    legacy_params = {"series_size": 2, "publishing_strategy": "reply_thread"}
+    legacy_result = {"metadata": {"publishing_strategy": "reply_thread"}}
+    job = ContentGenerationJob(
+        id=uuid.uuid4(),
+        project_id=project,
+        requested_by_user_id=owner.id,
+        status=GenerationJobStatus.SUCCEEDED,
+        finished_at=datetime.now(timezone.utc),
+        params=legacy_params,
+        result=legacy_result,
+    )
+    session.add(job)
+    session.commit()
+    login(owner)
+
+    response = client.get(f"/api/v1/generation-jobs/{job.id}")
+    assert response.status_code == 200
+    assert response.json()["params"] == legacy_params
+    assert response.json()["result"] == legacy_result
+    listing = client.get(f"/api/v1/projects/{project}/generation-jobs")
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["params"] == legacy_params
+    assert listing.json()["items"][0]["result"] == legacy_result
 
 
 # -- RBAC ---------------------------------------------------------------
@@ -90,9 +160,7 @@ def test_members_below_owner_cannot_queue_a_job(
     assert response.status_code == 403
 
 
-def test_every_member_can_read(
-    client, login, member, project: str
-) -> None:
+def test_every_member_can_read(client, login, member, project: str) -> None:
     owner_csrf = login(member(MembershipRole.OWNER))
     job_id = _create(client, project, owner_csrf).json()["id"]
 

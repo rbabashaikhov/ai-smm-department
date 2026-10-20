@@ -71,7 +71,7 @@ describe("generation endpoints", () => {
     const api = createEndpoints(client);
     const body = {
       series_size: 2,
-      publishing_strategy: "reply_thread" as const,
+      publishing_strategy: "standalone_series" as const,
       topic_hint: "launch",
     };
 
