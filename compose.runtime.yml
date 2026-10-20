@@ -12,7 +12,11 @@
 #
 # Deliberately absent:
 #   * the worker  -- the execution plane is not part of this runtime; no
-#                    service here can claim or publish a publication;
+#                    service here can claim or publish a publication.
+#                    The generation worker (smm-generation) is opt-in,
+#                    behind the "generation" profile: it turns generation
+#                    jobs into drafts only, as the EXECUTE-only role
+#                    ai_smm_generation (docs/runtime-packaging.md §8);
 #   * env_file    -- no .env, no ai-smm.env, no production credential is
 #                    ever read; every variable is spelled out below;
 #   * API / DB host ports -- only the web origin is published, and only on
@@ -201,6 +205,62 @@ services:
         condition: service_healthy
     restart: "no"
     mem_limit: 256m
+    pids_limit: 64
+
+  # Generation worker: Agent -> Draft, never started by a plain `up`.
+  #   deploy/local-runtime/generation-role.sh          # once per database
+  #   docker compose -f compose.runtime.yml --profile generation up -d smm-generation
+  #
+  # Its own environment, not *app-env: the EXECUTE-only ai_smm_generation
+  # login instead of the database owner, and no Threads, storage,
+  # credential-key or Langfuse variable at all. No OpenAI key either and
+  # no route out (backend is internal): at this stage a job reaching the
+  # real agent graph fails within its retry limit and calls no external
+  # API. container_name makes `--scale` impossible: one worker, and the
+  # worker itself runs one job at a time.
+  smm-generation:
+    <<: *app-hardening
+    image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
+    pull_policy: never
+    container_name: ai-smm-runtime-local-generation
+    profiles:
+      - generation
+    entrypoint: ["/app/.venv/bin/ai-smm-generation-worker"]
+    environment:
+      TZ: UTC
+      # Fixed, public, local-only password set by generation-role.sh; it
+      # protects nothing and is not a secret.
+      AI_SMM_DATABASE_URL: postgresql+psycopg://ai_smm_generation:local-generation-not-a-secret@postgres:5432/ai_smm_runtime_local
+      AI_SMM_DRY_RUN: "true"
+      AI_SMM_KNOWLEDGE_ROOT: /srv/ai-smm/knowledge
+      AI_SMM_GENERATION_WORKER_ID: local-generation-1
+      AI_SMM_GENERATION_POLL_INTERVAL_SECONDS: "15"
+      AI_SMM_GENERATION_LEASE_SECONDS: "600"
+      AI_SMM_GENERATION_MAX_REVISIONS: "3"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      OPENAI_API_KEY: ""
+    volumes:
+      - ./knowledge:/srv/ai-smm/knowledge:ro
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/ai-smm-generation-worker", "--check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      # A missing heartbeat is unhealthy; run() writes the first one right
+      # after its readiness check, well inside this grace period.
+      start_period: 30s
+    restart: "no"
+    # Room to finish the job in flight; a kill is safe anyway (nothing is
+    # written before the final commit, the lease returns the job).
+    stop_grace_period: 120s
+    mem_limit: 512m
+    cpus: 1.0
     pids_limit: 64
 
 networks:
