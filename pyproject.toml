@@ -31,6 +31,7 @@ dependencies = [
 [project.scripts]
 ai-smm = "ai_smm.cli:main"
 ai-smm-worker = "ai_smm.worker:main"
+ai-smm-generation-worker = "ai_smm.generation_worker:main"
 ai-smm-healthcheck = "ai_smm.healthcheck:main"
 
 [build-system]

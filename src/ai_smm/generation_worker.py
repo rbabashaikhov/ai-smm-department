@@ -27,22 +27,24 @@ needs_review) because nothing external or irreversible has happened.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import signal
 import threading
 import uuid
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from langchain_core.callbacks import get_usage_metadata_callback
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
-from ai_smm.application.content import content_hash
+from ai_smm.application.content_hashing import content_hash
 from ai_smm.config import Settings, get_settings
 from ai_smm.db.models import ContentGenerationJob, GenerationJobStatus
 from ai_smm.db.session import is_transient_db_error, session_scope, with_db_retry
@@ -59,6 +61,47 @@ from ai_smm.logging_setup import get_logger, setup_logging
 logger = get_logger(__name__)
 
 HEARTBEAT_PATH = Path("/tmp/ai-smm-generation-worker-heartbeat")
+
+#: The only database objects this worker may use: the three SECURITY
+#: DEFINER contracts that deploy/control-center/db/ai_smm_generation.*.sql
+#: grant, and verify, to the dedicated ai_smm_generation role.
+GENERATION_CONTRACTS = (
+    "public.generation_claim(text,integer)",
+    "public.generation_complete(uuid,text,uuid,jsonb,jsonb)",
+    "public.generation_fail(uuid,text,text,boolean,text,integer,integer)",
+)
+
+# Effective privileges of current_user, read from the catalogs: it needs no
+# table access of its own, so the least-privileged role can run it.
+_READINESS_SQL = text(
+    """
+SELECT pg_catalog.current_setting('is_superuser') = 'on' AS is_superuser,
+       ARRAY(
+           SELECT f FROM pg_catalog.unnest(CAST(:contracts AS text[])) AS f
+            WHERE pg_catalog.to_regprocedure(f) IS NULL
+               OR NOT pg_catalog.has_function_privilege(
+                      pg_catalog.to_regprocedure(f), 'EXECUTE')
+       ) AS unusable_contracts,
+       ARRAY(
+           SELECT c.relname::text FROM pg_catalog.pg_class AS c
+            WHERE c.relnamespace = 'public'::regnamespace
+              AND c.relkind IN ('r', 'p', 'v', 'm')
+              AND pg_catalog.has_table_privilege(
+                      c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
+            ORDER BY c.relname
+       ) AS accessible_tables,
+       ARRAY(
+           SELECT c.relname::text FROM pg_catalog.pg_class AS c
+            WHERE c.relnamespace = 'public'::regnamespace
+              AND c.relkind IN ('r', 'p', 'v', 'm')
+              AND pg_catalog.has_any_column_privilege(
+                      c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')
+              AND NOT pg_catalog.has_table_privilege(
+                      c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
+            ORDER BY c.relname
+       ) AS column_access_tables
+"""
+)
 
 #: One versioned, documented shape for every content_revisions.metadata
 #: this worker writes (SMM-026A/2.1 #5). "editor_verdict.approved" is the
@@ -127,9 +170,11 @@ def _build_graph():
     # a generation worker that is merely being health-checked (or a test
     # that monkeypatches the agent modules before this import) never pays
     # for that, and a missing OPENAI_API_KEY never breaks the health route.
-    from ai_smm.graph import build_graph
+    # The generation-only graph ends after the Editor and never imports the
+    # Publisher (ai_smm.graph does).
+    from ai_smm.generation_graph import build_generation_graph
 
-    return build_graph()
+    return build_generation_graph()
 
 
 def _load_knowledge(project_id: str) -> dict[str, Any]:
@@ -190,6 +235,11 @@ class GenerationWorker:
                 }
             },
         )
+
+        # Liveness starts now: the first cycle (which may hold one job for
+        # up to its lease) is then covered by the same staleness allowance
+        # as every later one.
+        self._touch_heartbeat()
 
         scheduler = BackgroundScheduler(timezone="UTC")
         scheduler.add_job(
@@ -612,10 +662,144 @@ class GenerationWorker:
             )
 
 
-def main() -> int:
+def check_readiness(session: Session) -> list[str]:
+    """Why this connection must not serve a generation worker; [] if it may.
+
+    Ready means: the database answers, the three contracts exist and are
+    executable, and the role is the least-privileged one -- no superuser
+    and no table access at all, so in particular it cannot read social
+    account credentials, write a content approval or touch a publication.
+    A worker started with the owner's or the API's credentials therefore
+    refuses to start instead of running with capabilities it never needs.
+    """
+
+    row = session.execute(
+        _READINESS_SQL, {"contracts": list(GENERATION_CONTRACTS)}
+    ).one()
+
+    problems: list[str] = []
+
+    if row.is_superuser:
+        problems.append("database role is a superuser")
+
+    if row.unusable_contracts:
+        problems.append(
+            "contracts missing or not executable: "
+            + ", ".join(row.unusable_contracts)
+        )
+
+    if row.accessible_tables:
+        problems.append(
+            "database role has table access: " + ", ".join(row.accessible_tables)
+        )
+
+    # A column grant (GRANT SELECT (col) ON t) is invisible to
+    # has_table_privilege; reported only for tables not already listed above.
+    if row.column_access_tables:
+        problems.append(
+            "database role has column access: "
+            + ", ".join(row.column_access_tables)
+        )
+
+    return problems
+
+
+def check_heartbeat(
+    settings: Settings,
+    *,
+    heartbeat_path: Path | None = None,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Liveness: (healthy, one-line reason).
+
+    The heartbeat is written when run() starts and after every cycle, and
+    a missing one is unhealthy. One cycle can hold the
+    worker for as long as its lease while a job runs; only a worker silent
+    for longer than that plus a few poll intervals is wedged.
+    """
+
+    path = heartbeat_path or HEARTBEAT_PATH
+
+    if not path.is_file():
+        # run() writes one before its first cycle, so a missing heartbeat
+        # means the worker never got that far. Compose's start_period
+        # covers the few seconds before run().
+        return False, "unhealthy: no heartbeat"
+
+    try:
+        beat = datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError) as exc:
+        return False, f"unhealthy: unreadable heartbeat: {type(exc).__name__}"
+
+    if beat.tzinfo is None:
+        beat = beat.replace(tzinfo=timezone.utc)
+
+    age = ((now or utcnow()) - beat).total_seconds()
+    allowed = (
+        settings.generation_lease_seconds
+        + settings.generation_poll_interval_seconds * settings.health_stale_factor
+    )
+
+    if age > allowed:
+        return False, f"unhealthy: last cycle {int(age)}s ago, allowed {allowed}s"
+
+    return True, f"healthy: last cycle {int(age)}s ago"
+
+
+def _readiness(settings: Settings) -> list[str]:
+    try:
+        with session_scope(settings) as session:
+            return check_readiness(session)
+    except Exception as exc:
+        # The type only: a driver message may carry the connection target.
+        return [f"database check failed: {type(exc).__name__}"]
+
+
+def run_check(settings: Settings) -> int:
+    """Container healthcheck (--check): readiness, then liveness."""
+
+    problems = _readiness(settings)
+
+    if problems:
+        print("unhealthy: " + "; ".join(problems))
+
+        return 1
+
+    healthy, reason = check_heartbeat(settings)
+    print(reason)
+
+    return 0 if healthy else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="ai-smm-generation-worker",
+        description="Turn queued generation jobs into draft content items.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="readiness and liveness probe for a running worker; exit 0 if healthy",
+    )
+    args = parser.parse_args(argv)
+
     load_local_dotenv()
     settings = get_settings()
+
+    if args.check:
+        return run_check(settings)
+
     setup_logging(settings)
+
+    problems = _readiness(settings)
+
+    if problems:
+        logger.error(
+            "Generation worker refuses to start",
+            extra={"context": {"problems": problems}},
+        )
+
+        return 2
 
     GenerationWorker(settings=settings).run()
 

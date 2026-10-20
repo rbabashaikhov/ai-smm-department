@@ -11,6 +11,7 @@ a running stack.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,16 @@ def _nginx_locations(conf: str) -> dict[str, str]:
 
 
 def test_compose_has_no_worker(services: dict[str, Any]) -> None:
-    assert set(services) == {"postgres", "smm-api", "smm-web", "migrate", "cli"}
+    """No publish worker; the generation worker is the one opt-in extra."""
+
+    assert set(services) == {
+        "postgres",
+        "smm-api",
+        "smm-web",
+        "migrate",
+        "cli",
+        "smm-generation",
+    }
 
     for name, service in services.items():
         rendered = yaml.safe_dump(service)
@@ -195,7 +205,7 @@ def test_api_and_database_have_no_egress(compose: dict[str, Any]) -> None:
 
     assert compose["networks"]["backend"]["internal"] is True
 
-    for name in ("postgres", "smm-api", "migrate", "cli"):
+    for name in ("postgres", "smm-api", "migrate", "cli", "smm-generation"):
         assert services[name]["networks"] == ["backend"], name
 
     assert sorted(services["smm-web"]["networks"]) == ["backend", "edge"]
@@ -230,12 +240,111 @@ def test_startup_dependencies_are_acyclic(services: dict[str, Any]) -> None:
 
 
 def test_app_containers_are_hardened(services: dict[str, Any]) -> None:
-    for name in (*PYTHON_SERVICES, "smm-web"):
+    for name in (*PYTHON_SERVICES, "smm-web", "smm-generation"):
         service = services[name]
 
         assert service["read_only"] is True, name
         assert service["cap_drop"] == ["ALL"], name
         assert "no-new-privileges:true" in service["security_opt"], name
+
+
+# -- generation worker (SMM-033B) ----------------------------------------
+
+
+def test_generation_worker_is_opt_in_only(services: dict[str, Any]) -> None:
+    generation = services["smm-generation"]
+
+    assert generation["profiles"] == ["generation"]
+    assert generation["restart"] == "no"
+    assert "ports" not in generation
+
+
+def test_generation_worker_runs_its_own_entry_point_from_the_api_image(
+    services: dict[str, Any],
+) -> None:
+    generation = services["smm-generation"]
+
+    assert generation["entrypoint"] == ["/app/.venv/bin/ai-smm-generation-worker"]
+    assert "command" not in generation
+    assert "build" not in generation
+    assert generation["image"] == services["smm-api"]["image"]
+    assert generation["pull_policy"] == "never"
+    assert generation["healthcheck"]["test"] == [
+        "CMD",
+        "/app/.venv/bin/ai-smm-generation-worker",
+        "--check",
+    ]
+    # A missing heartbeat is unhealthy; start_period is the grace before
+    # run() writes the first one.
+    assert generation["healthcheck"]["start_period"] == "30s"
+
+
+def test_generation_entry_point_is_packaged() -> None:
+    scripts = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]["scripts"]
+
+    assert scripts["ai-smm-generation-worker"] == "ai_smm.generation_worker:main"
+    assert scripts["ai-smm-worker"] == "ai_smm.worker:main"
+
+
+def test_generation_worker_has_its_own_least_privileged_login(
+    services: dict[str, Any],
+) -> None:
+    env = services["smm-generation"]["environment"]
+    url = env["AI_SMM_DATABASE_URL"]
+
+    assert all("${" not in str(value) for value in env.values())
+    assert url.startswith("postgresql+psycopg://ai_smm_generation:")
+    assert url.endswith("@postgres:5432/ai_smm_runtime_local")
+    assert url != services["smm-api"]["environment"]["AI_SMM_DATABASE_URL"]
+
+
+def test_generation_worker_holds_no_publishing_storage_or_llm_credentials(
+    services: dict[str, Any],
+) -> None:
+    env = services["smm-generation"]["environment"]
+
+    assert env["OPENAI_API_KEY"] == ""
+    assert env["AI_SMM_DRY_RUN"] == "true"
+
+    for name in env:
+        assert not name.startswith(
+            ("THREADS_", "STORAGE_", "LANGFUSE_", "AI_SMM_CREDENTIALS_")
+        ), name
+
+
+def test_generation_worker_mounts_only_the_knowledge_base_read_only(
+    services: dict[str, Any],
+) -> None:
+    generation = services["smm-generation"]
+
+    assert generation["volumes"] == ["./knowledge:/srv/ai-smm/knowledge:ro"]
+    assert generation["environment"]["AI_SMM_KNOWLEDGE_ROOT"] == (
+        "/srv/ai-smm/knowledge"
+    )
+    assert generation["tmpfs"] == ["/tmp:size=64m,mode=1777"]
+
+
+def test_generation_worker_is_bounded_and_single(services: dict[str, Any]) -> None:
+    generation = services["smm-generation"]
+    env = generation["environment"]
+
+    # container_name makes `docker compose up --scale` refuse a second one.
+    assert generation["container_name"] == "ai-smm-runtime-local-generation"
+    assert "deploy" not in generation and "scale" not in generation
+    assert generation["mem_limit"] == "512m"
+    assert float(generation["cpus"]) == 1.0
+    assert generation["pids_limit"] == 64
+    assert int(env["AI_SMM_GENERATION_LEASE_SECONDS"]) <= 3600
+    assert int(env["AI_SMM_GENERATION_MAX_REVISIONS"]) == 3
+    assert generation["depends_on"] == {"postgres": {"condition": "service_healthy"}}
+
+
+def test_production_compose_has_no_generation_worker() -> None:
+    production = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+
+    assert "generation" not in production
 
 
 # -- API image -----------------------------------------------------------
@@ -364,7 +473,15 @@ def test_no_directory_listing_and_no_version_banner() -> None:
 
 
 @pytest.mark.parametrize(
-    "path", [COMPOSE_PATH, NGINX_CONF, NGINX_PROXY, WEB_DOCKERFILE]
+    "path",
+    [
+        COMPOSE_PATH,
+        NGINX_CONF,
+        NGINX_PROXY,
+        WEB_DOCKERFILE,
+        ROOT / "deploy" / "local-runtime" / "generation-role.sh",
+        ROOT / "deploy" / "local-runtime" / "generation-owner.sql",
+    ],
 )
 def test_packaging_files_hold_no_secret_looking_values(path: Path) -> None:
     text = path.read_text(encoding="utf-8")

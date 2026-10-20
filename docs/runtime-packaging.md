@@ -214,8 +214,9 @@ $C down -v     # discard it
 ## 6. Automated checks
 
 `tests/test_runtime_packaging.py` reads `compose.runtime.yml`, both
-Dockerfiles and the nginx config and pins the safety decisions: no worker
-service, no `env_file`, only a loopback port, a literal local database URL,
+Dockerfiles and the nginx config and pins the safety decisions: no publish
+worker service (the generation worker only behind its profile, §8), no
+`env_file`, only a loopback port, a literal local database URL,
 `AI_SMM_DRY_RUN=true`, tools behind a profile, no egress for API and
 database, an acyclic startup order, the worker still the default build
 target, the API target running uvicorn only, a Node-free web image, API
@@ -263,3 +264,78 @@ there is not yet a source the API can verify. The dashboard shows
 
 The switch belongs to the API alone: the worker never reads it, so turning
 it on or off neither stops nor starts publishing.
+
+## 8. Generation worker (opt-in, SMM-033B)
+
+`smm-generation` runs `ai-smm-generation-worker`
+(`ai_smm.generation_worker:main`) from the API image: it claims queued
+generation jobs, runs the agent graph and writes **draft** content items
+with their revision. It never approves, materialises or publishes, and
+it is not the publish worker — this runtime still has none.
+
+A plain `$C up` does not start it; it sits behind the `generation`
+profile, and `restart: "no"` keeps it from coming back after a Docker
+restart. One container only (`container_name` refuses `--scale`), and the
+worker runs one job at a time.
+
+```bash
+# once per database, after `migrate upgrade head`
+deploy/local-runtime/generation-role.sh
+
+$C --profile generation up -d --wait smm-generation
+$C exec smm-generation ai-smm-generation-worker --check
+$C logs -f smm-generation
+$C --profile generation stop smm-generation
+```
+
+`generation-role.sh` provisions `ai_smm_generation` with the operator's own
+`deploy/control-center/db/ai_smm_generation.grants.sql` and runs
+`.verify.sql` (any `FAIL` line aborts). Before that,
+`deploy/local-runtime/generation-owner.sql` gives the local schema the
+production shape: the local bootstrap user is a superuser, and `grants.sql`
+refuses superuser-owned contracts, so the public tables, sequences and the
+three generation contracts move to a non-superuser `NOLOGIN` owner
+`ai_smm_local_owner`. That file refuses any database except
+`ai_smm_runtime_local`. Re-run the script after a migration that adds a
+table. The role's local password is a fixed public value in
+`compose.runtime.yml`; it is not a secret.
+
+What the service has, and does not have:
+
+- **Database**: only the EXECUTE-only `ai_smm_generation` login — the
+  three contracts, no table, sequence or credential access, no approvals,
+  no publications. `--check` and startup verify this from the catalogs:
+  connected as a superuser or as any role with table access, the worker
+  refuses to start (exit 2) and the healthcheck fails.
+- **Filesystem**: read-only root, `/tmp` tmpfs (heartbeat), the knowledge
+  base mounted read-only at `/srv/ai-smm/knowledge`. A job can only
+  generate for a project that has `knowledge/projects/<project_id>/`;
+  otherwise it fails terminally with `knowledge unavailable`.
+- **No credentials**: no Threads, storage, credential-key or Langfuse
+  variables, `OPENAI_API_KEY=""`, and only the internal `backend` network.
+  **At this stage a job that reaches the real agent graph fails** (no key,
+  no route out) within its own `max_attempts` and calls no external API.
+  Enabling real generation needs a separate decision: an OpenAI key from a
+  secret source and a network with egress.
+- **Limits**: 512 MiB, one CPU, 64 pids; lease 600 s (the contract caps
+  any lease at 3600 s); the retry ceiling is the job's own
+  `max_attempts`; the graph's revision loop is capped by
+  `AI_SMM_GENERATION_MAX_REVISIONS=3`.
+- **Health**: `ai-smm-generation-worker --check` — readiness (database,
+  contracts, least privilege) and liveness (the heartbeat may be at most
+  one lease plus `AI_SMM_HEALTH_STALE_FACTOR` poll intervals old, since a
+  running job holds the cycle). Its output never contains the database
+  URL.
+
+Stopping is safe at any point: SIGTERM lets the current job finish
+(`stop_grace_period: 120s`); a kill leaves nothing, because the drafts and
+the job's outcome are committed in one transaction at the very end, and
+the expired lease returns the job to the queue (or fails it after its
+final attempt).
+
+Checks: `tests/test_runtime_packaging.py` pins the service definition;
+`tests/test_generation_local_activation.py` runs the packaged path as
+`ai_smm_generation` with a fake agent graph and every outbound socket
+refused (queued → claimed → succeeded → draft + revision, the editor
+verdict, real knowledge loading, retry exhaustion, stop and restart, the
+readiness probe).
