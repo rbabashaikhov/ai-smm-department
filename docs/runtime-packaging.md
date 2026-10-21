@@ -162,8 +162,10 @@ configuration anywhere.
 
 The database here is **local and disposable**: compose project
 `ai-smm-runtime-local`, database `ai_smm_runtime_local`, user
-`ai_smm_local`, volume `ai-smm-runtime-local-pgdata` (labelled
-`ai-smm.disposable=true`). Its password is a fixed public value and is not
+`ai_smm_local`, volume `<project>_pgdata` (labelled
+`ai-smm.disposable=true`). Networks and the volume have no fixed `name:`:
+compose names them from the project, so a different `-p` /
+`COMPOSE_PROJECT_NAME` gives a different network and database volume. Its password is a fixed public value and is not
 a secret. It has no host port.
 
 ```bash
@@ -235,6 +237,20 @@ login/logout.
 $C down        # keep the local database
 $C down -v     # discard it
 ```
+
+Use a **unique project name for every disposable environment** (for example
+`export COMPOSE_PROJECT_NAME=ai-smm-rt-$USER-$(date +%s)` before `C=...`,
+and a free `SMM_RUNTIME_WEB_PORT`); the helper scripts in
+`deploy/local-runtime/` honour it. Safe teardown:
+
+- run `down -v` only with the exact project name you created, and first
+  check `docker compose -p <name> -f compose.runtime.yml ps` and
+  `docker volume ls --filter label=com.docker.compose.project=<name>`;
+- never `docker volume rm` / `docker network rm` a resource whose owning
+  project you cannot name, and never run any of this against the
+  production projects (`ai-smm`, `ai-smm-control-center`);
+- resources from before this change are named `ai-smm-runtime-local-*`;
+  they belong to the default project and are left alone.
 
 ## 6. Automated checks
 

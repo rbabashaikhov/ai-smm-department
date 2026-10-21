@@ -29,6 +29,8 @@ import type {
   GenerationJobCreate,
   GenerationJobFilters,
   GenerationJobList,
+  KnowledgeBase,
+  KnowledgeDocumentContent,
   Project,
   ProjectCreate,
   ProjectPatch,
@@ -95,6 +97,13 @@ export function createEndpoints(client: ApiClient) {
         client.get<Page<AuditEntry>>(`${V1}/projects/${enc(projectId)}/audit`, {
           query: { ...page, action },
       }),
+      /** Read-only: the documents the agents' loader reads. */
+      knowledge: (projectId: string) =>
+        client.get<KnowledgeBase>(`${V1}/projects/${enc(projectId)}/knowledge`),
+      knowledgeDocument: (projectId: string, name: string) =>
+        client.get<KnowledgeDocumentContent>(
+          `${V1}/projects/${enc(projectId)}/knowledge/${enc(name)}`,
+        ),
     },
 
     generation: {

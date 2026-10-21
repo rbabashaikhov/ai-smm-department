@@ -41,7 +41,8 @@
 #     owner role, the same URL as the worker);
 #   * migrations on start -- `migrate` is a one-shot operator command
 #     behind its own profile, with no default command;
-#   * Docker socket, bind mounts, volumes, public routes.
+#   * Docker socket, volumes, public routes, and every bind mount but
+#     one: smm-api reads the knowledge base READ-ONLY (SMM-034A), below.
 #
 # Read-only Control Center: the API refuses every business-state change
 # (403 MUTATIONS_DISABLED), for every role, owner included. Changing that
@@ -132,6 +133,24 @@ services:
       # only: no other service here handles tokens.
       AI_SMM_CREDENTIALS_PUBLIC_KEY: ${SMM_CC_CREDENTIALS_PUBLIC_KEY:?set SMM_CC_CREDENTIALS_PUBLIC_KEY to the credential public key (docs/credential-keys.md)}
       AI_SMM_LEGACY_THREADS_PROJECTS: ${SMM_CC_LEGACY_THREADS_PROJECTS?set SMM_CC_LEGACY_THREADS_PROJECTS to the worker's legacy allow-list, empty for none}
+      # SMM-034A: where the mount below is; the Knowledge Base page reads
+      # the same files the worker's agents load.
+      AI_SMM_KNOWLEDGE_ROOT: /srv/ai-smm/knowledge
+    # The knowledge base, READ-ONLY, smm-api only (SMM-034A). The same host
+    # directory and container path as the worker's mount (compose.yaml),
+    # spelled out as literals: no variable can point it elsewhere or make
+    # it writable. A missing directory fails `up` instead of being created.
+    # The API serves only the top-level documents of a project the caller
+    # is a member of; it never writes (there is no write route), and the
+    # mount stays read-only in mutation mode too. smm-auth, smm-web,
+    # migrate and cli mount nothing.
+    volumes:
+      - type: bind
+        source: /srv/ai-smm/knowledge
+        target: /srv/ai-smm/knowledge
+        read_only: true
+        bind:
+          create_host_path: false
     # cc-internal: reached by smm-web only. shared: the one path to the
     # existing PostgreSQL. No host port on either.
     networks:

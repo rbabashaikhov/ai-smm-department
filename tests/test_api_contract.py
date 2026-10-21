@@ -37,6 +37,9 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/projects",
             "/api/v1/projects/{project_id}",
             "/api/v1/projects/{project_id}/settings",
+            # SMM-034A: the knowledge documents, read-only.
+            "/api/v1/projects/{project_id}/knowledge",
+            "/api/v1/projects/{project_id}/knowledge/{document_name}",
             # SMM-022B: reading the existing publishing core, plus the
             # three commands that move a row inside the queue.
             "/api/v1/projects/{project_id}/publications",

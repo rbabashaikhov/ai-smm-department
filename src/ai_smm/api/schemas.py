@@ -227,6 +227,32 @@ class ProjectSettingsOut(BaseModel):
     updated_at: datetime | None
 
 
+class KnowledgeDocumentOut(BaseModel):
+    name: str
+    kind: Literal["markdown", "text", "yaml"]
+    size_bytes: int
+    updated_at: datetime
+
+
+class KnowledgeOut(BaseModel):
+    """The project's knowledge documents, as the agents' loader sees them.
+
+    `available` is false when this deployment has no knowledge directory
+    for the project (the Control Center may run without the mount).
+    `writable` is always false: there is no write path yet (SMM-034A).
+    """
+
+    project_id: str
+    available: bool
+    writable: bool
+    documents: list[KnowledgeDocumentOut]
+
+
+class KnowledgeDocumentContentOut(KnowledgeDocumentOut):
+    sha256: str
+    content: str
+
+
 class ProjectSettingsPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

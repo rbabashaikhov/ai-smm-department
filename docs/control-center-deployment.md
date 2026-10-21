@@ -63,7 +63,7 @@ ai-smm-worker (project "ai-smm")                  untouched: not recreated,
 | Host directory | `/root/ai-smm-control-center/` — **never** `/root/ai-smm/` |
 | Services started by `up` | `smm-api`, `smm-web` |
 | One-shot tools | `migrate` (profile `cc-migrate`), `cli` (profile `cc-admin`, `ai-smm user` only); reachable only as the wrapper's `migrate` and `create-owner` verbs |
-| Not in this project | worker, scheduler, PostgreSQL, any volume or bind mount |
+| Not in this project | worker, scheduler, PostgreSQL, any volume; any bind mount except the knowledge base, read-only, on `smm-api` (§2.3) |
 | Images | `ai-smm-api:<full commit>`, `ai-smm-web:<full commit>`, built locally, loaded with `docker load`; never built or pulled on the host (`pull_policy: never`); revision label checked for equality |
 | Docker daemon | pinned in `control-center.target` (socket + engine id) and checked before every command |
 | Deployment gates | PostgreSQL identity (against `control-center.identity`), publication queue (against `control-center.window`) and backup evidence (a verified, off-host-confirmed dump of this database at this revision), fail-closed, run **inside** `cc-db-backup.sh dump`/`verify` and `cc-compose.sh up`/`restart`/`migrate upgrade`/`downgrade`/`create-owner`, and on their own as `cc-compose.sh preflight` (§2.1) |
@@ -91,7 +91,8 @@ that exposes.
 Non-root (`10001`, nginx `101`), `read_only: true` with a `tmpfs` `/tmp`,
 `cap_drop: ALL`, `no-new-privileges`, `pids_limit`, `mem_limit` =
 `memswap_limit`, `cpus`, `json-file` logs rotated at 10 MB × 3, no Docker
-socket, no volumes. Sizing (host: 2 vCPU, ≈ 2.5 GiB free, worker 384 MB):
+socket, no volumes, and no bind mount except `smm-api`'s read-only
+knowledge base (§2.3). Sizing (host: 2 vCPU, ≈ 2.5 GiB free, worker 384 MB):
 
 | Service | Memory | CPU | PIDs |
 |---|---|---|---|
@@ -431,6 +432,69 @@ and `ai_smm_cc_rw.verify.sql` (both pinned in `cc-gate.sh`), and writes
 disable`. While the mode is on, every verb adds the override and the API
 role gate checks `ai_smm_cc_rw`. Design, matrix, residual risks and the
 checklist before the switch: [mutation-role.md](mutation-role.md).
+
+### 2.3 Knowledge base mount (SMM-034A)
+
+The Knowledge Base page shows a project's documents as the agents read
+them. `smm-api` — and no other service of this project — bind-mounts the
+host directory the worker already reads, **read-only**:
+
+| | |
+|---|---|
+| Host path | `/srv/ai-smm/knowledge` — a literal, the same directory as the worker's mount (`compose.yaml`, `AI_SMM_KNOWLEDGE_HOST_PATH`, observed as that path on 2026-10-21) |
+| Container path | `/srv/ai-smm/knowledge`, `AI_SMM_KNOWLEDGE_ROOT` (literal) |
+| Mode | `read_only: true` in the base file; the mutation override does not touch volumes, so it stays read-only in mutation mode |
+| Missing directory | `create_host_path: false`: `up` fails instead of creating an empty directory as root |
+| What the API serves | top-level `.md`/`.txt`/`.yaml`/`.yml` of `projects/<id>/` of a project the caller is a member of; never `editorial_policy.md`, sub-directories or symlinks ([api.md](api.md#knowledge-base-read-only)) |
+| Writes | none: no write route, a read-only mount, and the files are not the API's (uid `1000`, the API runs as `10001`) |
+
+**Permissions — no host change.** The containers run as uid `10001`,
+which is neither the owner (`1000`) nor in its group, so it reads through
+the *other* bits. Inside the container only the mounted tree matters, not
+`/srv` on the host. Observed read-only on 2026-10-21: `knowledge/`,
+`projects/` and `projects/ai-catalog-consultant/` are `775`, every
+top-level document `644` — readable by `10001`. The worker reads the same
+tree as `10001` today. Do **not** `chown` or `chmod` anything for this
+release. Before `up`, check (read-only) that it is still so:
+
+```bash
+stat -c '%a %u:%g %n' /srv/ai-smm/knowledge /srv/ai-smm/knowledge/projects \
+    /srv/ai-smm/knowledge/projects/* | tee "$EV/kb-perms.txt"
+# Must print nothing: a directory others cannot enter, or a top-level
+# document others cannot read. Anything printed: the page would show
+# that project as unavailable or 404 the document -- stop and report;
+# the fix is an owner decision, not part of this release.
+find /srv/ai-smm/knowledge/projects -mindepth 1 -maxdepth 2 \
+    \( -type d ! -perm -o=rx -o -type f ! -perm -o=r \) -print
+```
+
+**After `up`** (read-only):
+
+```bash
+# Exactly one mount on smm-api, rw=false; none on smm-auth, smm-web.
+for s in smm-api smm-auth smm-web; do
+  docker inspect "$(./cc-compose.sh ps -q $s)" --format \
+    "$s {{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}} rw={{.RW}} {{end}}"
+done | tee "$EV/kb-mounts.txt"
+# The API sees what the agents' loader reads (runs as 10001, reads only).
+docker exec "$(./cc-compose.sh ps -q smm-api)" python -c '
+from pathlib import Path
+from ai_smm.knowledge.documents import list_documents
+from ai_smm.knowledge.loader import load_project_knowledge
+p = "ai-catalog-consultant"
+api = sorted(d.name for d in list_documents(Path("/srv/ai-smm/knowledge"), p))
+assert api == sorted(load_project_knowledge(p)["files"]), api
+print("KB OK", len(api), api)' | tee "$EV/kb-api.txt"
+```
+
+Expected: `smm-api bind /srv/ai-smm/knowledge -> /srv/ai-smm/knowledge
+rw=false`, nothing else, and `KB OK`. Then, in the browser, the project's
+*Knowledge Base* lists the documents and opens one; it offers no edit
+control.
+
+**Rollback** is the previous release's compose file and images, as for
+any release ([control-center-rollback.md](control-center-rollback.md)):
+that file has no mount, and nothing on the host was changed.
 
 ---
 

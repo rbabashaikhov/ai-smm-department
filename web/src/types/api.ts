@@ -247,6 +247,31 @@ export interface ProjectSettings {
   updated_at: string | null;
 }
 
+// -- knowledge base (SMM-034A, read-only) ------------------------------
+
+export type KnowledgeDocumentKind = "markdown" | "text" | "yaml";
+
+export interface KnowledgeDocument {
+  name: string;
+  kind: KnowledgeDocumentKind;
+  size_bytes: number;
+  updated_at: string;
+}
+
+export interface KnowledgeBase {
+  project_id: string;
+  /** False when this deployment has no knowledge directory for the project. */
+  available: boolean;
+  /** Always false: there is no write path yet. */
+  writable: boolean;
+  documents: KnowledgeDocument[];
+}
+
+export interface KnowledgeDocumentContent extends KnowledgeDocument {
+  sha256: string;
+  content: string;
+}
+
 // -- generation --------------------------------------------------------
 
 export type GenerationJobStatus =

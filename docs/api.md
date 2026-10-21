@@ -257,6 +257,8 @@ subdomain.
 | `GET` | `/api/v1/projects/{id}` | viewer+ |
 | `GET` | `/api/v1/projects/{id}/settings` | viewer+ |
 | `PATCH` | `/api/v1/projects/{id}/settings` | **owner**, CSRF, `expected_version` |
+| `GET` | `/api/v1/projects/{id}/knowledge` | viewer+; the project's knowledge documents, read-only (SMM-034A) |
+| `GET` | `/api/v1/projects/{id}/knowledge/{name}` | viewer+; one document with its text and SHA-256 |
 | `GET` | `/api/v1/projects/{id}/publications` | viewer+, filtered, paginated |
 | `GET` | `/api/v1/projects/{id}/series` | viewer+, paginated |
 | `GET` | `/api/v1/projects/{id}/operations/summary` | viewer+ |
@@ -477,6 +479,19 @@ silently overwrite each other; the second gets 409:
 A section that is not supplied is left untouched. A section that **is**
 supplied is replaced whole: merging two JSON documents whose shape the
 backend does not yet own would make it impossible to delete a key.
+
+### Knowledge base (read-only)
+
+The documents are exactly the files the agents' loader reads: the `.md`,
+`.txt`, `.yaml` and `.yml` files directly inside
+`knowledge/projects/<project_id>/` (under `AI_SMM_KNOWLEDGE_ROOT`). Not
+sub-directories, not the shared `editorial_policy.md`, not another
+project's files. A name is one path segment; symlinks are never followed;
+anything else is `404`. A document over 256 KiB is `422`. When the
+deployment has no knowledge directory for the project the list answers
+`200` with `available: false`. There is no write route (`writable` is
+always `false`) — see
+[SMM-034A](architecture/smm-034a-project-knowledge-base.md).
 
 ---
 
