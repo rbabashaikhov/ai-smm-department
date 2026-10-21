@@ -13,7 +13,11 @@ from ai_smm.agents.continuity import (
     check_series_continuity,
     remove_safe_sequel_teaser_from_draft,
 )
-from ai_smm.agents.pilot import PILOT_PROJECT_ID, resolve_publishing_strategy
+from ai_smm.agents.pilot import (
+    PILOT_PROJECT_ID,
+    expected_publication_count,
+    resolve_publishing_strategy,
+)
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
 
@@ -92,8 +96,14 @@ langfuse_handler = CallbackHandler()
 def validate_draft(
     draft: dict[str, Any],
     project_id: str,
+    expected_count: int | None = None,
 ) -> list[str]:
-    """Deterministic checks that the LLM cannot override."""
+    """Deterministic checks that the LLM cannot override.
+
+    expected_count is how many publications the Generation Job asked for.
+    Without it the pilot still needs its three and another project has no
+    count to enforce.
+    """
 
     issues: list[str] = []
     publications = draft.get("publications")
@@ -101,9 +111,13 @@ def validate_draft(
     if not isinstance(publications, list) or not publications:
         return ["Draft has no valid publications list."]
 
-    if project_id == PILOT_PROJECT_ID and len(publications) != 3:
+    required = expected_publication_count(project_id, expected_count)
+
+    if required is not None and len(publications) != required:
+        subject = "Pilot requires" if expected_count is None else "Draft requires"
+        noun = "publication" if required == 1 else "publications"
         issues.append(
-            "Pilot requires exactly 3 publications; "
+            f"{subject} exactly {required} {noun}; "
             f"received {len(publications)}."
         )
 
@@ -268,6 +282,7 @@ def editor_node(state: SMMState) -> dict[str, Any]:
     deterministic_issues = validate_draft(
         draft=draft,
         project_id=project_id,
+        expected_count=state.get("series_size"),
     )
 
     # Continuity is checked deterministically before the model sees the

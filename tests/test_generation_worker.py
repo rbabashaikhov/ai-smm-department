@@ -270,6 +270,156 @@ def test_a_non_retryable_error_fails_without_retry(
     assert "knowledge unavailable" in stored.last_error
 
 
+# -- series_size is a contract (SMM-035A) ---------------------------------
+#
+# Job eb41298e asked for one publication and got three drafts marked
+# succeeded. The count that comes back must be the count that was asked
+# for, for every project; anything else fails the job for good (no retry:
+# another paid run would not change what the contract means) and writes
+# no draft at all. editor_approved=false is a verdict, not a failure.
+
+
+def _result_with(publications: int, *, approved: bool = True) -> dict[str, Any]:
+    result = _good_result(approved=approved)
+    result["draft"]["publications"] = [
+        {
+            "position": n,
+            "title": f"Часть {n}",
+            "format": "text",
+            "items": [{"order": 1, "text": f"Текст части {n}."}],
+        }
+        for n in range(1, publications + 1)
+    ]
+
+    return result
+
+
+def _drafts_of(session: Session, job: ContentGenerationJob) -> list[ContentItem]:
+    return list(
+        session.scalars(
+            select(ContentItem).where(ContentItem.generation_job_id == job.id)
+        ).all()
+    )
+
+
+@pytest.mark.parametrize("size", [1, 3])
+def test_exactly_the_requested_number_of_drafts_is_stored(
+    session: Session, settings, project: str, make_user, size: int
+) -> None:
+    job = _enqueue(
+        session,
+        project_id=project,
+        requester=make_user(),
+        series_size=size,
+        publishing_strategy="standalone_series",
+    )
+    worker = _fake_worker(settings, FakeGraph(_result_with(size)))
+
+    assert worker.process_one() == "succeeded"
+
+    session.expire_all()
+    assert len(_drafts_of(session, job)) == size
+
+
+@pytest.mark.parametrize(("asked", "got"), [(1, 3), (3, 1), (2, 3), (3, 2)])
+def test_a_different_count_fails_the_job_and_stores_nothing(
+    session: Session, settings, project: str, make_user, asked: int, got: int
+) -> None:
+    job = _enqueue(
+        session,
+        project_id=project,
+        requester=make_user(),
+        series_size=asked,
+        publishing_strategy="standalone_series",
+    )
+    worker = _fake_worker(settings, FakeGraph(_result_with(got)))
+
+    assert worker.process_one() == "failed"
+
+    session.expire_all()
+    stored = session.get(ContentGenerationJob, job.id)
+    assert stored.status is GenerationJobStatus.FAILED
+    assert stored.next_attempt_at is None  # not retryable
+    assert stored.attempt_count == 1
+    assert f"series_size {asked}" in stored.last_error
+    assert f"{got} publications" in stored.last_error
+    assert _drafts_of(session, job) == []
+
+
+def test_the_pilot_project_gets_no_special_count(
+    session: Session, settings, make_user
+) -> None:
+    from ai_smm.queue import ensure_project
+
+    ensure_project(
+        session,
+        project_id="ai-catalog-consultant",
+        display_name="AI Catalog Consultant",
+        knowledge_path="knowledge/projects/ai-catalog-consultant",
+    )
+    session.commit()
+    job = _enqueue(
+        session,
+        project_id="ai-catalog-consultant",
+        requester=make_user(),
+        series_size=1,
+        publishing_strategy="standalone_series",
+    )
+    worker = _fake_worker(settings, FakeGraph(_result_with(3)))
+
+    assert worker.process_one() == "failed"
+
+    session.expire_all()
+    assert _drafts_of(session, job) == []
+
+
+def test_a_job_without_series_size_keeps_the_old_behaviour(
+    session: Session, settings, project: str, make_user
+) -> None:
+    job = _enqueue(session, project_id=project, requester=make_user())
+    worker = _fake_worker(settings, FakeGraph(_result_with(2)))
+
+    assert worker.process_one() == "succeeded"
+
+    session.expire_all()
+    assert len(_drafts_of(session, job)) == 2
+
+
+def test_an_unapproved_verdict_with_the_right_count_still_succeeds(
+    session: Session, settings, project: str, make_user
+) -> None:
+    job = _enqueue(
+        session,
+        project_id=project,
+        requester=make_user(),
+        series_size=1,
+        publishing_strategy="standalone_series",
+    )
+    worker = _fake_worker(
+        settings, FakeGraph(_result_with(1, approved=False))
+    )
+
+    assert worker.process_one() == "succeeded"
+
+    session.expire_all()
+    (draft,) = _drafts_of(session, job)
+    revision = session.get(ContentRevision, draft.current_revision_id)
+    assert revision.meta["editor_verdict"]["approved"] is False
+    assert draft.status is ContentStatus.DRAFT
+
+
+def test_the_graph_state_carries_the_requested_size_for_every_project(
+    session: Session, settings, project: str, make_user
+) -> None:
+    _enqueue(session, project_id=project, requester=make_user(), series_size=1)
+    fake_graph = FakeGraph(_result_with(1))
+
+    _fake_worker(settings, fake_graph).process_one()
+
+    (state,) = fake_graph.invocations
+    assert state["series_size"] == 1
+
+
 # -- cancelled while generating ------------------------------------------
 
 

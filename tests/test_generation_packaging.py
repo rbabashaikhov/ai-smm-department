@@ -537,3 +537,104 @@ def test_docs_state_attestation_and_promise_no_spending_cap() -> None:
     assert "no spend cap" in text.lower() and "NO spend cap" in env_example
     for promised in ("hard spend", "spend limit", "budget cap"):
         assert promised not in text.lower() + env_example.lower(), promised
+
+
+# -- SMM-035A: `down` stays one plain command; the logs are kept by hand ----
+#
+# A first design saved the logs inside `down` (stop, save, supervise a
+# subprocess under a deadline). It was abandoned as more machinery than a
+# one-shot worker needs: Docker already keeps the logs of a container until
+# it is removed, and the runbook says what to run before removing it.
+
+
+def _calls_of(log: Path) -> list[list[str]]:
+    return [line.split() for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def test_down_is_one_plain_compose_command_in_its_own_project(tmp_path: Path) -> None:
+    d, bin_, log = _deploy(tmp_path)
+
+    result = _run(d, bin_, "down")
+
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    (argv,) = _calls_of(log)  # exactly one Docker call, nothing around it
+    assert argv[:3] == ["compose", "--project-name", "ai-smm-generation"]
+    assert argv[-1] == "down" and argv.count("down") == 1
+    assert not (d / "logs").exists()  # nothing is saved, nothing is created
+    for other in ("stop", "inspect", "logs", "ps", "rm", "kill"):
+        assert other not in argv, other
+
+
+def test_down_cannot_reach_the_live_publisher_or_external_resources(
+    tmp_path: Path,
+) -> None:
+    d, bin_, log = _deploy(tmp_path)
+
+    _run(d, bin_, "down")
+
+    (argv,) = _calls_of(log)
+    text = " ".join(argv)
+    assert "--project-name ai-smm-generation" in text
+    assert text.count("--file") == 1 and "compose.generation.yml" in text
+    assert "compose.yaml" not in text and "--project-name ai-smm " not in text + " "
+    assert "ai-smm-worker" not in text  # the LIVE publisher's container
+    for dangerous in ("-v", "--volumes", "--rmi", "--remove-orphans", "-f "):
+        assert dangerous not in argv, dangerous
+    # the shared network is external to the project: `down` never removes it
+    compose = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+    assert compose["networks"]["shared"]["external"] is True
+
+
+def test_the_exit_status_of_down_is_the_wrappers(tmp_path: Path) -> None:
+    d, bin_, log = _deploy(tmp_path)
+    (bin_ / "docker").write_text('#!/bin/sh\necho "$@" >> ' + str(log) + "\nexit 7\n")
+
+    assert _run(d, bin_, "down").returncode == 7
+
+
+def test_the_wrapper_has_no_process_supervision() -> None:
+    code = "\n".join(
+        line
+        for line in WRAPPER.read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ).replace("--wait-timeout", "").replace("--wait", "")  # compose flags
+
+    for machinery in ("setsid", "kill", "trap ", "timeout", "sleep", "wait ", "disown",
+                      "nohup", "mktemp", "logs/"):
+        assert machinery not in code, machinery
+    assert not re.search(r"\)\s*&\s*$|\s&\s*$", code, re.MULTILINE)  # no background job
+
+
+def test_down_still_takes_no_arguments(tmp_path: Path) -> None:
+    d, bin_, log = _deploy(tmp_path)
+
+    for extra in (["-v"], ["--rmi", "all"], ["--volumes"]):
+        assert _run(d, bin_, "down", *extra).returncode == 2
+    assert not log.exists()
+
+
+def test_the_verbs_the_manual_procedure_uses_exist_and_are_read_only(
+    tmp_path: Path,
+) -> None:
+    d, bin_, log = _deploy(tmp_path)
+
+    assert _run(d, bin_, "ps").returncode == 0
+    assert _run(d, bin_, "logs").returncode == 0
+
+    ps, logs = _calls_of(log)
+    assert ps[-2:] == ["ps", "-a"]  # a stopped or crashed worker is listed too
+    assert logs[-3:] == ["logs", "--no-color", "smm-generation"]
+
+
+def test_the_runbook_tells_the_operator_to_keep_the_logs_before_down() -> None:
+    text = DOC.read_text(encoding="utf-8")
+
+    assert "Keep the worker's output before you remove it" in text
+    assert "does **not** save anything" in text
+    assert "./gen-compose.sh logs >" in text and "./gen-compose.sh ps" in text
+    assert "umask 077" in text and "before" in text.lower()
+    # the order in the procedure: keep first, remove last
+    assert text.index("./gen-compose.sh logs >") < text.index(
+        "./gen-compose.sh down\n```"
+    )
+    assert "series_size` is the contract of a job" in text
