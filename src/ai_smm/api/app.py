@@ -33,6 +33,7 @@ from ai_smm.api.routers import auth as auth_router
 from ai_smm.api.routers import content as content_router
 from ai_smm.api.routers import generation as generation_router
 from ai_smm.api.routers import health as health_router
+from ai_smm.api.routers import knowledge as knowledge_router
 from ai_smm.api.routers import operations as operations_router
 from ai_smm.api.routers import projects as projects_router
 from ai_smm.api.routers import publications as publications_router
@@ -118,6 +119,7 @@ def create_app(
     if settings.api_auth_routes_enabled:
         v1.include_router(auth_router.session_router)
     v1.include_router(projects_router.router)
+    v1.include_router(knowledge_router.router)
     v1.include_router(publications_router.router)
     v1.include_router(series_router.router)
     v1.include_router(operations_router.router)

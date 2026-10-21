@@ -16,7 +16,7 @@ interface SwitcherOption {
 
 /** Sections that exist in every project; "" is the dashboard. */
 const PROJECT_SECTION =
-  /^\/projects\/[^/]+(?:\/(content|generation|publications|attention|audit|settings|accounts|credentials))?\/?$/;
+  /^\/projects\/[^/]+(?:\/(content|generation|publications|attention|audit|knowledge|settings|accounts|credentials))?\/?$/;
 
 /**
  * Where choosing another project leads: the same section when it exists
@@ -97,6 +97,7 @@ export function AppLayout() {
               {atLeast(access?.role, "admin") ? (
                 <NavLink to={`${base}/audit`}>Audit</NavLink>
               ) : null}
+              <NavLink to={`${base}/knowledge`}>Knowledge Base</NavLink>
               <NavLink to={`${base}/accounts`}>Аккаунты</NavLink>
               {atLeast(access?.role, "owner") ? (
                 <NavLink to={`${base}/credentials`}>Учётные данные</NavLink>

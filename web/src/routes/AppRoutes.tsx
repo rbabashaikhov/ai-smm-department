@@ -17,6 +17,7 @@ import { CredentialsPage } from "../pages/CredentialsPage";
 import { DashboardPage } from "../pages/DashboardPage";
 import { GenerationJobPage } from "../pages/GenerationJobPage";
 import { GenerationJobsPage } from "../pages/GenerationJobsPage";
+import { KnowledgeBasePage } from "../pages/KnowledgeBasePage";
 import { LoginPage } from "../pages/LoginPage";
 import { NotFoundPage } from "../pages/NotFoundPage";
 import { ProjectSettingsPage } from "../pages/ProjectSettingsPage";
@@ -86,6 +87,7 @@ export function AppRoutes() {
             <Route path="publications" element={<PublicationsPage />} />
             <Route path="attention" element={<AttentionPage />} />
             <Route path="audit" element={<AuditPage />} />
+            <Route path="knowledge" element={<KnowledgeBasePage />} />
             <Route path="settings" element={<ProjectSettingsPage />} />
             <Route path="accounts" element={<AccountsPage />} />
             <Route path="credentials" element={<CredentialsPage />} />

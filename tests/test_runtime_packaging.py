@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -431,6 +433,17 @@ def test_generation_worker_holds_no_publishing_storage_or_llm_credentials(
         ), name
 
 
+def test_api_mounts_only_the_knowledge_base_read_only(
+    services: dict[str, Any],
+) -> None:
+    """SMM-034A: the Knowledge Base page, as in compose.control-center.yml."""
+
+    api = services["smm-api"]
+
+    assert api["volumes"] == ["./knowledge:/srv/ai-smm/knowledge:ro"]
+    assert api["environment"]["AI_SMM_KNOWLEDGE_ROOT"] == "/srv/ai-smm/knowledge"
+
+
 def test_generation_worker_mounts_only_the_knowledge_base_read_only(
     services: dict[str, Any],
 ) -> None:
@@ -447,8 +460,8 @@ def test_generation_worker_is_bounded_and_single(services: dict[str, Any]) -> No
     generation = services["smm-generation"]
     env = generation["environment"]
 
-    # container_name makes `docker compose up --scale` refuse a second one.
-    assert generation["container_name"] == "ai-smm-runtime-local-generation"
+    # No fixed container_name: it would collide across compose projects.
+    assert "container_name" not in generation
     assert "deploy" not in generation and "scale" not in generation
     assert generation["mem_limit"] == "512m"
     assert float(generation["cpus"]) == 1.0
@@ -610,3 +623,51 @@ def test_packaging_files_hold_no_secret_looking_values(path: Path) -> None:
         r"BEGIN [A-Z ]*PRIVATE KEY",
     ):
         assert not re.search(pattern, text), pattern
+
+
+def test_no_fixed_resource_names(compose: dict[str, Any]) -> None:
+    """Fixed names ignore `-p`: two projects would share the resource."""
+
+    for kind in ("networks", "volumes"):
+        for key, value in compose[kind].items():
+            assert "name" not in (value or {}), (kind, key)
+
+    for name, service in compose["services"].items():
+        assert "container_name" not in service, name
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not installed")
+def test_two_project_names_render_disjoint_resources() -> None:
+    """`docker compose config` only renders; it contacts no daemon."""
+
+    def render(project: str) -> dict[str, Any]:
+        result = subprocess.run(
+            [
+                "docker", "compose", "-p", project,
+                "-f", str(COMPOSE_PATH),
+                "--profile", "tools", "--profile", "generation",
+                "config", "--format", "json",
+            ],
+            check=True, capture_output=True, text=True,
+            env={**os.environ, "COMPOSE_PROJECT_NAME": ""},
+        )
+        import json
+
+        return json.loads(result.stdout)
+
+    one = render("smm-test-aaa")
+    two = render("smm-test-bbb")
+
+    for kind in ("networks", "volumes"):
+        names_one = {v["name"] for v in one[kind].values()}
+        names_two = {v["name"] for v in two[kind].values()}
+
+        assert names_one and names_two
+        assert names_one.isdisjoint(names_two), kind
+
+    assert one["volumes"]["pgdata"]["name"] == "smm-test-aaa_pgdata"
+    assert two["networks"]["backend"]["name"] == "smm-test-bbb_backend"
+    assert one["networks"]["edge"]["name"] == "smm-test-aaa_edge"
+    assert not any(
+        "container_name" in s for s in one["services"].values()
+    )

@@ -13,6 +13,9 @@ export const qk = {
   projects: () => ["projects"] as const,
   project: (projectId: string) => ["projects", projectId] as const,
   settings: (projectId: string) => ["projects", projectId, "settings"] as const,
+  knowledge: (projectId: string) => ["projects", projectId, "knowledge"] as const,
+  knowledgeDocument: (projectId: string, name: string) =>
+    ["projects", projectId, "knowledge", name] as const,
   accounts: (projectId: string) => ["projects", projectId, "accounts"] as const,
   account: (accountId: string) => ["social-accounts", accountId] as const,
 

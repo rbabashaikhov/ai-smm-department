@@ -618,16 +618,51 @@ def test_containers_are_hardened(services: dict[str, Any]) -> None:
             assert forbidden not in service, (name, forbidden)
 
 
-def test_nothing_is_mounted(services: dict[str, Any]) -> None:
-    """No Docker socket, no bind mount, no volume: the containers are sealed."""
+#: SMM-034A: the one mount of the project -- the knowledge base, read-only,
+#: smm-api only, at the worker's own host path and container path.
+KNOWLEDGE_ROOT = "/srv/ai-smm/knowledge"
+KNOWLEDGE_MOUNT = {
+    "type": "bind",
+    "source": KNOWLEDGE_ROOT,
+    "target": KNOWLEDGE_ROOT,
+    "read_only": True,
+    "bind": {"create_host_path": False},
+}
+
+
+def test_only_smm_api_mounts_and_only_the_knowledge_base_read_only(
+    services: dict[str, Any],
+) -> None:
+    """No Docker socket, no volume; one literal read-only bind (SMM-034A)."""
 
     for name, service in services.items():
-        assert "volumes" not in service, name
+        if name != "smm-api":
+            assert "volumes" not in service, name
+
+    assert services["smm-api"]["volumes"] == [KNOWLEDGE_MOUNT]
+    assert (
+        services["smm-api"]["environment"]["AI_SMM_KNOWLEDGE_ROOT"]
+        == KNOWLEDGE_ROOT
+    )
+    # Not in the shared app-env: no other service learns the path.
+    for name in ("smm-auth", "migrate", "cli"):
+        assert "AI_SMM_KNOWLEDGE_ROOT" not in services[name]["environment"], name
 
     assert "volumes" not in yaml.safe_load(
         COMPOSE_PATH.read_text(encoding="utf-8")
     )
     assert "docker.sock" not in COMPOSE_PATH.read_text(encoding="utf-8")
+
+
+def test_the_api_reads_the_directory_the_worker_loads() -> None:
+    """The same host directory and path as the worker's (read-only) mount."""
+
+    worker = yaml.safe_load(WORKER_COMPOSE_PATH.read_text(encoding="utf-8"))
+    mount = worker["x-common"]["volumes"][0]
+    source, target, mode = mount.rsplit(":", 2)
+
+    assert source == "${AI_SMM_KNOWLEDGE_HOST_PATH:-" + KNOWLEDGE_ROOT + "}"
+    assert (target, mode) == (KNOWLEDGE_ROOT, "ro")
 
 
 def test_http_services_restart_and_tools_do_not(
@@ -880,6 +915,19 @@ def test_rendered_ports_and_networks(deploy_dir: Path) -> None:
         env = services[name]["environment"]
 
         assert "AI_SMM_CREDENTIALS_PUBLIC_KEY" not in env, name
+
+
+@needs_compose
+def test_rendered_knowledge_mount_is_read_only_and_smm_api_only(
+    deploy_dir: Path,
+) -> None:
+    services = _render(deploy_dir, "--with-tools")["services"]
+
+    for name, service in services.items():
+        if name != "smm-api":
+            assert not service.get("volumes"), name
+
+    assert services["smm-api"]["volumes"] == [KNOWLEDGE_MOUNT]
 
 
 @needs_compose

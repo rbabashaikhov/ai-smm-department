@@ -7,8 +7,13 @@
 #                                              -> postgres (disposable)
 #
 # This file is for a workstation only. It is a separate compose project
-# (ai-smm-runtime-local) with its own network and volume, so it cannot
-# touch the production project "ai-smm" defined in compose.yaml.
+# (ai-smm-runtime-local by default) whose networks and PostgreSQL volume
+# carry NO fixed `name:` -- compose derives them from the project name
+# (<project>_backend, <project>_edge, <project>_pgdata), so two projects
+# started with different `-p` / COMPOSE_PROJECT_NAME values never share
+# them, and neither can touch the production project "ai-smm" defined in
+# compose.yaml. Use a unique project name for every disposable environment
+# (docs/runtime-packaging.md, "Teardown").
 #
 # Deliberately absent:
 #   * the worker  -- the execution plane is not part of this runtime; no
@@ -40,7 +45,8 @@
 #   docker compose -f compose.runtime.yml --profile tools run --rm cli user create-owner --email ... --display-name ... --project demo --create-project "Demo (local)"
 #   docker compose -f compose.runtime.yml up -d
 #   docker compose -f compose.runtime.yml down        # keep the volume
-#   docker compose -f compose.runtime.yml down -v     # discard the local DB
+#   docker compose -p <your-unique-project> -f compose.runtime.yml down -v
+#                                                     # discard THAT project's DB
 
 name: ai-smm-runtime-local
 
@@ -123,6 +129,11 @@ services:
       # rate limit). The API's own login/logout stay unregistered, so they
       # cannot be reached around that limit; /auth/me and /auth/csrf remain.
       AI_SMM_API_AUTH_ROUTES: "false"
+      # SMM-034A: the Knowledge Base page, as in compose.control-center.yml.
+      AI_SMM_KNOWLEDGE_ROOT: /srv/ai-smm/knowledge
+    # Read-only, like the production mount and smm-generation's.
+    volumes:
+      - ./knowledge:/srv/ai-smm/knowledge:ro
     networks:
       - backend
     depends_on:
@@ -268,13 +279,12 @@ services:
   # credential-key or Langfuse variable at all. No OpenAI key either and
   # no route out (backend is internal): at this stage a job reaching the
   # real agent graph fails within its retry limit and calls no external
-  # API. container_name makes `--scale` impossible: one worker, and the
-  # worker itself runs one job at a time.
+  # API. No container_name (it would collide across compose projects); the
+  # worker itself runs one job at a time and the profile starts one.
   smm-generation:
     <<: *app-hardening
     image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
     pull_policy: never
-    container_name: ai-smm-runtime-local-generation
     profiles:
       - generation
     entrypoint: ["/app/.venv/bin/ai-smm-generation-worker"]
@@ -319,14 +329,11 @@ networks:
   # The only network with a route out, and the only one the host port is
   # published on. smm-web is the only service attached to it.
   edge:
-    name: ai-smm-runtime-local-edge
   # No external connectivity: API, database and tools only.
   backend:
-    name: ai-smm-runtime-local-backend
     internal: true
 
 volumes:
   pgdata:
-    name: ai-smm-runtime-local-pgdata
     labels:
       ai-smm.disposable: "true"

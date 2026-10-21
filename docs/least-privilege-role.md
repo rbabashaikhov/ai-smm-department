@@ -366,8 +366,8 @@ reuses a container's recorded configuration; a privilege granted after
 verify run. Whoever can run Docker on the host can bypass any gate — it
 protects against mistakes (the trust model of FU-024B4A-2). Against the
 **API process**, the protection is the role itself: the container holds
-no owner credential (no `control-center.env`, no bind mount, read-only
-filesystem), the DSN comes only from the env file (a query string is
+no owner credential (no `control-center.env`, no bind mount but the
+read-only knowledge base, read-only filesystem), the DSN comes only from the env file (a query string is
 refused, so no `options=-c role=…`), `.env` files do not exist in the
 image and `load_dotenv()` never overrides a set variable, and from the
 shared network `pg_hba` requires SCRAM. A wrong password is not detected

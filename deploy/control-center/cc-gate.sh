@@ -74,7 +74,7 @@ readonly CC_API_VERIFY_MIN_CHECKS=200
 # could print a passing answer; a compose file from another release -- the
 # 2026-10-11 one gives smm-api control-center.env -- would start the API
 # on the owner URL whatever control-center.api.env says.
-readonly CC_PINNED_COMPOSE_SHA256=dc30a11525a5d56e4944d047de90fb660d2917b9a939ce7a2c62320067e1ac8b
+readonly CC_PINNED_COMPOSE_SHA256=4f4f103cb6415dce52978b1a11c188be8380c41862463f54662b80519985e28f
 readonly CC_PINNED_VERIFY_SHA256=6d92adc48e35fe60dadda54a8c4026ee643754e10c38da7fbb2025a34f6cfe95
 # Mutation mode (SMM-025C): the override that switches smm-api to the
 # mutation role, and the verify file of that role.
