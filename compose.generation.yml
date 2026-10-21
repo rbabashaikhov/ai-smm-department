@@ -1,0 +1,109 @@
+# AI SMM generation worker -- PRODUCTION packaging, a compose project of its own
+# (SMM-Generation-A1). Agent -> Draft: it claims queued generation jobs,
+# runs the agent graph and writes DRAFT content items with their revision.
+# It never approves, materialises or publishes, and it is not the publish
+# worker: project "ai-smm" (compose.yaml) is not touched by anything here.
+#
+# Started and stopped by hand, never after a host reboot (restart: "no"), and
+# ONLY through deploy/control-center/gen-compose.sh, which validates both env
+# files before Compose reads them and refuses `up` without a real OpenAI key
+# and one fresh, bounded job (docs/generation-worker-deployment.md):
+#
+#   cd /root/ai-smm-generation   # this file, gen-compose.sh, cc-common.sh, the env files
+#   ./gen-compose.sh config
+#   <ai-smm generation status JOB> | ./gen-compose.sh up
+#   ./gen-compose.sh check | logs --since 10m
+#   ./gen-compose.sh down        # stop and remove: the whole rollback
+#
+# What it has, and does not have:
+#   * the image ai-smm:<release> already on the host (pull_policy: never);
+#   * ONE database login, ai_smm_generation: EXECUTE on the three generation
+#     contracts, no table, sequence or credential access, no approvals, no
+#     publications (deploy/control-center/db/ai_smm_generation.grants.sql);
+#     the worker refuses to start as any role with more (exit 2);
+#   * generation.env: exactly AI_SMM_DATABASE_URL and OPENAI_API_KEY, enforced
+#     by gen-compose.sh (any other key -- OPENAI_BASE_URL, OPENAI_ORG_ID,
+#     THREADS_*, unknown -- is refused before start). The values below are
+#     LITERALS: `environment:` outranks `env_file:`, so a Threads token or
+#     storage secret in that file would change nothing even unvalidated;
+#   * the knowledge base, read-only, and a tmpfs /tmp; no media, no
+#     credential-key mount, no Docker socket;
+#   * one instance (container_name refuses --scale; the worker runs one job at
+#     a time), 512 MiB, 0.5 CPU, 64 pids. Retries are per JOB (max_attempts,
+#     stored on the job, 1..10), not a setting of this service.
+#
+# Network: the shared network is the only one that reaches the database, and
+# it has outbound access. With OPENAI_API_KEY empty nothing can be called; a
+# real key is a separate, approved step (docs/generation-worker-deployment.md).
+
+name: ai-smm-generation
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  smm-generation:
+    image: ai-smm:${SMM_GEN_VERSION:?set SMM_GEN_VERSION to an image tag, never latest}
+    pull_policy: never
+    container_name: ai-smm-generation-worker
+    entrypoint: ["/app/.venv/bin/ai-smm-generation-worker"]
+    env_file:
+      - generation.env
+    environment:
+      TZ: UTC
+      AI_SMM_DRY_RUN: "true"
+      AI_SMM_KNOWLEDGE_ROOT: /srv/ai-smm/knowledge
+      AI_SMM_GENERATION_WORKER_ID: prod-generation-1
+      AI_SMM_GENERATION_POLL_INTERVAL_SECONDS: "15"
+      AI_SMM_GENERATION_LEASE_SECONDS: "600"
+      AI_SMM_GENERATION_MAX_REVISIONS: "3"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      # Defence in depth: no publishing, storage or tracing credential.
+      THREADS_ACCESS_TOKEN: ""
+      THREADS_API_BASE_URL: http://127.0.0.1:9
+      STORAGE_SSH_PASSWORD: ""
+      STORAGE_SSH_KEY_PATH: ""
+      LANGFUSE_PUBLIC_KEY: ""
+      LANGFUSE_SECRET_KEY: ""
+    volumes:
+      - ${SMM_GEN_KNOWLEDGE_PATH:-/srv/ai-smm/knowledge}:/srv/ai-smm/knowledge:ro
+    networks:
+      - shared
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      traefik.enable: "false"
+      ai-smm.component: generation-worker
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/ai-smm-generation-worker", "--check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: "no"
+    # Room to finish the job in flight; a kill is safe anyway (the drafts and
+    # the job's outcome are committed in one transaction at the very end and
+    # the expired lease returns the job).
+    stop_grace_period: 120s
+    cpus: 0.5
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 64
+    logging: *logging
+
+networks:
+  # EXTERNAL: created by another project, never created or removed here. The
+  # database container is only reachable on it.
+  shared:
+    name: ${SMM_GEN_SHARED_NETWORK:?set SMM_GEN_SHARED_NETWORK to the network the database container is on}
+    external: true
