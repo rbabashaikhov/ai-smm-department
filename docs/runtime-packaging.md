@@ -30,6 +30,7 @@ browser
   └─ http://127.0.0.1:${SMM_RUNTIME_WEB_PORT:-8088}      (only published port)
        └─ smm-web   nginx, React production build
             ├─ /                         static SPA, index.html fallback
+            ├─ /api/v1/auth/login, /logout, /step-up/*  → smm-auth:8000
             ├─ /api, /api/*              ─┐
             ├─ /health, /health/*         ├─ reverse proxy → smm-api:8000
             └─ /docs, /redoc, /openapi.json ─┘
@@ -44,12 +45,21 @@ No service in `compose.runtime.yml` can claim or publish a publication.
 |---|---|---|---|
 | `postgres` | `postgres:16.15-bookworm` (by digest) | `backend` | yes |
 | `smm-api` | `ai-smm-api:local` — `Dockerfile`, target `api` | `backend` | yes |
+| `smm-auth` | `ai-smm-api:local` — `ai_smm.api.auth_service`, login `ai_smm_auth` | `backend` | yes (needs its role, §5) |
 | `smm-web` | `ai-smm-web:local` — `web/Dockerfile` | `edge` + `backend` | yes |
 | `migrate` | `ai-smm-api:local`, entrypoint `alembic` | `backend` | no (`tools` profile) |
 | `cli` | `ai-smm-api:local`, entrypoint `ai-smm` | `backend` | no (`tools` profile) |
 
-`backend` is an `internal` Docker network: the API, the database and the
-tools have no route to the internet at all. Only `smm-web` is attached to
+`smm-auth` is the production sign-in application (SMM-025D) run on the
+same image: nginx sends login, logout and step-up to it, so the browser
+cannot sign in without it. It has no host port and, as in production, its
+own PostgreSQL login `ai_smm_auth` — EXECUTE on the `smm_auth` contracts and
+column SELECT on `users`, no table, sequence or credential access — next to
+the API's `ai_smm_local` and the generation worker's `ai_smm_generation`.
+It holds no Threads, OpenAI, storage or credential-key variable.
+
+`backend` is an `internal` Docker network: the API, the sign-in service,
+the database and the tools have no route to the internet at all. Only `smm-web` is attached to
 `edge`, the network the loopback port is published on.
 
 ## 2. Images
@@ -127,7 +137,7 @@ reads no `env_file`.
 |---|---|---|
 | `AI_SMM_DATABASE_URL` | the local `postgres` service (literal) | not interpolated: a `.env` file next to the compose file cannot redirect it |
 | `AI_SMM_DRY_RUN` | `true` (literal) | the **API process's** flag, reported as `api_dry_run`; it gates no API command and is not the worker's mode |
-| `AI_SMM_API_COOKIE_SECURE` | `${SMM_RUNTIME_COOKIE_SECURE:-false}` | `false` for plain-HTTP localhost; HTTPS deployments use `true` |
+| `AI_SMM_API_COOKIE_SECURE` | `${SMM_RUNTIME_COOKIE_SECURE:-false}` | `false` for plain-HTTP localhost; HTTPS deployments use `true`. `smm-auth` sets the cookie, so it reads the same switch |
 | `AI_SMM_API_DOCS_ENABLED` | `${SMM_RUNTIME_API_DOCS_ENABLED:-false}` | the code default stays `true` for local development |
 | `AI_SMM_API_MUTATIONS_ENABLED` | `${SMM_RUNTIME_API_MUTATIONS_ENABLED:-false}` | read-only Control Center; the code default is `false` too. See §7 |
 | `OPENAI_API_KEY`, `THREADS_ACCESS_TOKEN` | empty | defence in depth |
@@ -176,10 +186,25 @@ $C --profile tools run --rm cli user create-owner \
     --email owner@local.test --display-name "Local Owner" \
     --project demo --create-project "Demo (local)"
 
-# 6. API and web
+# 5. The sign-in role -- once per database, after the migration. It runs
+#    the operator's smm_auth.functions.sql, ai_smm_auth.grants.sql and
+#    ai_smm_auth.verify.sql (any FAIL line aborts) on the local database
+#    only; it never migrates. smm-auth cannot connect until this ran.
+deploy/local-runtime/auth-role.sh
+
+# 6. API, sign-in service and web
 $C up -d --wait
 open http://127.0.0.1:8088/
 ```
+
+`auth-role.sh` first runs `generation-owner.sql` (the same idempotent step
+`generation-role.sh` takes), because the `smm_auth` contracts, like the
+generation ones, are refused when the local superuser owns the tables.
+Re-run it after a migration that adds a table. The role's local password
+is a fixed public value in `compose.runtime.yml`; it is not a secret, it
+exists only for the disposable local database, and it must never be reused
+in production (there `ai_smm_auth` gets its own password, set
+interactively by the operator).
 
 No owner, password or project is ever created automatically.
 
@@ -217,8 +242,10 @@ $C down -v     # discard it
 Dockerfiles and the nginx config and pins the safety decisions: no publish
 worker service (the generation worker only behind its profile, §8), no
 `env_file`, only a loopback port, a literal local database URL,
-`AI_SMM_DRY_RUN=true`, tools behind a profile, no egress for API and
-database, an acyclic startup order, the worker still the default build
+`AI_SMM_DRY_RUN=true`, tools behind a profile, no egress for API,
+sign-in service and database, `smm-auth` on the existing auth application
+with its own least-privileged login and no credentials, `auth-role.sh`
+local-only and never migrating, an acyclic startup order, the worker still the default build
 target, the API target running uvicorn only, a Node-free web image, API
 prefixes without SPA fallback, and 404 for missing assets.
 

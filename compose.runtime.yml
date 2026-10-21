@@ -36,6 +36,7 @@
 #   docker compose -f compose.runtime.yml build
 #   docker compose -f compose.runtime.yml up -d postgres
 #   docker compose -f compose.runtime.yml --profile tools run --rm migrate upgrade head
+#   deploy/local-runtime/auth-role.sh                  # sign-in role, once per database
 #   docker compose -f compose.runtime.yml --profile tools run --rm cli user create-owner --email ... --display-name ... --project demo --create-project "Demo (local)"
 #   docker compose -f compose.runtime.yml up -d
 #   docker compose -f compose.runtime.yml down        # keep the volume
@@ -116,7 +117,12 @@ services:
       context: .
       target: api
     image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
-    environment: *app-env
+    environment:
+      <<: *app-env
+      # Sign-in belongs to smm-auth (nginx routes login/logout there, with its
+      # rate limit). The API's own login/logout stay unregistered, so they
+      # cannot be reached around that limit; /auth/me and /auth/csrf remain.
+      AI_SMM_API_AUTH_ROUTES: "false"
     networks:
       - backend
     depends_on:
@@ -132,6 +138,52 @@ services:
     stop_grace_period: 20s
     mem_limit: 384m
     pids_limit: 128
+
+  # Sign-in: the same API image, another application (ai_smm.api.auth_service),
+  # connected as ai_smm_auth -- EXECUTE on the smm_auth contracts and column
+  # SELECT on users, nothing else. nginx sends login, logout and step-up
+  # here (web/nginx/default.conf), so without it the browser cannot sign in.
+  # Its role does not exist after `migrate`: run
+  #   deploy/local-runtime/auth-role.sh      # once per database
+  # before `up`. Its own environment, not *app-env: the auth login instead
+  # of the database owner, no Threads, OpenAI, storage or credential-key
+  # variable. No host port (smm-web reaches it over `backend`, which is
+  # internal), so the AI_SMM_AUTH_ALLOWED_PEERS second layer production adds
+  # for its fixed cc-auth address has no stable subnet to name here.
+  smm-auth:
+    <<: *app-hardening
+    image: ai-smm-api:${SMM_RUNTIME_TAG:-local}
+    pull_policy: never
+    entrypoint: ["/app/.venv/bin/uvicorn", "ai_smm.api.auth_service:create_auth_app", "--factory", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-server-header"]
+    environment:
+      TZ: UTC
+      # Fixed, public, local-only password set by auth-role.sh; it protects
+      # nothing and is not a secret.
+      AI_SMM_DATABASE_URL: postgresql+psycopg://ai_smm_auth:local-auth-not-a-secret@postgres:5432/ai_smm_runtime_local
+      AI_SMM_DRY_RUN: "true"
+      AI_SMM_API_COOKIE_SECURE: ${SMM_RUNTIME_COOKIE_SECURE:-false}
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      OPENAI_API_KEY: ""
+      THREADS_ACCESS_TOKEN: ""
+      THREADS_API_BASE_URL: http://127.0.0.1:9
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 20s
+    # Argon2 costs 64 MiB per verification, two at a time.
+    mem_limit: 320m
+    memswap_limit: 320m
+    pids_limit: 64
 
   smm-web:
     build:
