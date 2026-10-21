@@ -10,6 +10,7 @@ a running stack.
 """
 from __future__ import annotations
 
+import os
 import re
 import tomllib
 from pathlib import Path
@@ -25,6 +26,7 @@ API_DOCKERFILE = ROOT / "Dockerfile"
 WEB_DOCKERFILE = ROOT / "web" / "Dockerfile"
 NGINX_CONF = ROOT / "web" / "nginx" / "default.conf"
 NGINX_PROXY = ROOT / "web" / "nginx" / "smm-proxy.inc"
+AUTH_ROLE_SCRIPT = ROOT / "deploy" / "local-runtime" / "auth-role.sh"
 
 PYTHON_SERVICES = ("smm-api", "migrate", "cli")
 
@@ -89,6 +91,7 @@ def test_compose_has_no_worker(services: dict[str, Any]) -> None:
     assert set(services) == {
         "postgres",
         "smm-api",
+        "smm-auth",
         "smm-web",
         "migrate",
         "cli",
@@ -184,7 +187,7 @@ def test_tools_are_never_started_by_up(services: dict[str, Any]) -> None:
         assert services[name]["profiles"] == ["tools"], name
         assert services[name]["restart"] == "no", name
 
-    for name in ("postgres", "smm-api", "smm-web"):
+    for name in ("postgres", "smm-api", "smm-auth", "smm-web"):
         assert "profiles" not in services[name], name
 
 
@@ -205,7 +208,14 @@ def test_api_and_database_have_no_egress(compose: dict[str, Any]) -> None:
 
     assert compose["networks"]["backend"]["internal"] is True
 
-    for name in ("postgres", "smm-api", "migrate", "cli", "smm-generation"):
+    for name in (
+        "postgres",
+        "smm-api",
+        "smm-auth",
+        "migrate",
+        "cli",
+        "smm-generation",
+    ):
         assert services[name]["networks"] == ["backend"], name
 
     assert sorted(services["smm-web"]["networks"]) == ["backend", "edge"]
@@ -237,15 +247,122 @@ def test_startup_dependencies_are_acyclic(services: dict[str, Any]) -> None:
 
     assert graph["smm-web"] == {"smm-api"}
     assert graph["smm-api"] == {"postgres"}
+    assert graph["smm-auth"] == {"postgres"}
 
 
 def test_app_containers_are_hardened(services: dict[str, Any]) -> None:
-    for name in (*PYTHON_SERVICES, "smm-web", "smm-generation"):
+    for name in (*PYTHON_SERVICES, "smm-auth", "smm-web", "smm-generation"):
         service = services[name]
 
         assert service["read_only"] is True, name
         assert service["cap_drop"] == ["ALL"], name
         assert "no-new-privileges:true" in service["security_opt"], name
+
+
+# -- sign-in service (SMM-033E2) -----------------------------------------
+
+
+def test_auth_service_runs_the_existing_auth_app_from_the_api_image(
+    services: dict[str, Any],
+) -> None:
+    auth = services["smm-auth"]
+
+    assert auth["image"] == services["smm-api"]["image"]
+    assert auth["pull_policy"] == "never"
+    assert "build" not in auth
+    entrypoint = auth["entrypoint"]
+    assert entrypoint[0] == "/app/.venv/bin/uvicorn"
+    assert "ai_smm.api.auth_service:create_auth_app" in entrypoint
+    assert "--factory" in entrypoint
+
+
+def test_auth_service_has_its_own_least_privileged_login(
+    services: dict[str, Any],
+) -> None:
+    """ai_smm_auth: never the owner, never the API's or the worker's login."""
+
+    auth_url = services["smm-auth"]["environment"]["AI_SMM_DATABASE_URL"]
+
+    assert "${" not in auth_url
+    assert auth_url.startswith("postgresql+psycopg://ai_smm_auth:")
+    assert auth_url.endswith("@postgres:5432/ai_smm_runtime_local")
+
+    urls = {
+        name: services[name]["environment"]["AI_SMM_DATABASE_URL"]
+        for name in ("smm-api", "smm-generation")
+    }
+    assert len({auth_url, *urls.values()}) == 3
+    assert "ai_smm_local:" in urls["smm-api"]
+    assert "ai_smm_generation:" in urls["smm-generation"]
+
+
+def test_auth_service_holds_no_publishing_storage_or_llm_credentials(
+    services: dict[str, Any],
+) -> None:
+    env = services["smm-auth"]["environment"]
+
+    assert env["OPENAI_API_KEY"] == ""
+    assert env["THREADS_ACCESS_TOKEN"] == ""
+    assert env["AI_SMM_DRY_RUN"] == "true"
+    for name in env:
+        for hint in ("STORAGE", "CREDENTIAL", "LANGFUSE", "S3_"):
+            assert hint not in name, name
+    assert "env_file" not in services["smm-auth"]
+    assert "volumes" not in services["smm-auth"]
+
+
+def test_api_serves_no_login_of_its_own(services: dict[str, Any]) -> None:
+    """nginx rate-limits login on smm-auth only; the API's copy would bypass it."""
+
+    assert services["smm-api"]["environment"]["AI_SMM_API_AUTH_ROUTES"] == "false"
+    # The shared app-env stays untouched, and smm-auth's own routes stay on.
+    for name in ("migrate", "cli", "smm-auth"):
+        assert "AI_SMM_API_AUTH_ROUTES" not in services[name]["environment"], name
+
+
+def test_auth_service_follows_the_local_cookie_default(
+    services: dict[str, Any],
+) -> None:
+    env = services["smm-auth"]["environment"]
+
+    assert env["AI_SMM_API_COOKIE_SECURE"] == "${SMM_RUNTIME_COOKIE_SECURE:-false}"
+
+
+def test_auth_service_is_reached_by_nginx_under_its_service_name(
+    services: dict[str, Any],
+) -> None:
+    assert "http://smm-auth:8000" in NGINX_CONF.read_text(encoding="utf-8")
+    assert "ports" not in services["smm-auth"]
+    assert "--port" in services["smm-auth"]["entrypoint"]
+    assert "8000" in services["smm-auth"]["entrypoint"]
+
+
+def test_auth_role_script_is_explicit_local_and_never_migrates() -> None:
+    script = (AUTH_ROLE_SCRIPT).read_text(encoding="utf-8")
+
+    assert os.access(AUTH_ROLE_SCRIPT, os.X_OK)
+    assert "compose.runtime.yml" in script
+    assert "-d ai_smm_runtime_local" in script
+    assert "generation-owner.sql" in script
+    for name in (
+        "smm_auth.functions.sql",
+        "ai_smm_auth.grants.sql",
+        "ai_smm_auth.verify.sql",
+    ):
+        assert name in script
+    assert "alembic" not in script
+    assert "run --rm migrate" not in script
+    assert "^FAIL" in script
+
+
+def test_auth_role_script_uses_only_the_local_password_of_the_compose_file(
+    services: dict[str, Any],
+) -> None:
+    script = AUTH_ROLE_SCRIPT.read_text(encoding="utf-8")
+    url = services["smm-auth"]["environment"]["AI_SMM_DATABASE_URL"]
+    password = url.split("ai_smm_auth:", 1)[1].split("@", 1)[0]
+
+    assert f"PASSWORD '{password}'" in script
 
 
 # -- generation worker (SMM-033B) ----------------------------------------
@@ -480,6 +597,7 @@ def test_no_directory_listing_and_no_version_banner() -> None:
         NGINX_PROXY,
         WEB_DOCKERFILE,
         ROOT / "deploy" / "local-runtime" / "generation-role.sh",
+        ROOT / "deploy" / "local-runtime" / "auth-role.sh",
         ROOT / "deploy" / "local-runtime" / "generation-owner.sql",
     ],
 )
