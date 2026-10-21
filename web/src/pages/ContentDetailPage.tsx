@@ -23,6 +23,7 @@ import {
   shortId,
 } from "../components/ui";
 import { useMe } from "../features/auth/AuthProvider";
+import { EditorVerdict } from "../features/content/EditorVerdict";
 import {
   RevisionForm,
   draftFromRevision,
@@ -342,6 +343,7 @@ export function ContentDetailPage() {
             images={current.images}
             items={current.items}
           />
+          <EditorVerdict key={current.id} revision={current} />
           <RevisionMeta revision={current} meId={me.user.id} tz={tz} />
         </Card>
         <div>

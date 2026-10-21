@@ -41,13 +41,22 @@ export const emptyDraft = (): RevisionDraft => ({
   social_account_id: "",
 });
 
+/** A new revision is authored by a person: the AI Editor's verdict belongs to
+ *  the text it reviewed, so it is not carried into the edited copy. Other
+ *  metadata is kept. */
+const withoutEditorVerdict = (metadata: JsonObject): JsonObject => {
+  const { editor_verdict: _stale, ...rest } = metadata ?? {};
+
+  return rest;
+};
+
 export const draftFromRevision = (revision: Revision): RevisionDraft => ({
   title: revision.title ?? "",
   body: revision.body,
   format: revision.format,
   images: JSON.stringify(revision.images, null, 2),
   items: JSON.stringify(revision.items, null, 2),
-  metadata: JSON.stringify(revision.metadata, null, 2),
+  metadata: JSON.stringify(withoutEditorVerdict(revision.metadata), null, 2),
   source_ref: revision.source_ref ?? "",
   editor_score: revision.editor_score === null ? "" : String(revision.editor_score),
   editor_notes: revision.editor_notes,
