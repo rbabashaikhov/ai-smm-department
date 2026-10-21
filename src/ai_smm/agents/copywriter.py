@@ -13,7 +13,11 @@ from ai_smm.agents.continuity import (
     split_series_label,
     strip_series_label,
 )
-from ai_smm.agents.pilot import PILOT_PROJECT_ID, resolve_publishing_strategy
+from ai_smm.agents.pilot import (
+    PILOT_PROJECT_ID,
+    expected_publication_count,
+    resolve_publishing_strategy,
+)
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
 
@@ -163,6 +167,18 @@ def shorten_text(
     return shortened
 
 
+def _publications_phrase(count: int) -> str:
+    """«1 публикацию», «3 публикации», «5 публикаций» (accusative)."""
+
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} публикацию"
+
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return f"{count} публикации"
+
+    return f"{count} публикаций"
+
+
 @observe(name="copywriter", as_type="agent")
 def copywriter_node(state: SMMState) -> dict[str, Any]:
     knowledge = state["knowledge"]
@@ -182,6 +198,15 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
         content_plan.get("ideas", [])
     )
 
+    # A Generation Job states how many publications it wants and that
+    # number is the contract; the plan only describes what the Strategist
+    # made of it. Without a request (the publishing graph) the pilot still
+    # means three and another project has no number to enforce.
+    expected = expected_publication_count(project_id, state.get("series_size"))
+
+    if expected is not None:
+        planned_total = expected
+
     logger.info(
         "Copywriter starting",
         extra={
@@ -193,6 +218,15 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
                 "parts": planned_total,
             }
         },
+    )
+
+    # The text budget names an announcement only where one may exist: a
+    # series of one part, like the last part of any series, announces
+    # nothing (rules 4-5 of the instructions below).
+    budget_extras = (
+        ", связь с предыдущей частью и, кроме последней части, короткий анонс"
+        if planned_total > 1
+        else ""
     )
 
     if strategy == "reply_thread":
@@ -264,16 +298,24 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 7. Приведённая выше строка серии добавляется системой
    отдельно и не входит в лимит, который ты считаешь
    сам: пиши тело так, чтобы в него поместился главный
-   тезис, связь с предыдущей частью и короткий анонс,
+   тезис{budget_extras},
    примерно в {TARGET_ITEM_LENGTH - LABEL_ALLOWANCE} символов.
 """
 
     if pilot_mode:
+        pilot_count = expected if expected is not None else 3
+        pilot_image_topics = (
+            "\n1. Рекомендация и уточнение бюджета.\n"
+            "2. Сравнение моделей.\n"
+            "3. Компромисс при экономии."
+            if pilot_count == 3
+            else ""
+        )
         format_instructions = f"""
-Это пилотная серия из трёх публикаций с реальными
-скриншотами проекта AI Catalog Consultant.
+Это пилотная серия с реальными скриншотами проекта
+AI Catalog Consultant.
 
-Подготовь ровно 3 публикации.
+Подготовь ровно {_publications_phrase(pilot_count)}.
 
 Для каждой публикации:
 - ровно один DraftItem;
@@ -285,10 +327,7 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 - не включай ссылки на изображения в текст;
 - не перечисляй имена файлов.
 
-Publisher самостоятельно распределит изображения:
-1. Рекомендация и уточнение бюджета.
-2. Сравнение моделей.
-3. Компромисс при экономии.
+Publisher самостоятельно распределит изображения.{pilot_image_topics}
 
 Важно: format="carousel" здесь означает публикацию
 с визуальными материалами. Publisher определит
@@ -311,8 +350,14 @@ Publisher самостоятельно распределит изображен
                 "принимается."
             )
 
+        count_note = (
+            f"Подготовь ровно {_publications_phrase(expected)}.\n\n"
+            if expected is not None
+            else ""
+        )
+
         format_instructions = f"""
-Подготовь публикации в форматах content plan.
+{count_note}Подготовь публикации в форматах content plan.
 
 Допустимые форматы:
 
@@ -455,10 +500,15 @@ REVISION NUMBER:
     # A wrong shape is the Editor's to report, not a reason to stop the
     # graph: validate_draft names it, the revision loop gets to fix it, and
     # the Publisher refuses a package that still has it.
-    if pilot_mode and len(draft["publications"]) != 3:
+    if expected is not None and len(draft["publications"]) != expected:
         logger.warning(
-            "Pilot draft has the wrong number of publications",
-            extra={"context": {"publications": len(draft["publications"])}},
+            "Draft has the wrong number of publications",
+            extra={
+                "context": {
+                    "publications": len(draft["publications"]),
+                    "expected": expected,
+                }
+            },
         )
 
     # The label is the one piece of scaffolding the system writes itself

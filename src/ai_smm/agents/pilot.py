@@ -35,3 +35,29 @@ def resolve_publishing_strategy(project_id: str, strategy: str | None) -> str:
         return strategy
 
     return "standalone_series"
+
+
+#: How many publications the pilot means when nothing asks for a number: the
+#: publishing graph (no Generation Job) still plans, writes and publishes
+#: three screenshots-carrying posts.
+PILOT_DEFAULT_PUBLICATIONS = 3
+
+
+def expected_publication_count(project_id: str, series_size: object) -> int | None:
+    """How many publications the agents have to deliver, or None for "any".
+
+    A Generation Job states its series_size and that is the contract for
+    every project, the pilot included. Without a usable size (a bool or a
+    non-positive number is not one) the pilot keeps its three posts and any
+    other project has no requirement to enforce.
+    """
+
+    is_size = isinstance(series_size, int) and not isinstance(series_size, bool)
+
+    if is_size and series_size > 0:
+        return series_size
+
+    if project_id == PILOT_PROJECT_ID:
+        return PILOT_DEFAULT_PUBLICATIONS
+
+    return None

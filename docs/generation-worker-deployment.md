@@ -26,6 +26,13 @@ of its own, `ai-smm-generation`, next to the live publish worker (project
 | Lifecycle | `restart: "no"`: started by hand, stopped by hand, not after a reboot |
 | Entry point | **only** `gen-compose.sh` (below) |
 
+**`series_size` is the contract of a job, for every project.** The agents are told
+how many publications to write and the worker stores exactly that many drafts:
+if the count that comes back differs, the job fails for good (no retry, no
+draft is written). The Editor's `approved=false` is a verdict, not a failure —
+the drafts are stored for a human to judge. Only the publishing graph (no
+`series_size`) still means "three" for the pilot project.
+
 It never approves, materialises or publishes: publishing stays the publish
 worker's alone, behind a human approval of the exact revision.
 
@@ -108,14 +115,49 @@ FROM content_generation_jobs j WHERE j.id = '$JOB';
 SQL
 ./gen-compose.sh check
 ./gen-compose.sh logs --since 10m
-./gen-compose.sh down
+./gen-compose.sh down        # first keep the logs if you need them (below)
 ```
 
 A queued job is picked up within one poll (15 s).
 
+## Keep the worker's output before you remove it
+
+`./gen-compose.sh down` removes the container, and with it the logs Docker
+holds for it (the `json-file` driver, 10 MB × 3, set in
+`compose.generation.yml`). `down` does **not** save anything: it stays the
+plain one-line command it has always been. After the first production job
+(SMM-035A) its eleven `ERROR` lines could not be read any more — so, **before
+`down`**, an operator who wants them (always, after a failed or odd job) does
+it by hand with the verbs the wrapper already has:
+
+```bash
+cd /root/ai-smm-generation
+OUT="logs/generation-$(date -u +%Y%m%dT%H%M%SZ)"
+(umask 077; mkdir -p logs)
+./gen-compose.sh ps   > "$OUT.state"    # status and exit code of the container
+./gen-compose.sh logs > "$OUT.log"      # its whole output; works for a stopped
+                                        # or crashed container too
+echo "logs rc=$?"
+./gen-compose.sh down
+```
+
+Notes:
+
+- `logs` and `ps` read the container Docker still has; they work after a crash
+  or a stop, not after `down`. A *running* worker is better stopped first
+  (`docker stop ai-smm-generation-worker`, which waits for the job in flight)
+  so that the last lines, written while it shuts down, are in the file.
+- The application redacts secrets (OpenAI keys, passwords in URLs) before they
+  reach its log, and the wrapper never puts them in its own output. Still read
+  the file before you share it; report only the lines you need, and delete it
+  when the incident is closed. `logs/` is yours: the wrapper never creates,
+  rotates or removes it.
+- Nothing is saved automatically on purpose: a script that saves, stops and
+  supervises its own helpers is more machinery than this one-shot worker needs.
+
 ## Rollback
 
-`./gen-compose.sh down` removes the container (images, network and database untouched).
+`./gen-compose.sh down` removes the container (images, network and database untouched) — keep its logs first if you need them (above).
 To retire the role: `ai_smm_generation.revoke.sql`. Drafts already written
 stay and are harmless: they are `draft` and cannot be published without a
 human approval. A job that was running returns to the queue when its lease

@@ -552,6 +552,22 @@ class GenerationWorker:
         ):
             raise GenerationFailed("draft publications must contain 1..20 items")
 
+        # series_size is the contract of a Generation Job, for every
+        # project: the count that comes back is the count that was asked
+        # for, or nothing is stored. A job without a usable series_size
+        # (created before the API required one) has nothing to compare.
+        requested = (job.params or {}).get("series_size")
+        if (
+            isinstance(requested, int)
+            and not isinstance(requested, bool)
+            and requested > 0
+            and len(publications) != requested
+        ):
+            raise GenerationFailed(
+                f"the agents returned {len(publications)} publications, "
+                f"but the job asked for series_size {requested}"
+            )
+
         editor_score = usage_report.get("editor_score")
         if editor_score is not None and (
             isinstance(editor_score, bool)
