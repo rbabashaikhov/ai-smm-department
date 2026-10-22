@@ -77,6 +77,9 @@ class ErrorCode:
     #: The database guards refused a write the API attempted (a defect or
     #: an attack -- never a normal outcome).
     GUARD_REFUSED = "GUARD_REFUSED"
+    #: A capability this deployment does not offer yet (SMM-035B3A: topic
+    #: ideation, until its worker exists). Not a role problem.
+    FEATURE_DISABLED = "FEATURE_DISABLED"
 
 
 #: Fallback mapping for HTTPExceptions raised by the framework itself.

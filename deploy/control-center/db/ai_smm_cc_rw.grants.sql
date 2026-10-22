@@ -55,7 +55,9 @@ DECLARE
         -- SMM-025D: without its guards this role must not exist at all.
         'mutation_contexts', 'approval_grants',
         -- SMM-026A/2.1
-        'content_generation_jobs'
+        'content_generation_jobs',
+        -- SMM-035B3A
+        'topic_ideation_jobs', 'content_ideas'
     ];
     expected_functions CONSTANT text[] := ARRAY[
         'public.guard_bind_session(text)',
@@ -173,7 +175,8 @@ GRANT SELECT ON
     content_publication_links,
     audit_log, user_sessions,
     social_accounts,
-    content_generation_jobs
+    content_generation_jobs,
+    topic_ideation_jobs, content_ideas
 TO ai_smm_cc_rw;
 
 -- SMM-025D, grants G2 (ADR-024C-3A §6.2, correction 1): users column by
@@ -299,6 +302,18 @@ GRANT UPDATE (status, updated_at, finished_at, claimed_by, claimed_at,
               lease_expires_at, next_attempt_at, attempt_count, result,
               last_error)
     ON content_generation_jobs TO ai_smm_cc_rw;
+
+-- POST /projects/{id}/topic-ideation-jobs (SMM-035B3A; behind a feature
+-- gate that is off in every runtime until an ideation worker exists). The
+-- request columns only -- the API inserts exactly these
+-- (ai_smm.application.topic_ideation); timestamps are set by the insert
+-- guard, and the claim, attempt, result and error columns are the
+-- topic_ideation_* contracts' and are not granted at all. No UPDATE, and
+-- nothing on content_ideas but SELECT: its rows come from the contracts
+-- only (guard_topic_ideation_write refuses the rest anyway).
+GRANT INSERT (id, project_id, requested_by_user_id, status, idea_count,
+              topic_hint, max_attempts)
+    ON topic_ideation_jobs TO ai_smm_cc_rw;
 
 -- materialize: a new delivery snapshot in `approved`. The ORM sends every column; the ones the API never sets (threads_post_id, published_at, the claim and series columns) go in as NULL. Not id: the sequence assigns it.
 GRANT INSERT (project_id, platform, ordinal, title, format, body, images, items, status, scheduled_at, idempotency_key, threads_post_id, published_at, claimed_by, claimed_at, lease_expires_at, attempt_count, next_attempt_at, last_error, editor_score, human_reviewed, source_ref, social_account_id, series_id, series_position, series_total, parent_publication_id, previous_publication_id, created_at, updated_at)

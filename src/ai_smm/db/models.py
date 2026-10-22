@@ -42,6 +42,16 @@ from sqlalchemy.orm import (
     relationship,
 )
 
+from ai_smm.db.ideation_contracts import (
+    MAX_IDEA_ANGLE_LENGTH,
+    MAX_IDEA_DESCRIPTION_LENGTH,
+    MAX_IDEA_TITLE_LENGTH,
+    MAX_IDEAS_PER_JOB,
+    MAX_IDEATION_ERROR_LENGTH,
+    MAX_TOPIC_HINT_LENGTH,
+    MIN_IDEAS_PER_JOB,
+)
+
 
 #: Defaults for a project's editorial settings. The worker does not read
 #: them; they tell the control plane how to present and plan content.
@@ -229,6 +239,35 @@ GENERATION_TERMINAL_STATUSES = frozenset(
 )
 
 
+class TopicIdeationJobStatus(str, enum.Enum):
+    """Lifecycle of one topic-ideation job (SMM-035B3A).
+
+        queued    -> running | cancelled
+        running   -> succeeded | failed | queued (lease expired or retry)
+        succeeded, failed, cancelled -> terminal
+
+    Its own queue, claimed only by public.topic_ideation_claim
+    (ai_smm.db.ideation_contracts): a content generation worker never sees
+    it. Like a generation job it has no external side effect, so an
+    expired lease is simply retried.
+    """
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ContentIdeaStatus(str, enum.Enum):
+    """A suggested topic. Only `proposed` is ever written today; rejecting
+    an idea or using it for a generation job is a later stage."""
+
+    PROPOSED = "proposed"
+    REJECTED = "rejected"
+    USED = "used"
+
+
 publication_status_enum = SAEnum(
     PublicationStatus,
     name="publication_status",
@@ -286,6 +325,18 @@ series_status_enum = SAEnum(
 generation_job_status_enum = SAEnum(
     GenerationJobStatus,
     name="generation_job_status",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
+topic_ideation_job_status_enum = SAEnum(
+    TopicIdeationJobStatus,
+    name="topic_ideation_job_status",
+    values_callable=lambda enum_cls: [m.value for m in enum_cls],
+)
+
+content_idea_status_enum = SAEnum(
+    ContentIdeaStatus,
+    name="content_idea_status",
     values_callable=lambda enum_cls: [m.value for m in enum_cls],
 )
 
@@ -1257,6 +1308,213 @@ class ContentGenerationJob(Base):
     )
 
 
+class TopicIdeationJob(Base):
+    """One request to suggest topics for a project (SMM-035B3A).
+
+    Its own queue, separate from content_generation_jobs: claimed, leased,
+    retried and completed only through public.topic_ideation_* (SECURITY
+    DEFINER, ai_smm.db.ideation_contracts). The API may only insert a
+    freshly queued row for an active project the bound user owns
+    (guard_topic_ideation_jobs_insert); every other write by a guarded role
+    is refused. What a run produces is content_ideas rows, never content.
+    """
+
+    __tablename__ = "topic_ideation_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            f"idea_count BETWEEN {MIN_IDEAS_PER_JOB} AND {MAX_IDEAS_PER_JOB}",
+            name="ck_topic_ideation_jobs_idea_count",
+        ),
+        CheckConstraint(
+            "topic_hint IS NULL OR char_length(topic_hint) BETWEEN 1 AND "
+            f"{MAX_TOPIC_HINT_LENGTH}",
+            name="ck_topic_ideation_jobs_topic_hint",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0", name="ck_topic_ideation_jobs_attempt_count"
+        ),
+        CheckConstraint(
+            "max_attempts BETWEEN 1 AND 10",
+            name="ck_topic_ideation_jobs_max_attempts",
+        ),
+        CheckConstraint(
+            "status <> 'running' OR (claimed_by IS NOT NULL "
+            "AND claimed_at IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_topic_ideation_jobs_claim_shape",
+        ),
+        CheckConstraint(
+            "status NOT IN ('succeeded', 'failed', 'cancelled') "
+            "OR finished_at IS NOT NULL",
+            name="ck_topic_ideation_jobs_finished",
+        ),
+        CheckConstraint(
+            "last_error IS NULL OR char_length(last_error) <= "
+            f"{MAX_IDEATION_ERROR_LENGTH}",
+            name="ck_topic_ideation_jobs_last_error",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(result) = 'object'",
+            name="ck_topic_ideation_jobs_result",
+        ),
+        # The target of content_ideas' (ideation_job_id, project_id) key:
+        # an idea can only ever reference a job of its own project.
+        UniqueConstraint(
+            "id", "project_id", name="uq_topic_ideation_jobs_id_project"
+        ),
+        Index(
+            "ix_topic_ideation_jobs_due",
+            "next_attempt_at",
+            postgresql_where=text("status IN ('queued', 'running')"),
+        ),
+        Index("ix_topic_ideation_jobs_project", "project_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey(
+            "projects.id",
+            ondelete="RESTRICT",
+            name="fk_topic_ideation_jobs_project_id",
+        ),
+        nullable=False,
+    )
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "users.id",
+            ondelete="RESTRICT",
+            name="fk_topic_ideation_jobs_requested_by",
+        ),
+        nullable=False,
+    )
+    status: Mapped[TopicIdeationJobStatus] = mapped_column(
+        topic_ideation_job_status_enum,
+        nullable=False,
+        server_default=TopicIdeationJobStatus.QUEUED.value,
+    )
+    idea_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    topic_hint: Mapped[str | None] = mapped_column(Text)
+    #: The worker's run summary (usage, model) plus "idea_ids"; written
+    #: only by topic_ideation_complete.
+    result: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="2"
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    claimed_by: Mapped[str | None] = mapped_column(String(120))
+    claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+
+
+class ContentIdea(Base):
+    """A topic suggested by a topic-ideation job (SMM-035B3A).
+
+    Written only by public.topic_ideation_complete, which takes the
+    project and the job from the locked job row; the composite key to
+    (topic_ideation_jobs.id, project_id) makes an idea of one project
+    pointing at another project's job impossible in the schema itself.
+    generation_job_id is reserved for the stage that turns an idea into a
+    generation job; nothing sets it yet.
+    """
+
+    __tablename__ = "content_ideas"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["ideation_job_id", "project_id"],
+            ["topic_ideation_jobs.id", "topic_ideation_jobs.project_id"],
+            ondelete="RESTRICT",
+            name="fk_content_ideas_ideation_job",
+        ),
+        UniqueConstraint(
+            "ideation_job_id", "position", name="uq_content_ideas_job_position"
+        ),
+        CheckConstraint("position >= 1", name="ck_content_ideas_position"),
+        CheckConstraint(
+            "title ~ '[^[:space:]]' AND char_length(title) <= "
+            f"{MAX_IDEA_TITLE_LENGTH}",
+            name="ck_content_ideas_title",
+        ),
+        CheckConstraint(
+            "description ~ '[^[:space:]]' AND char_length(description) <= "
+            f"{MAX_IDEA_DESCRIPTION_LENGTH}",
+            name="ck_content_ideas_description",
+        ),
+        CheckConstraint(
+            "angle IS NULL OR (angle ~ '[^[:space:]]' AND char_length(angle) <= "
+            f"{MAX_IDEA_ANGLE_LENGTH})",
+            name="ck_content_ideas_angle",
+        ),
+        Index("ix_content_ideas_project", "project_id", "status", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[str] = mapped_column(
+        String(120),
+        ForeignKey(
+            "projects.id",
+            ondelete="RESTRICT",
+            name="fk_content_ideas_project_id",
+        ),
+        nullable=False,
+    )
+    ideation_job_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False
+    )
+    #: 1-based order within its job; unique per job.
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    angle: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[ContentIdeaStatus] = mapped_column(
+        content_idea_status_enum,
+        nullable=False,
+        server_default=ContentIdeaStatus.PROPOSED.value,
+    )
+    generation_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "content_generation_jobs.id",
+            ondelete="RESTRICT",
+            name="fk_content_ideas_generation_job",
+        ),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ContentItem(Base):
     """One piece of content and where it stands editorially.
 
@@ -1981,6 +2239,43 @@ for _statement in _guards.drop_function_statements(_GENERATION_CONTRACTS):
         Base.metadata,
         "before_drop",
         DDL(_statement).execute_if(dialect="postgresql"),
+    )
+
+
+# Topic ideation (SMM-035B3A): guards, then the worker contracts, after
+# guard_require_owner (FUNCTIONS_V1) and every table exist.
+from ai_smm.db.ideation_contracts import (  # noqa: E402
+    TOPIC_IDEATION_CONTRACTS as _TOPIC_IDEATION_CONTRACTS,
+)
+
+
+for _statement in (
+    [_function.ddl for _function in _guards.TOPIC_IDEATION_FUNCTIONS]
+    + _guards.revoke_public_statements(_guards.TOPIC_IDEATION_FUNCTIONS)
+    + [_trigger.ddl for _trigger in _guards.TOPIC_IDEATION_TRIGGERS]
+    + [_function.ddl for _function in _TOPIC_IDEATION_CONTRACTS]
+    + _guards.revoke_public_statements(_TOPIC_IDEATION_CONTRACTS)
+):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+for _statement in _guards.drop_function_statements(_TOPIC_IDEATION_CONTRACTS):
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="postgresql"),
+    )
+
+for _statement in _guards.drop_function_statements(
+    _guards.TOPIC_IDEATION_FUNCTIONS
+):
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement + " CASCADE").execute_if(dialect="postgresql"),
     )
 
 

@@ -73,6 +73,7 @@ mandatory condition for a later step, named in its row.
 | [FU-024B2-3](#fu-024b2-3--documentation-read-only-means-business-operations-authentication-still-writes-session-state) | Read-only wording: auth still writes | docs and `web/README.md` aligned in SMM-024C-1 | P3 | No |
 | [FU-024B3-1](#fu-024b3-1--a-least-privilege-database-role-for-the-api) | Least-privilege PostgreSQL role for the API | **done** for the read-only mode (SMM-024C-2A design; production 2026-10-13, SMM-024C-2B) | — | No longer — the role for an editable API is FU-024C2-3 |
 | [FU-024B3-5](#fu-024b3-5--verify-the-postgresql-identity-before-the-production-run) | PostgreSQL identity before the production run | **done** (SMM-024B.4A-FIX; used in production 2026-10-11) | — | — |
+| [FU-035B3A-1](#fu-035b3a-1--topic_hint-length-is-checked-before-trimming) | `topic_hint` length is checked before trimming | open, accepted | P3 | No |
 
 Switching on business mutations is in any case a reviewed change to
 `compose.control-center.yml` (the value is a literal there), a new task
@@ -997,3 +998,20 @@ published. Only the owner role (operator CLI, import, SQL) can make such
 a row due: the database guards refuse it to the API roles. Done when a
 blocked row is not claimed again in the same cycle and its repetition is
 rate-limited (or it is moved to a terminal state an operator must clear).
+
+---
+
+## From SMM-035B3A (topic ideation backend, 2026-10-22)
+
+### FU-035B3A-1 — `topic_hint` length is checked before trimming
+
+**Status:** open, accepted. **Priority:** P3. **Blocks mutations:** no.
+
+`POST /projects/{id}/topic-ideation-jobs` bounds `topic_hint` to 500
+characters in the request schema, before the application trims it. A
+hint that is longer only because of surrounding whitespace (for example
+501 spaces) is refused with 422 instead of being stored as no hint. Nothing
+longer than 500 characters is ever stored; the table and the application
+enforce the same bound after trimming. Done when the schema trims before
+it checks the length (or the limit is applied to the trimmed value only),
+with a test.

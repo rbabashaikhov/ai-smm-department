@@ -39,6 +39,7 @@ from ai_smm.api.routers import projects as projects_router
 from ai_smm.api.routers import publications as publications_router
 from ai_smm.api.routers import series as series_router
 from ai_smm.api.routers import social_accounts as social_accounts_router
+from ai_smm.api.routers import topic_ideation as topic_ideation_router
 from ai_smm.api.session_binding import session_binding
 from ai_smm.config import Settings, get_settings
 from ai_smm.logging_setup import setup_logging
@@ -126,6 +127,7 @@ def create_app(
     v1.include_router(content_router.router)
     v1.include_router(social_accounts_router.router)
     v1.include_router(generation_router.router)
+    v1.include_router(topic_ideation_router.router)
 
     app.include_router(v1)
 

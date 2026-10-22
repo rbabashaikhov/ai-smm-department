@@ -290,6 +290,10 @@ subdomain.
 | `POST` | `/api/v1/social-accounts/{id}/disable` · `/enable` | **owner**, CSRF, `expected_version` |
 | `POST` | `/api/v1/social-accounts/{id}/credentials` | **owner**, CSRF; write-only, the token is never returned |
 | `POST` | `/api/v1/social-account-credentials/{id}/revoke` | **owner**, CSRF |
+| `GET` | `/api/v1/projects/{id}/topic-ideation-jobs` | viewer+, paginated, `status` filter (SMM-035B3A) |
+| `GET` | `/api/v1/projects/{id}/topic-ideation-jobs/{job_id}` | viewer+; 404 for another project's job |
+| `POST` | `/api/v1/projects/{id}/topic-ideation-jobs` | **owner**, CSRF; **disabled on every deployment** (`403 FEATURE_DISABLED`) until an ideation worker exists |
+| `GET` | `/api/v1/projects/{id}/content-ideas` | viewer+, paginated, `status` and `ideation_job_id` filters |
 
 Every unsafe route except login and logout is additionally refused, for
 every role, while `AI_SMM_API_MUTATIONS_ENABLED` is `false` — the
@@ -900,6 +904,43 @@ same one.
 
 ---
 
+### Topic ideation (SMM-035B3A)
+
+Suggested topics, kept apart from content generation: an ideation job has
+its own queue (`topic_ideation_jobs`) and produces rows in `content_ideas`,
+never a content item. This stage ships storage, database contracts and
+reads; there is no ideation worker, no LLM call, and no command that
+rejects an idea or turns one into a generation job.
+
+- **Queuing is closed.** `POST .../topic-ideation-jobs` answers `403
+  FEATURE_DISABLED` (and writes nothing) on every deployment:
+  `Settings.topic_ideation_jobs_enabled` is not read from the environment
+  and stays `false` until the stage that ships the worker. Behind it, the
+  usual read-only gate, owner-only RBAC and the database guard apply.
+- **Request.** `{"idea_count": 1..5 (default 3), "topic_hint": string ≤ 500
+  or null}`, strict types, no other field: a client cannot supply ideas,
+  statuses, attempts or any worker-owned column. The 500-character bound is
+  checked before surrounding whitespace is trimmed (accepted limitation,
+  [FU-035B3A-1](follow-ups.md#fu-035b3a-1--topic_hint-length-is-checked-before-trimming)). An inactive project
+  answers `409 INVALID_STATE_TRANSITION` with `details.reason =
+  "project_inactive"`.
+- **Job** (`queued → running → succeeded | failed`, or `cancelled`): `id`,
+  `project_id`, `requested_by_user_id`, `status`, `idea_count`,
+  `topic_hint`, `result` (the worker's summary plus `idea_ids`),
+  `last_error`, `attempt_count`, `max_attempts`, `created_at`,
+  `updated_at`, `finished_at`.
+- **Idea** (`proposed`; `rejected` and `used` are reserved): `id`,
+  `project_id`, `ideation_job_id`, `position` (1-based within the job),
+  `title`, `description`, `angle` (nullable), `status`,
+  `generation_job_id` (reserved, always null today), `created_at`,
+  `updated_at`.
+
+Ideas are written only by the SECURITY DEFINER contract
+`topic_ideation_complete`, which takes the project and job from the claimed
+job row and saves all of a result or none of it; a composite key keeps an
+idea in its job's project. No database role has EXECUTE on the
+`topic_ideation_*` contracts yet.
+
 ## 8. Errors and request ids
 
 Every failure has the same shape:
@@ -915,6 +956,7 @@ Every failure has the same shape:
 | `FORBIDDEN` | 403 |
 | `CSRF_REQUIRED`, `CSRF_INVALID` | 403 |
 | `MUTATIONS_DISABLED` | 403 |
+| `FEATURE_DISABLED` | 403 |
 | `NOT_FOUND` | 404 |
 | `VALIDATION_ERROR` | 422 |
 | `VERSION_CONFLICT` | 409 |

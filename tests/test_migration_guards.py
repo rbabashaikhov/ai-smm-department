@@ -20,10 +20,10 @@ from tests.test_migrations import migration_db as migration_db  # noqa: F401  (f
 
 SOCIAL = "a7c2e5f19b40"
 GUARDS = "c4d81e2a9f63"
-#: Whatever is above GUARDS today (through f7a91c2d5e04, additive):
+#: Whatever is above GUARDS today (through b3a7d2e91c4f, additive):
 #: a downgrade refused at GUARDS rolls back the whole multi-step command,
 #: landing back at head, not at GUARDS itself.
-HEAD = "f7a91c2d5e04"
+HEAD = "b3a7d2e91c4f"
 SWITCH = "AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS"
 
 _BODIES = text(
@@ -33,7 +33,8 @@ _BODIES = text(
            || '|' || coalesce(array_to_string(p.proconfig, ','), '')
       FROM pg_proc p
      WHERE p.pronamespace = 'public'::regnamespace
-       AND (p.proname LIKE 'guard\\_%' OR p.proname LIKE 'generation\\_%')
+       AND (p.proname LIKE 'guard\\_%' OR p.proname LIKE 'generation\\_%'
+            OR p.proname LIKE 'topic\\_ideation\\_%')
     UNION ALL
     SELECT 'trigger:' || t.tgname,
            pg_get_triggerdef(t.oid) || '|deferrable=' || t.tgdeferrable::text
@@ -83,8 +84,14 @@ def test_the_migrated_guards_are_those_create_all_builds(
 
     assert from_migration == from_models
     # 18 from c4d81e2a9f63 + trg_generation_jobs_guard_insert/update
-    # (e04cb3a748f5, SMM-026A/2.1).
-    assert len([n for n, _ in from_migration if n.startswith("trigger:")]) == 20
+    # (e04cb3a748f5, SMM-026A/2.1) + the four topic ideation guards
+    # (b3a7d2e91c4f, SMM-035B3A).
+    assert len([n for n, _ in from_migration if n.startswith("trigger:")]) == 24
+    assert {
+        "function:topic_ideation_claim",
+        "function:topic_ideation_complete",
+        "function:topic_ideation_fail",
+    } <= {n for n, _ in from_migration}
 
 
 def test_public_can_execute_no_security_contract(migration_db: str) -> None:  # noqa: F811
@@ -100,7 +107,8 @@ def test_public_can_execute_no_security_contract(migration_db: str) -> None:  # 
                         "SELECT p.proname FROM pg_proc p"
                         " WHERE p.pronamespace = 'public'::regnamespace"
                         " AND (p.proname LIKE 'guard\\_%'"
-                        "      OR p.proname LIKE 'generation\\_%')"
+                        "      OR p.proname LIKE 'generation\\_%'"
+                        "      OR p.proname LIKE 'topic\\_ideation\\_%')"
                         " AND has_function_privilege('public', p.oid, 'EXECUTE')"
                     )
                 )

@@ -47,7 +47,10 @@ table_grants(relname, privilege) AS (
         ('audit_log', 'SELECT'),
         ('user_sessions', 'SELECT'),
         ('social_accounts', 'SELECT'),
-        ('content_generation_jobs', 'SELECT')
+        ('content_generation_jobs', 'SELECT'),
+        -- SMM-035B3A
+        ('topic_ideation_jobs', 'SELECT'),
+        ('content_ideas', 'SELECT')
 ),
 column_grants(relname, attname, privilege) AS (
     VALUES
@@ -225,6 +228,14 @@ column_grants(relname, attname, privilege) AS (
         ('content_generation_jobs', 'attempt_count', 'UPDATE'),
         ('content_generation_jobs', 'result', 'UPDATE'),
         ('content_generation_jobs', 'last_error', 'UPDATE'),
+        -- SMM-035B3A: queue a topic ideation job, request columns only
+        ('topic_ideation_jobs', 'id', 'INSERT'),
+        ('topic_ideation_jobs', 'project_id', 'INSERT'),
+        ('topic_ideation_jobs', 'requested_by_user_id', 'INSERT'),
+        ('topic_ideation_jobs', 'status', 'INSERT'),
+        ('topic_ideation_jobs', 'idea_count', 'INSERT'),
+        ('topic_ideation_jobs', 'topic_hint', 'INSERT'),
+        ('topic_ideation_jobs', 'max_attempts', 'INSERT'),
         ('publications', 'project_id', 'INSERT'),
         ('publications', 'platform', 'INSERT'),
         ('publications', 'ordinal', 'INSERT'),

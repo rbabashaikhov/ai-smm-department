@@ -139,6 +139,13 @@ BUSINESS_WRITES: dict[tuple[str, str], frozenset[str]] = {
         " lease_expires_at, next_attempt_at, attempt_count, result,"
         " last_error"
     ),
+    # POST /projects/{id}/topic-ideation-jobs (SMM-035B3A): the request
+    # columns only, exactly what ai_smm.application.topic_ideation inserts.
+    # No UPDATE, and no write to content_ideas at all.
+    ("topic_ideation_jobs", "INSERT"): _cols(
+        "id, project_id, requested_by_user_id, status, idea_count,"
+        " topic_hint, max_attempts"
+    ),
 }
 
 #: Columns no API command may ever change after the row exists.

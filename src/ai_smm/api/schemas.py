@@ -16,6 +16,7 @@ from ai_smm.db.models import (
     ApprovalDecision,
     AttemptOutcome,
     AttemptPhase,
+    ContentIdeaStatus,
     ContentStatus,
     GenerationJobStatus,
     MembershipRole,
@@ -23,6 +24,7 @@ from ai_smm.db.models import (
     PublishingStrategy,
     RevisionSource,
     SeriesStatus,
+    TopicIdeationJobStatus,
 )
 
 
@@ -683,3 +685,54 @@ class GenerationJobOut(BaseModel):
 
 class GenerationJobList(PageMeta):
     items: list[GenerationJobOut]
+
+
+# -- topic ideation (SMM-035B3A) -------------------------------------------
+# Suggested topics only. A client can ask for ideas; it can never supply
+# them, their status, or any of a job's worker-owned fields.
+
+
+class TopicIdeationJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # strict: "3" and true are not counts.
+    idea_count: int = Field(default=3, ge=1, le=5, strict=True)
+    topic_hint: str | None = Field(default=None, max_length=500, strict=True)
+
+
+class TopicIdeationJobOut(BaseModel):
+    id: uuid.UUID
+    project_id: str
+    requested_by_user_id: uuid.UUID
+    status: TopicIdeationJobStatus
+    idea_count: int
+    topic_hint: str | None
+    result: dict[str, Any]
+    last_error: str | None
+    attempt_count: int
+    max_attempts: int
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None
+
+
+class TopicIdeationJobList(PageMeta):
+    items: list[TopicIdeationJobOut]
+
+
+class ContentIdeaOut(BaseModel):
+    id: uuid.UUID
+    project_id: str
+    ideation_job_id: uuid.UUID
+    position: int
+    title: str
+    description: str
+    angle: str | None
+    status: ContentIdeaStatus
+    generation_job_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContentIdeaList(PageMeta):
+    items: list[ContentIdeaOut]

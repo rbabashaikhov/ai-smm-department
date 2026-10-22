@@ -43,7 +43,9 @@ DECLARE
         'content_publication_links', 'audit_log', 'users', 'user_sessions',
         'social_accounts', 'social_account_credentials',
         -- SMM-026A/2.1
-        'content_generation_jobs'
+        'content_generation_jobs',
+        -- SMM-035B3A
+        'topic_ideation_jobs', 'content_ideas'
     ];
     missing text[];
     owners text[];
@@ -144,7 +146,8 @@ GRANT SELECT ON
     content_publication_links,
     audit_log, user_sessions,
     social_accounts,
-    content_generation_jobs
+    content_generation_jobs,
+    topic_ideation_jobs, content_ideas
 TO ai_smm_cc;
 
 -- SMM-025D, grants G2 (ADR-024C-3A §6.2, correction 1): users column by

@@ -61,6 +61,10 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/projects/{project_id}/generation-jobs",
             "/api/v1/generation-jobs/{job_id}",
             "/api/v1/generation-jobs/{job_id}/cancel",
+            # SMM-035B3A: topic ideation reads; queuing is feature-gated off.
+            "/api/v1/projects/{project_id}/topic-ideation-jobs",
+            "/api/v1/projects/{project_id}/topic-ideation-jobs/{job_id}",
+            "/api/v1/projects/{project_id}/content-ideas",
             "/api/v1/content-items/{content_item_id}",
             "/api/v1/content-items/{content_item_id}/revisions",
             "/api/v1/content-items/{content_item_id}/approvals",

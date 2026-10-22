@@ -156,6 +156,12 @@ class Settings:
     #: LLM calls, and so the cost, of one job.
     generation_max_revisions: int = 3
 
+    #: Topic ideation (SMM-035B3A): whether the API may queue an ideation
+    #: job. Deliberately not read from the environment: no ideation worker
+    #: exists yet, so nothing would ever consume a job, and no deployment
+    #: can switch it on. The stage that ships the worker wires it up.
+    topic_ideation_jobs_enabled: bool = False
+
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
         default=(
