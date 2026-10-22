@@ -114,6 +114,9 @@ def test_no_publishing_storage_or_tracing_credential_can_reach_it(
     ):
         assert env[name] == "", name  # literals outrank env_file
 
+    # Empty keys alone left the SDK exporting to cloud.langfuse.com (SMM-035C).
+    assert env["LANGFUSE_TRACING_ENABLED"] == "false"
+    assert "LANGFUSE_BASE_URL" not in env
     assert env["THREADS_API_BASE_URL"] == "http://127.0.0.1:9"
     assert "AI_SMM_DATABASE_URL" not in env  # only from generation.env
     assert "OPENAI_API_KEY" not in env

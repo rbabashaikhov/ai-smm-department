@@ -5,10 +5,9 @@ load_dotenv()
 
 from pprint import pprint
 
-from langfuse import get_client, observe
-
 from ai_smm.graph import build_graph
 from ai_smm.knowledge.loader import load_project_knowledge
+from ai_smm.tracing import flush, observe
 
 
 @observe(
@@ -37,4 +36,4 @@ result = run_live()
 print("\n=== LIVE PUBLICATION ===")
 pprint(result["publication"])
 
-get_client().flush()
+flush()

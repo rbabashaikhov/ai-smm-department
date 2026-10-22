@@ -5,8 +5,6 @@ import re
 from typing import Any
 
 from langchain_openai import ChatOpenAI
-from langfuse import observe
-from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
 from ai_smm.agents.continuity import (
@@ -20,6 +18,7 @@ from ai_smm.agents.pilot import (
 )
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
+from ai_smm.tracing import langchain_callbacks, observe
 
 
 logger = get_logger(__name__)
@@ -90,7 +89,6 @@ llm = ChatOpenAI(
 )
 
 structured_llm = llm.with_structured_output(EditorReview)
-langfuse_handler = CallbackHandler()
 
 
 def validate_draft(
@@ -421,7 +419,7 @@ DRAFT:
 
     result = structured_llm.invoke(
         prompt,
-        config={"callbacks": [langfuse_handler]},
+        config={"callbacks": langchain_callbacks()},
     )
 
     all_issues = list(result.issues)
