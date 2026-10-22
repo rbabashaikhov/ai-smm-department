@@ -75,12 +75,12 @@ readonly CC_API_VERIFY_MIN_CHECKS=200
 # 2026-10-11 one gives smm-api control-center.env -- would start the API
 # on the owner URL whatever control-center.api.env says.
 readonly CC_PINNED_COMPOSE_SHA256=4f4f103cb6415dce52978b1a11c188be8380c41862463f54662b80519985e28f
-readonly CC_PINNED_VERIFY_SHA256=6d92adc48e35fe60dadda54a8c4026ee643754e10c38da7fbb2025a34f6cfe95
+readonly CC_PINNED_VERIFY_SHA256=39a93f49c14714fd2eab85d46595aebf25e91c44c06bf7b8f57280b79bc243ac
 # Mutation mode (SMM-025C): the override that switches smm-api to the
 # mutation role, and the verify file of that role.
 readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
 readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
-readonly CC_PINNED_RW_VERIFY_SHA256=bbc37e760c56755e38f7c67c668538c2fb74d7abed92796b6853d0b97aba05b3
+readonly CC_PINNED_RW_VERIFY_SHA256=a254224a3fb887e4c644c1b2c216575c44485dfa8a033ecc449d6b5937162ea9
 # Whether THIS release may run business mutations at all. Every release
 # up to SMM-025D shipped `no`: `mutations enable` was refused before
 # anything ran and a mode file was never honoured. SMM-025D closed

@@ -388,8 +388,8 @@ EDITORIAL_REVISION = "3d4ac1986f07"
 SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
 #: Kept separately because guard migration tests upgrade to this revision.
 GUARDS_REVISION = "c4d81e2a9f63"
-#: Current migration head: DB-enforced generation retry policy.
-HEAD_REVISION = "f7a91c2d5e04"
+#: Current migration head: topic ideation foundation (SMM-035B3A).
+HEAD_REVISION = "b3a7d2e91c4f"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",

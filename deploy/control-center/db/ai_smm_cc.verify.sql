@@ -38,7 +38,10 @@ table_grants(relname, privilege) AS (
         ('audit_log', 'SELECT'),
         ('user_sessions', 'SELECT'),
         ('social_accounts', 'SELECT'),
-        ('content_generation_jobs', 'SELECT')
+        ('content_generation_jobs', 'SELECT'),
+        -- SMM-035B3A
+        ('topic_ideation_jobs', 'SELECT'),
+        ('content_ideas', 'SELECT')
 ),
 column_grants(relname, attname, privilege) AS (
     VALUES

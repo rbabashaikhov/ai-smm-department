@@ -1177,6 +1177,95 @@ GENERATION_TRIGGERS: tuple[GuardTrigger, ...] = (
 )
 
 
+# -- topic ideation (SMM-035B3A) --------------------------------------------
+# A business role writes exactly one shape: "queue a fresh ideation job for
+# an active project I own". Everything else -- claiming, outcomes, and
+# every content_ideas row -- belongs to the topic_ideation_* SECURITY
+# DEFINER contracts (ai_smm.db.ideation_contracts), which run as the owner.
+
+_TOPIC_IDEATION_JOBS_INSERT = _trigger_fn(
+    "guard_topic_ideation_jobs_insert",
+    f"""
+        v_user := public.guard_require_owner(NEW.project_id, 'starting topic ideation');
+
+        IF NEW.requested_by_user_id IS DISTINCT FROM v_user THEN
+            {_raise('the requester must be the bound user')}
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1 FROM public.projects AS p
+             WHERE p.id = NEW.project_id AND p.is_active
+        ) THEN
+            {_raise('topic ideation needs an active project')}
+        END IF;
+
+        IF NEW.max_attempts NOT BETWEEN 1 AND 10 THEN
+            {_raise('ideation max_attempts must be between 1 and 10')}
+        END IF;
+
+        IF NEW.status <> 'queued'
+           OR NEW.claimed_by IS NOT NULL
+           OR NEW.claimed_at IS NOT NULL
+           OR NEW.lease_expires_at IS NOT NULL
+           OR NEW.next_attempt_at IS NOT NULL
+           OR NEW.last_error IS NOT NULL
+           OR NEW.attempt_count <> 0
+           OR NEW.finished_at IS NOT NULL
+           OR NEW.result <> '{{}}'::jsonb THEN
+            {_raise('a new topic ideation job is freshly queued, nothing more')}
+        END IF;
+
+        NEW.created_at := now();
+        NEW.updated_at := now();
+""",
+    declare="    v_user uuid;",
+)
+
+#: No Control Center command changes an ideation job or writes an idea yet;
+#: a guarded role is refused even if a later grant would let it try.
+_TOPIC_IDEATION_WRITE = _trigger_fn(
+    "guard_topic_ideation_write",
+    f"""
+        {_raise('% on % belongs to the topic ideation contracts', 'TG_OP', 'TG_TABLE_NAME')}
+""",
+)
+
+#: Depends on guard_require_owner (FUNCTIONS_V1).
+TOPIC_IDEATION_FUNCTIONS: tuple[GuardFunction, ...] = (
+    GuardFunction(
+        "guard_topic_ideation_jobs_insert", "", _TOPIC_IDEATION_JOBS_INSERT
+    ),
+    GuardFunction("guard_topic_ideation_write", "", _TOPIC_IDEATION_WRITE),
+)
+
+TOPIC_IDEATION_TRIGGERS: tuple[GuardTrigger, ...] = (
+    _before(
+        "trg_topic_ideation_jobs_guard_insert",
+        "topic_ideation_jobs",
+        "INSERT",
+        "guard_topic_ideation_jobs_insert",
+    ),
+    _before(
+        "trg_topic_ideation_jobs_guard_update",
+        "topic_ideation_jobs",
+        "UPDATE",
+        "guard_topic_ideation_write",
+    ),
+    _before(
+        "trg_content_ideas_guard_insert",
+        "content_ideas",
+        "INSERT",
+        "guard_topic_ideation_write",
+    ),
+    _before(
+        "trg_content_ideas_guard_update",
+        "content_ideas",
+        "UPDATE",
+        "guard_topic_ideation_write",
+    ),
+)
+
+
 def revoke_public_statements(functions: tuple[GuardFunction, ...]) -> list[str]:
     """PostgreSQL grants EXECUTE on a new function to PUBLIC; take it away."""
 

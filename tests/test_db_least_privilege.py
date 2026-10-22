@@ -90,6 +90,9 @@ SELECT_TABLES = frozenset(
         "social_accounts",
         # SMM-026A/2.1: generation job status, for a draft's provenance.
         "content_generation_jobs",
+        # SMM-035B3A: topic ideation jobs and the ideas they suggested.
+        "topic_ideation_jobs",
+        "content_ideas",
     }
 )
 

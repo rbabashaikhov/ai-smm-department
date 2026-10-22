@@ -368,6 +368,12 @@ GATED: dict[str, tuple[str, str, Any]] = {
             None,
         ),
     ),
+    # SMM-035B3A: topic ideation (also behind its own feature gate).
+    "create_topic_ideation_job": (
+        "POST",
+        "/api/v1/projects/{project_id}/topic-ideation-jobs",
+        lambda w, p: (f"/api/v1/projects/{p}/topic-ideation-jobs", {}),
+    ),
 }
 
 #: The session lifecycle: the only unsafe routes open in read-only mode.
