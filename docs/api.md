@@ -476,9 +476,33 @@ silently overwrite each other; the second gets 409:
            "request_id": "..."}}
 ```
 
-A section that is not supplied is left untouched. A section that **is**
-supplied is replaced whole: merging two JSON documents whose shape the
-backend does not yet own would make it impossible to delete a key.
+A supplied JSONB section replaces the entire stored section. Omitted
+sections remain unchanged; an explicitly supplied `{}` clears a section.
+The UI sends complete sections and preserves unrelated keys. Validation
+only checks known fields explicitly present in the submitted sections;
+stored values in omitted sections and unknown keys are not revalidated.
+Malformed stored profile values are shown as explicit UI errors and block
+saving until the owner explicitly clears them.
+
+All editorial profile fields are optional. Invalid types or limits return
+422; only the owner may edit (other members can read). The existing audit
+action is `project.settings.update`.
+
+| Section | Field | Limit |
+|---|---|---|
+| content_config | main_theme | string, 300 characters |
+| content_config | topics | existing rules: 10 unique, non-empty strings, 80 characters each |
+| content_config | excluded_topics | 10 unique, non-empty strings, 80 characters each |
+| content_config | audience | string, 1000 characters |
+| content_config | goals | 5 unique, non-empty strings, 200 characters each |
+| brand_config | tone_of_voice | existing rule: string, 4000 characters |
+| brand_config | guidelines | string, 4000 characters |
+| brand_config | forbidden_terms | 20 unique, non-empty strings, 80 characters each |
+
+Free text is trimmed; list whitespace is normalized and duplicates are checked
+case-insensitively. The existing 16 KiB JSON limit applies to each submitted section, including
+preserved keys. Language remains the project's `default_language`, edited
+in the project record card; there is no duplicate language setting.
 
 ### Knowledge base (read-only)
 

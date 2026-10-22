@@ -492,3 +492,224 @@ def test_the_cli_creates_a_project_for_an_existing_user(
         == 1
     )
     assert session.get(Project, "cli-made2") is None
+
+
+# -- project content profile (SMM-035B1) -------------------------------------
+
+PROFILE = {
+    "content_config": {
+        "main_theme": "Блог об ИИ",
+        "topics": ["AI"],
+        "excluded_topics": [f"тема {i}" for i in range(10)],
+        "audience": "я" * 1000,
+        "goals": ["ц" * 199 + str(i) for i in range(5)],
+    },
+    "brand_config": {
+        "tone_of_voice": "Спокойный",
+        "guidelines": "g" * 4000,
+        "forbidden_terms": [f"слово {i}" for i in range(20)],
+    },
+}
+
+
+def test_content_profile_roundtrip_replace_clear_conflict_and_audit(
+    client, login, member, session
+):
+    csrf = login(member(MembershipRole.OWNER))
+    url = "/api/v1/projects/test-project/settings"
+    headers = _csrf(csrf)
+    first = client.patch(url, headers=headers, json={
+        "expected_version": 0,
+        "content_config": {"custom": {"keep": True}},
+        "brand_config": {"legacy": 42},
+        "publishing_config": {"custom_schedule": True},
+    })
+    assert first.status_code == 200
+    saved = client.patch(url, headers=headers, json={
+        "expected_version": 1, **PROFILE,
+    })
+    assert saved.status_code == 200, saved.text
+    data = saved.json()
+    assert data["version"] == 2
+    for section, fields in PROFILE.items():
+        for key, value in fields.items():
+            assert data[section][key] == value
+    assert "custom" not in data["content_config"]
+    assert "legacy" not in data["brand_config"]
+    assert data["publishing_config"] == {"custom_schedule": True}
+    assert client.get(url).json() == data
+    stale = client.patch(url, headers=headers, json={
+        "expected_version": 1, "content_config": {"main_theme": "lost"},
+    })
+    assert stale.status_code == 409
+    assert client.get(url).json() == data
+    cleared = client.patch(url, headers=headers, json={
+        "expected_version": 2,
+        "content_config": {"main_theme": "", "goals": [], "excluded_topics": []},
+        "brand_config": {"guidelines": "", "forbidden_terms": []},
+    })
+    assert cleared.status_code == 200
+    assert cleared.json()["content_config"]["goals"] == []
+    assert "audience" not in cleared.json()["content_config"]
+    entries = session.scalars(select(AuditLog).where(
+        AuditLog.action == "project.settings.update"
+    )).all()
+    assert len(entries) == 3
+    assert entries[-1].details["version"] == 3
+
+
+@pytest.mark.parametrize("section,key,bad", [
+    ("content_config", "main_theme", "x" * 301),
+    ("content_config", "audience", "x" * 1001),
+    ("brand_config", "guidelines", "x" * 4001),
+    ("content_config", "excluded_topics", ["x"] * 11),
+    ("content_config", "goals", ["x"] * 6),
+    ("content_config", "goals", ["x" * 201]),
+    ("brand_config", "forbidden_terms", ["x"] * 21),
+] + [
+    (section, key, bad)
+    for section, fields in PROFILE.items()
+    for key in fields
+    if key not in ("topics", "tone_of_voice")
+    for bad in (None, 123, {})
+] + [
+    (section, key, bad)
+    for section, key in (
+        ("content_config", "topics"), ("content_config", "goals"),
+        ("content_config", "excluded_topics"), ("brand_config", "forbidden_terms"),
+    )
+    for bad in ("not a list", [1], [None], [""], ["  "], ["AI", " ai "],
+                ["Straße", "STRASSE"])
+] + [
+    (section, key, ["x" * 81])
+    for section, key in (("content_config", "topics"),
+                        ("content_config", "excluded_topics"),
+                        ("brand_config", "forbidden_terms"))
+])
+@pytest.mark.parametrize("existing", [False, True])
+def test_invalid_content_profile_is_422_without_write(
+    client, login, member, session, section, key, bad, existing
+):
+    csrf = login(member(MembershipRole.OWNER))
+    url = "/api/v1/projects/test-project/settings"
+    if existing:
+        assert client.patch(url, headers=_csrf(csrf), json={
+            "expected_version": 0, **PROFILE,
+        }).status_code == 200
+    before = client.get(url).json()
+    audits = _count(session, AuditLog, AuditLog.action == "project.settings.update")
+    response = client.patch(url, headers=_csrf(csrf),
+        json={"expected_version": before["version"], section: {key: bad}})
+    assert response.status_code == 422
+    assert client.get(url).json() == before
+    assert (
+        _count(session, AuditLog, AuditLog.action == "project.settings.update")
+        == audits
+    )
+
+
+@pytest.mark.parametrize("role", [
+    MembershipRole.VIEWER, MembershipRole.EDITOR, MembershipRole.ADMIN,
+])
+def test_content_profile_owner_only(client, login, member, role):
+    csrf = login(member(role))
+    url = "/api/v1/projects/test-project/settings"
+    assert client.get(url).status_code == 200
+    assert client.patch(url, headers=_csrf(csrf),
+        json={"expected_version": 0, **PROFILE}).status_code == 403
+
+
+@pytest.mark.parametrize("section", [
+    "content_config", "brand_config", "publishing_config",
+])
+def test_explicit_empty_section_clears_only_that_section(
+    client, login, member, section
+):
+    csrf = login(member(MembershipRole.OWNER))
+    url = "/api/v1/projects/test-project/settings"
+    initial = client.patch(url, headers=_csrf(csrf), json={
+        "expected_version": 0, **PROFILE, "publishing_config": {"legacy": True},
+    }).json()
+    response = client.patch(url, headers=_csrf(csrf), json={
+        "expected_version": 1, section: {},
+    })
+    assert response.status_code == 200
+    assert response.json()[section] == {}
+    for other in ("content_config", "brand_config", "publishing_config"):
+        if other != section:
+            assert response.json()[other] == initial[other]
+
+
+def test_only_submitted_profile_values_are_validated(client, login, member, session):
+    csrf = login(member(MembershipRole.OWNER))
+    session.add(ProjectSettings(
+        project_id="test-project", version=1,
+        content_config={"main_theme": 17, "goals": "legacy", "custom": None},
+        brand_config={"guidelines": False, "unknown": {"anything": [1]}},
+        publishing_config={},
+    ))
+    session.commit()
+    url = "/api/v1/projects/test-project/settings"
+    before = client.get(url).json()
+    response = client.patch(url, headers=_csrf(csrf), json={
+        "expected_version": 1, "publishing_config": {"enabled": False},
+    })
+    assert response.status_code == 200
+    assert response.json()["content_config"] == before["content_config"]
+    assert response.json()["brand_config"] == before["brand_config"]
+    response = client.patch(url, headers=_csrf(csrf), json={
+        "expected_version": 2, "content_config": {"custom": None},
+    })
+    assert response.status_code == 200
+    assert response.json()["content_config"] == {"custom": None}
+    assert response.json()["brand_config"] == before["brand_config"]
+
+
+def test_profile_text_and_lists_are_normalized(client, login, member):
+    csrf = login(member(MembershipRole.OWNER))
+    response = client.patch("/api/v1/projects/test-project/settings",
+        headers=_csrf(csrf), json={
+            "expected_version": 0,
+            "content_config": {
+                "main_theme": "  Theme  ", "audience": " Audience\n",
+                "topics": ["  AI  tools  "], "excluded_topics": [" spam  "],
+                "goals": [" Learn  more "],
+            },
+            "brand_config": {
+                "tone_of_voice": " Calm ", "guidelines": " Rules\n",
+                "forbidden_terms": [" Hype  "],
+            },
+        })
+    assert response.status_code == 200
+    assert response.json()["content_config"] == {
+        "main_theme": "Theme", "audience": "Audience", "topics": ["AI tools"],
+        "excluded_topics": ["spam"], "goals": ["Learn more"],
+    }
+    assert response.json()["brand_config"] == {
+        "tone_of_voice": "Calm", "guidelines": "Rules", "forbidden_terms": ["Hype"],
+    }
+
+
+def test_concurrent_profile_updates_return_one_conflict(client, login, member, session):
+    from concurrent.futures import ThreadPoolExecutor
+
+    csrf = login(member(MembershipRole.OWNER))
+    url = "/api/v1/projects/test-project/settings"
+    assert client.patch(url, headers=_csrf(csrf), json={
+        "expected_version": 0, **PROFILE,
+    }).status_code == 200
+    barrier = threading.Barrier(2)
+
+    def write(theme):
+        barrier.wait(timeout=10)
+        return client.patch(url, headers=_csrf(csrf), json={
+            "expected_version": 1, "content_config": {"main_theme": theme},
+        })
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(write, ["One", "Two"]))
+    assert sorted(r.status_code for r in responses) == [200, 409]
+    winner = next(r for r in responses if r.status_code == 200).json()
+    assert client.get(url).json() == winner
+    assert winner["version"] == 2
+    assert _count(session, AuditLog, AuditLog.action == "project.settings.update") == 2

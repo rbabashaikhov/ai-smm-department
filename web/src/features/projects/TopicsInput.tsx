@@ -8,17 +8,27 @@ export function TopicsInput({
   value,
   onChange,
   disabled = false,
+  label = "Темы",
+  inputLabel = "Новая тема",
+  removeLabel = "Удалить тему",
+  maxItems = MAX_TOPICS,
+  maxLength = MAX_TOPIC_LENGTH,
 }: {
   value: string[];
   onChange: (topics: string[]) => void;
   disabled?: boolean;
+  label?: string;
+  inputLabel?: string;
+  removeLabel?: string;
+  maxItems?: number;
+  maxLength?: number;
 }) {
   const [draft, setDraft] = useState("");
 
   const add = () => {
     const topic = draft.split(/\s+/).filter(Boolean).join(" ");
 
-    if (!topic || topic.length > MAX_TOPIC_LENGTH || value.length >= MAX_TOPICS) return;
+    if (!topic || topic.length > maxLength || value.length >= maxItems) return;
     if (value.some((t) => t.toLowerCase() === topic.toLowerCase())) return;
 
     onChange([...value, topic]);
@@ -27,14 +37,14 @@ export function TopicsInput({
 
   return (
     <fieldset className="topics" disabled={disabled}>
-      <legend>Темы</legend>
-      <ul className="chips" aria-label="Темы проекта">
+      <legend>{label}</legend>
+      <ul className="chips" aria-label={label === "Темы" ? "Темы проекта" : label}>
         {value.map((topic) => (
           <li key={topic} className="chip">
             {topic}
             <button
               type="button"
-              aria-label={`Удалить тему ${topic}`}
+              aria-label={`${removeLabel} ${topic}`}
               onClick={() => onChange(value.filter((t) => t !== topic))}
             >
               ×
@@ -42,12 +52,12 @@ export function TopicsInput({
           </li>
         ))}
       </ul>
-      {value.length < MAX_TOPICS ? (
+      {value.length < maxItems ? (
         <div className="form-row">
           <input
-            aria-label="Новая тема"
+            aria-label={inputLabel}
             value={draft}
-            maxLength={MAX_TOPIC_LENGTH}
+            maxLength={maxLength}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
@@ -57,11 +67,11 @@ export function TopicsInput({
             }}
           />
           <button type="button" onClick={add}>
-            + Тема
+            {label === "Темы" ? "+ Тема" : "+ Добавить"}
           </button>
         </div>
       ) : (
-        <div className="muted small">Не больше {MAX_TOPICS} тем.</div>
+        <div className="muted small">Не больше {maxItems} элементов.</div>
       )}
     </fieldset>
   );
