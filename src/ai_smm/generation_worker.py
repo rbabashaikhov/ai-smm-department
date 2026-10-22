@@ -46,6 +46,7 @@ from sqlalchemy.orm import Session
 
 from ai_smm.application.content_hashing import content_hash
 from ai_smm.config import Settings, get_settings
+from ai_smm.content_profile import PROFILE_PARAM, validate_profile_snapshot
 from ai_smm.db.models import ContentGenerationJob, GenerationJobStatus
 from ai_smm.db.session import is_transient_db_error, session_scope, with_db_retry
 from ai_smm.generation_queue import (
@@ -177,11 +178,13 @@ def _build_graph():
     return build_generation_graph()
 
 
-def _load_knowledge(project_id: str) -> dict[str, Any]:
+def _load_knowledge(
+    project_id: str, *, allow_missing: bool = False
+) -> dict[str, Any]:
     from ai_smm.knowledge.loader import load_project_knowledge
 
     try:
-        return load_project_knowledge(project_id)
+        return load_project_knowledge(project_id, allow_missing=allow_missing)
     except (FileNotFoundError, ValueError) as exc:
         raise GenerationFailed(f"knowledge unavailable: {exc}") from exc
 
@@ -454,7 +457,25 @@ class GenerationWorker:
         import time
 
         params = job.params or {}
-        knowledge = self.knowledge_loader(job.project_id)
+
+        # A job created since SMM-035B2 carries the project's profile and
+        # may run without a knowledge base of its own; a legacy job has no
+        # profile and keeps its old contract: the project's KB is required.
+        # Only an absent key means legacy; a present one is validated, so
+        # an explicit null fails the job instead of downgrading it.
+        profile = None
+        if PROFILE_PARAM in params:
+            try:
+                profile = validate_profile_snapshot(params[PROFILE_PARAM])
+            except ValueError as exc:
+                raise GenerationFailed(str(exc)) from exc
+
+            knowledge = self.knowledge_loader(job.project_id, allow_missing=True)
+        else:
+            knowledge = self.knowledge_loader(job.project_id)
+
+        if knowledge.get("project_id", job.project_id) != job.project_id:
+            raise GenerationFailed("knowledge belongs to another project")
 
         state: dict[str, Any] = {
             "project_id": job.project_id,
@@ -464,6 +485,9 @@ class GenerationWorker:
             "errors": [],
             "publish_live": False,
         }
+
+        if profile is not None:
+            state["content_profile"] = profile
 
         series_size = params.get("series_size")
 

@@ -8,6 +8,10 @@ class SMMState(TypedDict, total=False):
     # Knowledge loaded from knowledge/projects/<project_id>
     knowledge: dict[str, Any]
 
+    # The job's snapshot of the project's editorial profile
+    # (ai_smm.content_profile); absent for legacy jobs and the publishing graph.
+    content_profile: dict[str, Any]
+
     # Strategist output
     content_plan: dict[str, Any]
 

@@ -21,7 +21,7 @@ of its own, `ai-smm-generation`, next to the live publish worker (project
 | Database login | `ai_smm_generation`: EXECUTE on `generation_claim/complete/fail` only — no table, sequence or credential access, so no approvals, no publications. The worker refuses to start with more (exit 2) |
 | Env files | `generation.env` (600): exactly `AI_SMM_DATABASE_URL`, `OPENAI_API_KEY`; `generation.compose.env`: `SMM_GEN_VERSION`, `SMM_GEN_SHARED_NETWORK`, `SMM_GEN_KNOWLEDGE_PATH` |
 | Not present | Threads, storage, tracing credentials (literal empty), credential-key mount, media mount, Docker socket, host ports. Tracing is off: `LANGFUSE_TRACING_ENABLED: "false"` (below) |
-| Knowledge | host `/srv/ai-smm/knowledge`, mounted read-only; a project needs `projects/<id>/` there |
+| Knowledge | host `/srv/ai-smm/knowledge`, mounted read-only; `editorial_policy.md` is required; `projects/<id>/` is required for jobs without `params.content_profile` (created before SMM-035B2) and optional for newer jobs |
 | Limits | one instance (`container_name`), one job at a time, 512 MiB, 0.5 CPU, 64 pids, lease 600 s, ≤ 3 revisions. **Retries are per job**: `max_attempts` is stored on each job and may be 1–10 (the API and CLI default to 2); it is not a service setting |
 | Lifecycle | `restart: "no"`: started by hand, stopped by hand, not after a reboot |
 | Entry point | **only** `gen-compose.sh` (below) |
@@ -157,6 +157,33 @@ SQL
 ```
 
 A queued job is picked up within one poll (15 s).
+
+### Profile-aware jobs (SMM-035B2): rollout order and retries
+
+Since SMM-035B2 the API and the CLI copy the project's content profile into
+`params.content_profile` when they create a job. A worker image older than
+that ignores the key: it would run such a job with the old technical-blog
+prompts, without the project's forbidden terms, and would fail it if the
+project has no knowledge base. So:
+
+1. **Generation worker first.** Release the new image to
+   `ai-smm-generation` (`SMM_GEN_VERSION`) while the API still runs the old
+   one. The new worker runs every existing job exactly as before: a job
+   without `content_profile` keeps the legacy prompts and still requires
+   `projects/<id>/`.
+2. **API (Control Center) second**, only after step 1 is verified. Jobs
+   created from then on carry the profile.
+3. Before step 2 no queued job may carry `content_profile`; before stepping
+   the worker back, none may still be queued or claimed.
+4. Never run an old and a new generation worker at the same time
+   (`container_name` already allows one).
+
+**Retries re-read the knowledge base.** The profile is fixed at creation,
+but the knowledge base is not snapshotted: it is loaded from the read-only
+mount on every attempt. A retry after a KB change (a file added, edited or
+the project directory removed) generates from the KB as it is at the
+retry. Do not edit a project's KB while one of its jobs is queued or
+claimed if the job must use the earlier version.
 
 ## Keep the worker's output before you remove it
 

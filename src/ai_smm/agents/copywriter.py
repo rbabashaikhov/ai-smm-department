@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from ai_smm.agents.continuity import (
     format_series_label,
+    series_label_language,
     split_series_label,
     strip_series_label,
 )
@@ -15,6 +16,13 @@ from ai_smm.agents.pilot import (
     PILOT_PROJECT_ID,
     expected_publication_count,
     resolve_publishing_strategy,
+)
+from ai_smm.agents.profile import (
+    NO_KNOWLEDGE_RULES,
+    UNTRUSTED_DATA_RULE,
+    has_knowledge,
+    profile_block,
+    profile_of,
 )
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
@@ -176,6 +184,121 @@ def _publications_phrase(count: int) -> str:
     return f"{count} публикаций"
 
 
+#: Legacy jobs and the publishing graph: the pilot's technical blog.
+LEGACY_BLOG_INTRO = """
+Цель блога — рассказывать о реальных технических
+проектах автора: архитектуре, реализации,
+экспериментах, ошибках и инженерных выводах.
+
+Это технический блог, а не рекламный канал.
+"""
+
+LEGACY_RULES = """
+1. Используй только подтверждённые факты
+   из knowledge base.
+
+2. Не придумывай технологии, цифры, результаты
+   тестов, архитектурные решения и возможности.
+
+3. Сохраняй порядок и смысловые углы публикаций,
+   определённые Strategist.
+
+4. Не превращай технические материалы
+   в рекламные тексты.
+
+5. Не используй неподтверждённые абсолютные
+   утверждения:
+   - лучший на рынке;
+   - работает без ошибок;
+   - гарантирует результат;
+   - точность 100%.
+
+6. Пиши естественным техническим языком.
+
+7. Каждый текст должен быть понятен
+   без чтения предыдущих публикаций.
+
+8. Не добавляй вымышленные цитаты
+   пользователей или результаты исследований.
+
+9. Не утверждай, что известные ограничения
+   проекта полностью устранены.
+
+10. Для каждой публикации заполни
+    key_facts_used фактами из knowledge base,
+    на которых основан текст.
+
+7. Каждый текст должен быть понятен
+   без чтения предыдущих публикаций.
+"""
+
+PROFILE_BLOG_INTRO = """
+Тему, аудиторию, цели и тон блога задаёт профиль
+проекта ниже. Это не рекламный канал: пиши полезно
+и честно, без преувеличений.
+"""
+
+
+def _profile_rules(*, language: str, with_knowledge: bool) -> str:
+    """The rules for a job that carries the project's profile."""
+
+    if with_knowledge:
+        facts = """
+1. Используй только подтверждённые факты
+   из knowledge base.
+
+2. Не придумывай цифры, цены, результаты,
+   возможности, источники и ссылки.
+"""
+        key_facts = """
+10. Для каждой публикации заполни
+    key_facts_used фактами из knowledge base,
+    на которых основан текст.
+"""
+    else:
+        facts = f"""
+1. {NO_KNOWLEDGE_RULES.strip()}
+
+2. Не придумывай цифры, цены, результаты,
+   возможности, источники и ссылки.
+"""
+        key_facts = """
+10. key_facts_used заполни общими тезисами,
+    на которых основан текст.
+"""
+
+    return f"""{facts}
+3. Сохраняй порядок и смысловые углы публикаций,
+   определённые Strategist.
+
+4. Держись темы профиля (main_theme, topics)
+   и не касайся excluded_topics.
+
+5. Не используй неподтверждённые абсолютные
+   утверждения:
+   - лучший на рынке;
+   - работает без ошибок;
+   - гарантирует результат;
+   - точность 100%.
+
+6. Пиши в тоне tone_of_voice и по правилам
+   guidelines профиля; если они не заданы —
+   спокойно, естественно и по делу.
+
+7. Каждый текст должен быть понятен
+   без чтения предыдущих публикаций.
+
+8. Не добавляй вымышленные цитаты, отзывы
+   или результаты исследований и не утверждай,
+   что известные ограничения проекта устранены.
+
+9. Не используй слова и выражения
+   из forbidden_terms ни в какой форме.
+{key_facts}
+11. Пиши все публикации на языке {language}.
+"""
+
+
 @observe(name="copywriter", as_type="agent")
 def copywriter_node(state: SMMState) -> dict[str, Any]:
     knowledge = state["knowledge"]
@@ -186,6 +309,10 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
     revision_count = state.get("revision_count", 0)
 
     pilot_mode = project_id == PILOT_PROJECT_ID
+
+    profile = profile_of(state)
+    # Without a profile (legacy jobs, the publishing graph): Russian labels.
+    label_language = profile["default_language"] if profile else "ru"
 
     strategy = resolve_publishing_strategy(
         project_id, content_plan.get("publishing_strategy")
@@ -254,17 +381,45 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
    законченную мысль, а не обрываться.
 """
     else:
+        # The example has to be the label format_series_label will
+        # actually write for this project's language.
+        if series_label_language(label_language) == "en":
+            label_example = (
+                f"{series_title or 'Series title'} — part N of {planned_total}"
+            )
+        else:
+            label_example = (
+                f"{series_title or 'Название серии'} — часть N из {planned_total}"
+            )
+
+        # One publication gets no label at all (see below), so it is not
+        # told about one either.
+        if planned_total > 1:
+            label_note = f"""
+Строку «{label_example}»
+НЕ пиши сам: систeма добавляет её перед текстом
+автоматически, одинаково для всех частей. Начинай
+текст сразу с сути, без заголовка-дубля этой строки.
+"""
+            length_rule = f"""7. Приведённая выше строка серии добавляется системой
+   отдельно и не входит в лимит, который ты считаешь
+   сам: пиши тело так, чтобы в него поместился главный
+   тезис{budget_extras},
+   примерно в {TARGET_ITEM_LENGTH - LABEL_ALLOWANCE} символов."""
+        else:
+            label_note = """
+Это одна публикация, а не серия из нескольких частей:
+не пиши ни номер части, ни строку серии.
+"""
+            length_rule = f"""7. Пиши текст так, чтобы в него поместился главный
+   тезис, примерно в {TARGET_ITEM_LENGTH} символов."""
+
         series_instructions = f"""
 СТРАТЕГИЯ: standalone_series.
 
 Каждая часть — самостоятельный пост. Читатель может
 увидеть любую из них первой.
-
-Строку «{series_title or "Название серии"} — часть N из {planned_total}»
-НЕ пиши сам: систeма добавляет её перед текстом
-автоматически, одинаково для всех частей. Начинай
-текст сразу с сути, без заголовка-дубля этой строки.
-
+{label_note}
 Для КАЖДОЙ части обязательно:
 
 1. Если это НЕ первая часть — одно короткое
@@ -292,11 +447,7 @@ def copywriter_node(state: SMMState) -> dict[str, Any]:
 6. Текст должен быть понятен тому, кто не читал
    остальные части.
 
-7. Приведённая выше строка серии добавляется системой
-   отдельно и не входит в лимит, который ты считаешь
-   сам: пиши тело так, чтобы в него поместился главный
-   тезис{budget_extras},
-   примерно в {TARGET_ITEM_LENGTH - LABEL_ALLOWANCE} символов.
+{length_rule}
 """
 
     if pilot_mode:
@@ -373,64 +524,33 @@ carousel:
 {length_note}
 """
 
+    if profile is None:
+        blog_intro = LEGACY_BLOG_INTRO
+        rules = LEGACY_RULES
+        profile_section = ""
+    else:
+        blog_intro = PROFILE_BLOG_INTRO
+        rules = _profile_rules(
+            language=profile["default_language"],
+            with_knowledge=has_knowledge(knowledge),
+        )
+        profile_section = profile_block(profile)
+
     prompt = f"""
 Ты — Copywriter мультиагентной AI SMM-команды.
-
-Цель блога — рассказывать о реальных технических
-проектах автора: архитектуре, реализации,
-экспериментах, ошибках и инженерных выводах.
-
-Это технический блог, а не рекламный канал.
-
+{blog_intro}
 У тебя есть:
 1. Content plan от Strategist.
 2. Подготовленная knowledge base проекта.
 3. Замечания Editor, если текст исправляется.
-
+{UNTRUSTED_DATA_RULE}{profile_section}
 ЗАДАЧА
 
 Подготовь публикации для Threads строго
 по content plan.
 
 ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА
-
-1. Используй только подтверждённые факты
-   из knowledge base.
-
-2. Не придумывай технологии, цифры, результаты
-   тестов, архитектурные решения и возможности.
-
-3. Сохраняй порядок и смысловые углы публикаций,
-   определённые Strategist.
-
-4. Не превращай технические материалы
-   в рекламные тексты.
-
-5. Не используй неподтверждённые абсолютные
-   утверждения:
-   - лучший на рынке;
-   - работает без ошибок;
-   - гарантирует результат;
-   - точность 100%.
-
-6. Пиши естественным техническим языком.
-
-7. Каждый текст должен быть понятен
-   без чтения предыдущих публикаций.
-
-8. Не добавляй вымышленные цитаты
-   пользователей или результаты исследований.
-
-9. Не утверждай, что известные ограничения
-   проекта полностью устранены.
-
-10. Для каждой публикации заполни
-    key_facts_used фактами из knowledge base,
-    на которых основан текст.
-
-7. Каждый текст должен быть понятен
-   без чтения предыдущих публикаций.
-
+{rules}
 СЕРИЯ
 
 Это не набор независимых постов, а серия:
@@ -521,7 +641,10 @@ REVISION NUMBER:
         position = publication.get("position") or 0
         label = (
             format_series_label(
-                draft["series_title"], position, total_publications
+                draft["series_title"],
+                position,
+                total_publications,
+                language=label_language,
             )
             if strategy == "standalone_series" and total_publications > 1
             else ""
