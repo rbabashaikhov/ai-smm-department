@@ -222,7 +222,7 @@ def get_project_settings(
 @router.patch(
     "/{project_id}/settings",
     response_model=ProjectSettingsOut,
-    summary="Replace settings sections (admin and above)",
+    summary="Replace settings sections (owner only)",
 )
 def patch_project_settings(
     payload: ProjectSettingsPatch,

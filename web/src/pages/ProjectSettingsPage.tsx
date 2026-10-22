@@ -135,7 +135,49 @@ function RecordCard({ project, editable }: { project: Project; editable: boolean
   );
 }
 
-/** Topics and tone of voice: typed keys of the settings JSON, owner only.
+const profileFrom = (settings: ProjectSettings) => ({
+  main_theme: typeof settings.content_config.main_theme === "string" ? settings.content_config.main_theme : "",
+  audience: typeof settings.content_config.audience === "string" ? settings.content_config.audience : "",
+  guidelines: typeof settings.brand_config.guidelines === "string" ? settings.brand_config.guidelines : "",
+  excluded_topics: asTopics({ topics: settings.content_config.excluded_topics }),
+  goals: asTopics({ topics: settings.content_config.goals }),
+  forbidden_terms: asTopics({ topics: settings.brand_config.forbidden_terms }),
+});
+
+/** Stored profile values must never be silently replaced by display defaults. */
+function profileIssues(settings: ProjectSettings): string[] {
+  const issues: string[] = [];
+  for (const [section, fields] of [
+    ["content_config", { main_theme: 300, audience: 1000 }],
+    ["brand_config", { tone_of_voice: 4000, guidelines: 4000 }],
+  ] as const) {
+    for (const [key, limit] of Object.entries(fields)) {
+      const value = settings[section][key];
+      if (key in settings[section] &&
+        (typeof value !== "string" || [...value.trim()].length > limit)) issues.push(key);
+    }
+  }
+  for (const [section, key, count, length] of [
+    ["content_config", "topics", 10, 80],
+    ["content_config", "excluded_topics", 10, 80],
+    ["content_config", "goals", 5, 200],
+    ["brand_config", "forbidden_terms", 20, 80],
+  ] as const) {
+    if (!(key in settings[section])) continue;
+    const value = settings[section][key];
+    if (!Array.isArray(value) || value.length > count ||
+      value.some((item) => typeof item !== "string" || !item.trim() ||
+        [...item.trim().replace(/\s+/g, " ")].length > length)) {
+      issues.push(key);
+      continue;
+    }
+    const normalized = (value as string[]).map((item) => item.trim().replace(/\s+/g, " ").toLowerCase());
+    if (new Set(normalized).size !== normalized.length) issues.push(key);
+  }
+  return issues;
+}
+
+/** Editorial profile: typed keys of the settings JSON, owner only.
  *  The whole section is sent back, so keys this page does not edit stay. */
 function ProfileCard({
   projectId,
@@ -150,13 +192,30 @@ function ProfileCard({
   const queryClient = useQueryClient();
   const [topics, setTopics] = useState(asTopics(settings.content_config));
   const [tone, setTone] = useState(asTone(settings.brand_config));
+  const [profile, setProfile] = useState(profileFrom(settings));
+  const [issues, setIssues] = useState(() => profileIssues(settings));
+  const clearInvalid = (key: string) => {
+    if (key === "topics") setTopics([]);
+    else if (key === "tone_of_voice") setTone("");
+    else setProfile((current) => ({
+      ...current, [key]: ["excluded_topics", "goals", "forbidden_terms"].includes(key) ? [] : "",
+    }));
+    setIssues((current) => current.filter((field) => field !== key));
+  };
 
   const save = useMutation({
     mutationFn: () =>
       api.projects.updateSettings(projectId, {
         expected_version: settings.version,
-        content_config: { ...settings.content_config, topics },
-        brand_config: { ...settings.brand_config, tone_of_voice: tone },
+        content_config: {
+          ...settings.content_config, topics,
+          main_theme: profile.main_theme.trim(), audience: profile.audience.trim(),
+          excluded_topics: profile.excluded_topics, goals: profile.goals,
+        },
+        brand_config: {
+          ...settings.brand_config, tone_of_voice: tone.trim(),
+          guidelines: profile.guidelines.trim(), forbidden_terms: profile.forbidden_terms,
+        },
       }),
     onSuccess: (updated) => queryClient.setQueryData(qk.settings(projectId), updated),
   });
@@ -166,9 +225,12 @@ function ProfileCard({
     const fresh = await queryClient.fetchQuery({
       queryKey: qk.settings(projectId),
       queryFn: () => api.projects.settings(projectId),
+      staleTime: 0,
     });
     setTopics(asTopics(fresh.content_config));
     setTone(asTone(fresh.brand_config));
+    setProfile(profileFrom(fresh));
+    setIssues(profileIssues(fresh));
   };
 
   return (
@@ -178,9 +240,45 @@ function ProfileCard({
         aria-label="Editorial profile form"
         onSubmit={(event) => {
           event.preventDefault();
-          save.mutate();
+          if (issues.length === 0) save.mutate();
         }}
       >
+        {issues.map((key) => (
+          <div key={key} role="alert" className="banner banner-warn">
+            Некорректное сохранённое значение поля {key}. Сохранение профиля заблокировано.
+            <pre>{JSON.stringify(key in settings.content_config ? settings.content_config[key] : settings.brand_config[key])}</pre>
+            {editable && (
+              <button type="button" onClick={() => clearInvalid(key)}>
+                Очистить некорректное поле {key}
+              </button>
+            )}
+          </div>
+        ))}
+        {([
+          ["main_theme", "Основная тема", 300],
+          ["audience", "Аудитория", 1000],
+          ["guidelines", "Редакционные правила", 4000],
+        ] as const).map(([key, label, limit]) => (
+          <label key={key}>
+            {label}
+            <textarea
+              rows={3} value={profile[key]} maxLength={limit} disabled={!editable}
+              onChange={(e) => setProfile({ ...profile, [key]: e.target.value })}
+            />
+          </label>
+        ))}
+        {([
+          ["excluded_topics", "Исключённые темы", "Новая исключённая тема", 10, 80, "Удалить исключённую тему"],
+          ["goals", "Цели", "Новая цель", 5, 200, "Удалить цель"],
+          ["forbidden_terms", "Запрещённые слова", "Новое запрещённое слово", 20, 80, "Удалить запрещённое слово"],
+        ] as const).map(([key, label, inputLabel, maxItems, maxLength, removeLabel]) => (
+          <TopicsInput
+            key={key} label={label} inputLabel={inputLabel}
+            maxItems={maxItems} maxLength={maxLength} removeLabel={removeLabel}
+            value={profile[key]} disabled={!editable}
+            onChange={(value) => setProfile({ ...profile, [key]: value })}
+          />
+        ))}
         <TopicsInput value={topics} onChange={setTopics} disabled={!editable} />
         <label>
           Tone of Voice
@@ -202,7 +300,7 @@ function ProfileCard({
         ) : null}
         {editable ? (
           <div className="form-actions">
-            <button type="submit" disabled={save.isPending}>
+            <button type="submit" disabled={save.isPending || issues.length > 0}>
               Сохранить
             </button>
           </div>
@@ -257,8 +355,9 @@ export function ProjectSettingsPage() {
       </Card>
       <Card title="База знаний (только чтение)">
         <p>
-          <code>knowledge/projects/{project.data.id}/</code> — ведётся в репозитории. Control
-          Center не читает и не изменяет файлы базы знаний.
+          Документы из <code>knowledge/projects/{project.data.id}/</code> доступны для
+          просмотра в разделе «База знаний», если каталог подключён к Control Center.
+          Редактирование файлов пока недоступно.
         </p>
       </Card>
     </>

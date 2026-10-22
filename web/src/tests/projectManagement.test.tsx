@@ -120,14 +120,166 @@ describe("project settings", () => {
     const { user } = renderApp(server, `/projects/${PROJECT_ID}/settings`);
 
     await user.type(await screen.findByLabelText("Новая тема"), "ml{Enter}");
+    await user.type(screen.getByLabelText("Основная тема"), "  Блог  ");
+    await user.type(screen.getByLabelText("Аудитория"), "  Инженеры  ");
+    await user.type(screen.getByLabelText("Редакционные правила"), " Проверять факты  ");
+    await user.type(screen.getByLabelText("Новая исключённая тема"), "Спам{Enter}");
+    await user.type(screen.getByLabelText("Новая цель"), "Обучение{Enter}");
+    await user.type(screen.getByLabelText("Новое запрещённое слово"), "Кликбейт{Enter}");
     const profile = screen.getByRole("form", { name: "Editorial profile form" });
     await user.click(within(profile).getByRole("button", { name: "Сохранить" }));
 
     await waitFor(() => expect(server.callsTo("PATCH", /\/settings$/)).toHaveLength(1));
     expect(server.callsTo("PATCH", /\/settings$/)[0]!.body).toMatchObject({
       expected_version: 2,
-      content_config: { tone: "dry", topics: ["ml"] },
+      content_config: {
+        tone: "dry", topics: ["ml"], main_theme: "Блог", audience: "Инженеры",
+        goals: ["Обучение"], excluded_topics: ["Спам"],
+      },
+      brand_config: { guidelines: "Проверять факты", forbidden_terms: ["Кликбейт"] },
     });
+  });
+
+  it("clears every profile field while preserving unrelated section keys", async () => {
+    const server = createServer("owner");
+    const url = "/api/v1/projects/:projectId/settings";
+    server.on("GET", url, ok({
+      project_id: PROJECT_ID, version: 2, updated_at: null,
+      content_config: {
+        main_theme: "Theme", audience: "Audience", topics: ["Topic"],
+        excluded_topics: ["Spam"], goals: ["Learn"], custom: { legacy: 42 },
+      },
+      brand_config: {
+        tone_of_voice: "Calm", guidelines: "Rules", forbidden_terms: ["Hype"],
+        unknown: { nested: [1, null] },
+      },
+      publishing_config: { keep: true },
+    }));
+    server.on("PATCH", url, (req) => ok({
+      project_id: PROJECT_ID, ...(req.body as object), version: 3, updated_at: null,
+      publishing_config: { keep: true },
+    }));
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/settings`);
+    await screen.findByLabelText("Основная тема");
+    for (const label of ["Основная тема", "Аудитория", "Редакционные правила", "Tone of Voice"]) {
+      await user.clear(screen.getByLabelText(label));
+    }
+    for (const label of ["Удалить тему Topic", "Удалить исключённую тему Spam",
+      "Удалить цель Learn", "Удалить запрещённое слово Hype"]) {
+      await user.click(screen.getByRole("button", { name: label }));
+    }
+    await user.click(within(screen.getByRole("form", { name: "Editorial profile form" }))
+      .getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(server.callsTo("PATCH", /\/settings$/)).toHaveLength(1));
+    expect(server.callsTo("PATCH", /\/settings$/)[0]!.body).toEqual({
+      expected_version: 2,
+      content_config: {
+        main_theme: "", audience: "", topics: [], goals: [], excluded_topics: [],
+        custom: { legacy: 42 },
+      },
+      brand_config: {
+        tone_of_voice: "", guidelines: "", forbidden_terms: [],
+        unknown: { nested: [1, null] },
+      },
+    });
+    await waitFor(() => expect(screen.getByText("Редакционный профиль · v3")).toBeInTheDocument());
+    expect(screen.getByLabelText("Основная тема")).toHaveValue("");
+    expect(screen.queryByText("Learn")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["content_config", "main_theme", 42],
+    ["content_config", "audience", null],
+    ["content_config", "topics", ["valid", 17]],
+    ["content_config", "excluded_topics", "legacy"],
+    ["content_config", "goals", ["", "goal"]],
+    ["brand_config", "guidelines", {}],
+    ["brand_config", "tone_of_voice", false],
+    ["brand_config", "forbidden_terms", ["Spam", " spam "]],
+  ])("blocks silent replacement of malformed %s.%s", async (section, key, value) => {
+    const server = createServer("owner");
+    const url = "/api/v1/projects/:projectId/settings";
+    server.on("GET", url, ok({
+      project_id: PROJECT_ID, version: 2, updated_at: null,
+      content_config: { custom: 1 }, brand_config: { legacy: true }, publishing_config: {},
+      [section as string]: { [key as string]: value, custom: 1 },
+    }));
+    server.on("PATCH", url, (req) => ok({
+      project_id: PROJECT_ID, ...(req.body as object), version: 3,
+      updated_at: null, publishing_config: {},
+    }));
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/settings`);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `Некорректное сохранённое значение поля ${key}`,
+    );
+    const form = screen.getByRole("form", { name: "Editorial profile form" });
+    expect(within(form).getByRole("button", { name: "Сохранить" })).toBeDisabled();
+    await user.type(screen.getByLabelText("Редакционные правила"), "Unrelated edit");
+    expect(server.callsTo("PATCH", /\/settings$/)).toHaveLength(0);
+    expect(within(form).getByRole("button", { name: "Сохранить" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: `Очистить некорректное поле ${key}` }));
+    await user.click(within(form).getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(server.callsTo("PATCH", /\/settings$/)).toHaveLength(1));
+    expect(server.callsTo("PATCH", /\/settings$/)[0]!.body).toMatchObject({
+      [section as string]: { custom: 1, [key as string]:
+        ["topics", "excluded_topics", "goals", "forbidden_terms"].includes(key as string) ? [] : "" },
+    });
+  });
+
+  it("reloads every profile field after a conflict and shows validation errors", async () => {
+    const server = createServer("owner");
+    const url = "/api/v1/projects/:projectId/settings";
+    server.on("PATCH", url, apiError(409, "VERSION_CONFLICT", "changed"));
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/settings`);
+    await user.type(await screen.findByLabelText("Основная тема"), "Local draft");
+    const form = screen.getByRole("form", { name: "Editorial profile form" });
+    await user.click(within(form).getByRole("button", { name: "Сохранить" }));
+    await screen.findByTestId("version-conflict");
+    expect(screen.getByLabelText("Основная тема")).toHaveValue("Local draft");
+    server.on("GET", url, ok({
+      project_id: PROJECT_ID, version: 4, updated_at: null, publishing_config: {},
+      content_config: {
+        main_theme: "Fresh theme", audience: "Fresh audience",
+        goals: ["Fresh goal"], excluded_topics: ["Fresh exclusion"], topics: ["Fresh topic"],
+      },
+      brand_config: {
+        guidelines: "Fresh rules", forbidden_terms: ["Fresh term"], tone_of_voice: "Fresh tone",
+      },
+    }));
+    await user.click(screen.getByRole("button", { name: "Перечитать" }));
+    await waitFor(() => expect(screen.getByLabelText("Основная тема")).toHaveValue("Fresh theme"));
+    expect(screen.getByLabelText("Аудитория")).toHaveValue("Fresh audience");
+    expect(screen.getByLabelText("Редакционные правила")).toHaveValue("Fresh rules");
+    expect(screen.getByLabelText("Tone of Voice")).toHaveValue("Fresh tone");
+    for (const text of ["Fresh goal", "Fresh exclusion", "Fresh term", "Fresh topic"]) {
+      expect(screen.getByText(text)).toBeInTheDocument();
+    }
+    server.on("PATCH", url, apiError(422, "VALIDATION_ERROR", "Profile too large"));
+    await user.click(within(screen.getByRole("form", { name: "Editorial profile form" }))
+      .getByRole("button", { name: "Сохранить" }));
+    expect(await screen.findByText(/Profile too large/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Основная тема")).toHaveValue("Fresh theme");
+    expect(server.callsTo("PATCH", /\/settings$/)[1]!.body).toMatchObject({ expected_version: 4 });
+  });
+
+  it("enforces profile form limits and lets the owner remove entries", async () => {
+    const { user } = renderApp(createServer("owner"), `/projects/${PROJECT_ID}/settings`);
+    expect(await screen.findByLabelText("Основная тема")).toHaveAttribute("maxlength", "300");
+    expect(screen.getByLabelText("Аудитория")).toHaveAttribute("maxlength", "1000");
+    expect(screen.getByLabelText("Редакционные правила")).toHaveAttribute("maxlength", "4000");
+    expect(screen.getByLabelText("Новая цель")).toHaveAttribute("maxlength", "200");
+    expect(screen.getByLabelText("Новая исключённая тема")).toHaveAttribute("maxlength", "80");
+    expect(screen.getByLabelText("Новое запрещённое слово")).toHaveAttribute("maxlength", "80");
+    await user.type(screen.getByLabelText("Новая цель"), "  Goal 0  {Enter}");
+    await user.type(screen.getByLabelText("Новая цель"), "goal 0{Enter}");
+    expect(within(screen.getByRole("list", { name: "Цели" })).getAllByRole("listitem")).toHaveLength(1);
+    await user.clear(screen.getByLabelText("Новая цель"));
+    for (let i = 1; i < 5; i++) {
+      await user.type(screen.getByLabelText("Новая цель"), `Goal ${i}{Enter}`);
+    }
+    expect(screen.queryByLabelText("Новая цель")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Удалить цель Goal 0" }));
+    expect(screen.getByLabelText("Новая цель")).toBeInTheDocument();
   });
 
   it("a version conflict offers a re-read instead of overwriting", async () => {
@@ -154,6 +306,10 @@ describe("project settings", () => {
 
     const record = await screen.findByRole("form", { name: "Project record form" });
     expect(within(record).getByLabelText("Название")).toBeDisabled();
+    for (const label of ["Основная тема", "Аудитория", "Редакционные правила",
+      "Новая исключённая тема", "Новая цель", "Новое запрещённое слово"]) {
+      expect(screen.getByLabelText(label)).toBeDisabled();
+    }
     expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
   });
 });

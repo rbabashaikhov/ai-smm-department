@@ -143,11 +143,9 @@ def update_settings(
     brand_config: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> SettingsView:
-    """Replace the given sections, if the caller read the current version.
+    """Replace supplied sections; leave omitted sections untouched.
 
-    A section that is not supplied is left untouched. A section that is
-    supplied is replaced whole: merging two JSON documents whose shape the
-    backend does not yet own would make it impossible to delete a key.
+    An explicitly supplied empty object clears that section.
     """
 
     now = now or datetime.now(timezone.utc)
@@ -240,34 +238,35 @@ MAX_TONE_LENGTH = 4000
 MAX_SECTION_BYTES = 16 * 1024
 
 
-def normalize_topics(raw: Any) -> list[str]:
+def normalize_string_list(
+    raw: Any, *, field: str, max_items: int, max_length: int,
+) -> list[str]:
     if not isinstance(raw, list):
-        raise ValueError("content_config.topics must be a list of strings.")
-
-    if len(raw) > MAX_TOPICS:
-        raise ValueError(f"At most {MAX_TOPICS} topics are allowed.")
-
-    topics: list[str] = []
+        raise ValueError(f"{field} must be a list of strings.")
+    if len(raw) > max_items:
+        raise ValueError(f"{field} allows at most {max_items} items.")
+    result: list[str] = []
     seen: set[str] = set()
-
     for item in raw:
         if not isinstance(item, str):
-            raise ValueError("Every topic must be a string.")
-
-        topic = " ".join(item.split())
-
-        if not topic or len(topic) > MAX_TOPIC_LENGTH:
+            raise ValueError(f"Every {field} item must be a string.")
+        value = " ".join(item.split())
+        if not value or len(value) > max_length:
             raise ValueError(
-                f"Every topic must be 1-{MAX_TOPIC_LENGTH} characters."
+                f"Every {field} item must be 1-{max_length} characters."
             )
+        if value.casefold() in seen:
+            raise ValueError(f"{field} contains a duplicate item.")
+        seen.add(value.casefold())
+        result.append(value)
+    return result
 
-        if topic.casefold() in seen:
-            raise ValueError(f"Topic {topic!r} is listed twice.")
 
-        seen.add(topic.casefold())
-        topics.append(topic)
-
-    return topics
+def normalize_topics(raw: Any) -> list[str]:
+    return normalize_string_list(
+        raw, field="content_config.topics",
+        max_items=MAX_TOPICS, max_length=MAX_TOPIC_LENGTH,
+    )
 
 
 def normalize_tone(raw: Any) -> str:
@@ -301,6 +300,31 @@ def validate_settings_sections(
 
         if name == "brand_config" and "tone_of_voice" in section:
             section["tone_of_voice"] = normalize_tone(section["tone_of_voice"])
+
+        text_limits = {
+            "content_config": {"main_theme": 300, "audience": 1000},
+            "brand_config": {"guidelines": 4000},
+        }
+        list_limits = {
+            "content_config": {"excluded_topics": (10, 80), "goals": (5, 200)},
+            "brand_config": {"forbidden_terms": (20, 80)},
+        }
+        for key, limit in text_limits.get(name, {}).items():
+            if key in section:
+                raw = section[key]
+                if not isinstance(raw, str) or len(raw.strip()) > limit:
+                    raise ValueError(
+                        f"{name}.{key} must be a string of at most {limit} characters."
+                    )
+
+                section[key] = raw.strip()
+
+        for key, (count, length) in list_limits.get(name, {}).items():
+            if key in section:
+                section[key] = normalize_string_list(
+                    section[key], field=f"{name}.{key}",
+                    max_items=count, max_length=length,
+                )
 
         size = len(
             json.dumps(section, ensure_ascii=False).encode("utf-8")
