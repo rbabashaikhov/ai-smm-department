@@ -4,8 +4,6 @@ from __future__ import annotations
 from typing import Any
 
 from langchain_openai import ChatOpenAI
-from langfuse import observe
-from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
 from ai_smm.agents.continuity import (
@@ -20,6 +18,7 @@ from ai_smm.agents.pilot import (
 )
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
+from ai_smm.tracing import langchain_callbacks, observe
 
 
 logger = get_logger(__name__)
@@ -89,8 +88,6 @@ shorten_llm = ChatOpenAI(
     max_retries=1,
 )
 
-langfuse_handler = CallbackHandler()
-
 
 def shorten_text(
     text: str,
@@ -144,7 +141,7 @@ def shorten_text(
 
         result = shorten_llm.invoke(
             prompt,
-            config={"callbacks": [langfuse_handler]},
+            config={"callbacks": langchain_callbacks()},
         )
         candidate = str(result.content).strip()
 
@@ -480,7 +477,7 @@ REVISION NUMBER:
     result = structured_llm.invoke(
         prompt,
         config={
-            "callbacks": [langfuse_handler],
+            "callbacks": langchain_callbacks(),
         },
     )
 

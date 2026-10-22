@@ -4,10 +4,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from langfuse import observe
-
 from ai_smm.publishing.threads import ThreadsPublisher
 from ai_smm.state import SMMState
+from ai_smm.tracing import observe
 
 
 PILOT_PROJECT_ID = "ai-catalog-consultant"

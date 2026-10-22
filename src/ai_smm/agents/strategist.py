@@ -1,8 +1,6 @@
 from typing import Any
 
 from langchain_openai import ChatOpenAI
-from langfuse import observe
-from langfuse.langchain import CallbackHandler
 from pydantic import BaseModel, Field
 
 from ai_smm.agents.pilot import (
@@ -11,6 +9,7 @@ from ai_smm.agents.pilot import (
     resolve_publishing_strategy,
 )
 from ai_smm.state import SMMState
+from ai_smm.tracing import langchain_callbacks, observe
 
 
 #: The series title is repeated in the label of every standalone part,
@@ -107,7 +106,6 @@ llm = ChatOpenAI(
     max_retries=1,
 )
 
-langfuse_handler = CallbackHandler()
 
 structured_llm = llm.with_structured_output(ContentPlan)
 
@@ -221,7 +219,7 @@ Knowledge base:
     result = structured_llm.invoke(
         prompt,
         config={
-            "callbacks": [langfuse_handler],
+            "callbacks": langchain_callbacks(),
         },
     )
 

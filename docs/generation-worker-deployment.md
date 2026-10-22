@@ -20,7 +20,7 @@ of its own, `ai-smm-generation`, next to the live publish worker (project
 | Image | `ai-smm:<release>`, the publish worker's own image; entrypoint `ai-smm-generation-worker`; `pull_policy: never` |
 | Database login | `ai_smm_generation`: EXECUTE on `generation_claim/complete/fail` only — no table, sequence or credential access, so no approvals, no publications. The worker refuses to start with more (exit 2) |
 | Env files | `generation.env` (600): exactly `AI_SMM_DATABASE_URL`, `OPENAI_API_KEY`; `generation.compose.env`: `SMM_GEN_VERSION`, `SMM_GEN_SHARED_NETWORK`, `SMM_GEN_KNOWLEDGE_PATH` |
-| Not present | Threads, storage, tracing credentials (literal empty), credential-key mount, media mount, Docker socket, host ports |
+| Not present | Threads, storage, tracing credentials (literal empty), credential-key mount, media mount, Docker socket, host ports. Tracing is off: `LANGFUSE_TRACING_ENABLED: "false"` (below) |
 | Knowledge | host `/srv/ai-smm/knowledge`, mounted read-only; a project needs `projects/<id>/` there |
 | Limits | one instance (`container_name`), one job at a time, 512 MiB, 0.5 CPU, 64 pids, lease 600 s, ≤ 3 revisions. **Retries are per job**: `max_attempts` is stored on each job and may be 1–10 (the API and CLI default to 2); it is not a service setting |
 | Lifecycle | `restart: "no"`: started by hand, stopped by hand, not after a reboot |
@@ -43,6 +43,44 @@ monetary limit exists only if the owner sets one on the OpenAI project.
 Network: the shared network is the only one that reaches the database and it
 has outbound access (the host's other projects use it). With
 `OPENAI_API_KEY` empty nothing can be called. A real key is a separate step.
+
+### Tracing (Langfuse): off, and how it is kept off
+
+The worker sends **no telemetry**. Before SMM-035C it did try: empty
+`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY` do not disable the Langfuse SDK
+(it checks for a missing key, not an empty one), so it exported OTLP spans —
+prompts and drafts included — to its default `https://cloud.langfuse.com`
+with an empty credential, and the host logged
+`opentelemetry.exporter.otlp.proto.http.trace_exporter … 401 Unauthorized`
+(PRJ-013 W4-C and R1). The batches were refused, but they left the host.
+
+Two independent guards now:
+
+- **compose**: `LANGFUSE_TRACING_ENABLED: "false"`, a literal next to the
+  empty keys. The SDK honours it, so it also stops the export from images
+  built before SMM-035C (`ai-smm:702b889` and earlier) once this file is on
+  the host;
+- **code** (`ai_smm.tracing`, from the SMM-035C image on): tracing is on only
+  when `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` **and** an endpoint are
+  all non-empty and `LANGFUSE_TRACING_ENABLED` is unset or `true`. The
+  endpoint is `LANGFUSE_BASE_URL`, else the SDK's older `LANGFUSE_HOST`;
+  with neither, tracing is off. Otherwise no Langfuse client is created at
+  all — this holds for the agents and the legacy `scripts/run_demo.py` and
+  `scripts/publish_live.py`, whose final flush creates no client either. A
+  partial configuration (keys without an endpoint, `true` without keys, any
+  other flag value) is off and logs one WARNING naming the missing
+  variables, never their values. There is no fallback to
+  `cloud.langfuse.com`.
+
+Tracing for this worker cannot be switched on from `generation.env`: the
+wrapper refuses any `LANGFUSE_*` key there, and the compose literals outrank
+it. Turning it on would be a change to `compose.generation.yml` (keys from a
+separate 600 file, an explicit `LANGFUSE_BASE_URL`, the flag `true`) and
+needs its own approval: spans carry prompts, knowledge-base excerpts and
+drafts.
+
+Verify after a start: `./gen-compose.sh logs` has no
+`opentelemetry` / `Failed to export spans` line.
 
 ## The wrapper: `gen-compose.sh`
 

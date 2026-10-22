@@ -5,10 +5,9 @@ load_dotenv()
 
 from pprint import pprint
 
-from langfuse import get_client, observe, propagate_attributes
-
 from ai_smm.graph import build_graph
 from ai_smm.knowledge.loader import load_project_knowledge
+from ai_smm.tracing import flush, observe, propagate_attributes
 
 
 @observe(name="ai-smm-pipeline", as_type="agent")
@@ -62,6 +61,5 @@ print("Revisions:", result.get("revision_count"))
 print("\n=== PUBLICATION ===")
 pprint(result.get("publication"))
 
-# Чтобы CLI не завершился раньше отправки trace
-langfuse = get_client()
-langfuse.flush()
+# Чтобы CLI не завершился раньше отправки trace (без трассировки -- no-op)
+flush()

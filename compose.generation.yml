@@ -63,6 +63,10 @@ services:
       LOG_LEVEL: INFO
       LOG_FORMAT: json
       # Defence in depth: no publishing, storage or tracing credential.
+      # Empty Langfuse keys alone do NOT stop the SDK from exporting (it
+      # sent spans to cloud.langfuse.com and got 401, SMM-035C): the flag
+      # turns tracing off, in this release and in images before it.
+      LANGFUSE_TRACING_ENABLED: "false"
       THREADS_ACCESS_TOKEN: ""
       THREADS_API_BASE_URL: http://127.0.0.1:9
       STORAGE_SSH_PASSWORD: ""
