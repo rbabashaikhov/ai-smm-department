@@ -504,6 +504,37 @@ case-insensitively. The existing 16 KiB JSON limit applies to each submitted sec
 preserved keys. Language remains the project's `default_language`, edited
 in the project record card; there is no duplicate language setting.
 
+**Generation uses a snapshot.** `POST /projects/{id}/generation-jobs`
+copies these eight fields and `default_language` into the job's
+`params.content_profile` (with `schema_version: 1` and
+`settings_version`, which is `null` for a project with no settings row).
+The generation worker has no access to `project_settings`; it and the
+agents use only that copy, so editing the settings later never changes
+a job that already exists, including its retries (the knowledge base, by
+contrast, is re-read on every attempt; see
+docs/generation-worker-deployment.md). If a stored section is not a JSON
+object, or a known field is malformed, the job is refused with 422 and no
+job is written until the owner fixes it. A job
+created before this field existed has no `content_profile` and runs as
+before: technical-blog prompts and a required project knowledge base.
+A job with a profile can also run for a project that has no knowledge
+base, or only empty documents (blank text, null or empty YAML); the
+agents are then told not to state project facts, figures, prices or
+sources.
+
+Series labels follow `default_language`: `en` and `en-*` projects get
+"— part N of M", every other language keeps "— часть N из M". A job for a
+single publication gets no label.
+
+`forbidden_terms` are checked deterministically by the Editor, and any
+exact occurrence blocks its approval verdict. Matching contract: text and
+term are NFKC-normalised, casefolded and have every run of Unicode
+whitespace (including no-break spaces) collapsed to one space; a term
+matches only when neither neighbour is a letter, digit, underscore or
+combining mark, so it is never found inside another word. There is no
+stemming: other inflected forms ("пальчиками оближешь" for "пальчики
+оближешь") are left to the Editor model's judgement and may pass.
+
 ### Knowledge base (read-only)
 
 The documents are exactly the files the agents' loader reads: the `.md`,

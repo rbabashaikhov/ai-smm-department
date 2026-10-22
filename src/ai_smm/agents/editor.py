@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+import unicodedata
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -15,6 +17,12 @@ from ai_smm.agents.pilot import (
     PILOT_PROJECT_ID,
     expected_publication_count,
     resolve_publishing_strategy,
+)
+from ai_smm.agents.profile import (
+    UNTRUSTED_DATA_RULE,
+    has_knowledge,
+    profile_block,
+    profile_of,
 )
 from ai_smm.logging_setup import get_logger
 from ai_smm.state import SMMState
@@ -91,19 +99,84 @@ llm = ChatOpenAI(
 structured_llm = llm.with_structured_output(EditorReview)
 
 
+def normalize_for_terms(text: str) -> str:
+    """The form both a text and a forbidden term are compared in.
+
+    NFKC, not NFC: besides composing "e" + U+0301 into "é" it folds
+    compatibility variants (full-width letters, ligatures) onto the plain
+    letters a reader sees. Then casefold, NFKC again (casefolding can
+    leave a string unnormalised), and every run of Unicode whitespace --
+    no-break and narrow spaces included -- becomes one ordinary space.
+    """
+
+    folded = unicodedata.normalize(
+        "NFKC", unicodedata.normalize("NFKC", text).casefold()
+    )
+
+    return " ".join(folded.split())
+
+
+def _is_word_char(char: str) -> bool:
+    # A combining mark continues the letter before it.
+    return (
+        char.isalnum()
+        or char == "_"
+        or unicodedata.category(char).startswith("M")
+    )
+
+
+def contains_term(normalized_text: str, normalized_term: str) -> bool:
+    """Whether the exact term occurs as a whole word or phrase.
+
+    Both arguments come from normalize_for_terms. An occurrence counts
+    only when neither neighbour is a word character, so "epic" is not
+    found in "epicenter" and "AI" not in "SAID", while "ai-агенты" still
+    contains "ai". This is exact matching, not morphology: "пальчики
+    оближешь" does not find "пальчиками оближешь"; other forms are left
+    to the Editor's own reading.
+    """
+
+    if not normalized_term:
+        return False
+
+    start = normalized_text.find(normalized_term)
+
+    while start != -1:
+        end = start + len(normalized_term)
+        before = normalized_text[start - 1] if start > 0 else ""
+        after = normalized_text[end] if end < len(normalized_text) else ""
+
+        if not (before and _is_word_char(before)) and not (
+            after and _is_word_char(after)
+        ):
+            return True
+
+        start = normalized_text.find(normalized_term, start + 1)
+
+    return False
+
+
 def validate_draft(
     draft: dict[str, Any],
     project_id: str,
     expected_count: int | None = None,
+    forbidden_terms: Sequence[str] = (),
 ) -> list[str]:
     """Deterministic checks that the LLM cannot override.
 
     expected_count is how many publications the Generation Job asked for.
     Without it the pilot still needs its three and another project has no
     count to enforce.
+
+    forbidden_terms come from the job's project profile; an exact
+    occurrence of one (contains_term) blocks approval like every other
+    issue here.
     """
 
     issues: list[str] = []
+    normalized_terms = [
+        (term, normalize_for_terms(term)) for term in forbidden_terms
+    ]
     publications = draft.get("publications")
 
     if not isinstance(publications, list) or not publications:
@@ -221,6 +294,16 @@ def validate_draft(
                         "forbids unsupported absolute claims."
                     )
 
+            normalized_text = normalize_for_terms(text)
+
+            for term, normalized_term in normalized_terms:
+                if contains_term(normalized_text, normalized_term):
+                    issues.append(
+                        f"Publication {pub_index}, item "
+                        f"{item_index}: the term '{term}' is forbidden "
+                        "by the project profile; remove it."
+                    )
+
             if project_id == PILOT_PROJECT_ID:
                 normalized = text.casefold()
 
@@ -277,10 +360,13 @@ def editor_node(state: SMMState) -> dict[str, Any]:
         expects_sequel=expects_sequel,
     )
 
+    profile = profile_of(state)
+
     deterministic_issues = validate_draft(
         draft=draft,
         project_id=project_id,
         expected_count=state.get("series_size"),
+        forbidden_terms=profile["forbidden_terms"] if profile else (),
     )
 
     # Continuity is checked deterministically before the model sees the
@@ -304,12 +390,77 @@ def editor_node(state: SMMState) -> dict[str, Any]:
         if f"over the {MAX_ITEM_LENGTH} limit" not in issue
     ]
 
+    if profile is None:
+        # Legacy jobs and the publishing graph: the pilot's technical blog.
+        blog = "технического блога"
+        style_check = "5. Естественный технический стиль."
+        profile_checks = ""
+        profile_section = ""
+    else:
+        blog = "блога проекта"
+        style_check = (
+            "5. Соответствие тону (tone_of_voice) и редакционным\n"
+            "   правилам (guidelines) профиля проекта."
+        )
+        profile_checks = f"""
+ПРОФИЛЬ ПРОЕКТА — проверь также:
+
+1. Серия не выходит за тему профиля (main_theme, topics)
+   и не касается excluded_topics. Нарушение — issue,
+   approved=false.
+2. В тексте нет forbidden_terms ни в какой форме.
+   Автоматическая проверка находит только точное
+   написание термина (без учёта регистра и пробелов);
+   другие словоформы и перефразировки проверь сам.
+3. Все тексты написаны на языке {profile["default_language"]}.
+4. Аудитория и цели серии соответствуют audience и goals.
+"""
+        if not has_knowledge(knowledge):
+            profile_checks += """5. У проекта нет knowledge base: любые конкретные
+   утверждения о проекте, цифры, статистика, цены,
+   даты, цитаты, ссылки и источники — issue,
+   approved=false.
+"""
+        profile_section = profile_block(profile)
+
+    # A single publication carries no series label (copywriter), so the
+    # Editor must not ask for one.
+    if expected_publication_count(project_id, state.get("series_size")) == 1:
+        standalone_numbering = (
+            "Здесь одна публикация, а не серия из нескольких частей:\n"
+            "номер части и строка серии не нужны."
+        )
+    else:
+        standalone_numbering = (
+            "Для стратегии standalone_series каждая часть\n"
+            "обязана обозначать серию и свой номер."
+        )
+
+    # The semantic guard is the pilot's own documented limitation; for any
+    # other project the paragraph would be a claim about something it does
+    # not have.
+    pilot_guard_note = (
+        """- Semantic guard в этом проекте убирает
+  выдуманное моделью ограничение из обращения
+  к каталогу — и в этом успешен. Известное,
+  задокументированное ограничение в другом:
+  формулировка финального ответа всё равно
+  может его повторить. Текст не должен путать
+  эти два утверждения: «guard иногда не
+  справляется» или «ограничение не устранено» —
+  искажение, даже если сама отсылка к guard
+  присутствует.
+"""
+        if project_id == PILOT_PROJECT_ID
+        else ""
+    )
+
     prompt = f"""
-Ты — Editor технического блога AI SMM Department.
+Ты — Editor {blog} AI SMM Department.
 
 Твоя задача — проверить пакет публикаций перед
 отправкой в Threads.
-
+{UNTRUSTED_DATA_RULE}{profile_section}
 Проверяй:
 
 1. Соответствие каждого факта knowledge base.
@@ -317,13 +468,13 @@ def editor_node(state: SMMState) -> dict[str, Any]:
    и неподтверждённых возможностей.
 3. Корректное публичное название проекта.
 4. Соответствие редакционной политике.
-5. Естественный технический стиль.
+{style_check}
 6. Отсутствие рекламных преувеличений.
 7. Различие смысловых углов публикаций.
 8. Самостоятельность каждого текста.
 9. Корректное описание ошибок и ограничений.
 10. Разделение результатов разных тестов.
-
+{profile_checks}
 СВЯЗНОСТЬ СЕРИИ
 
 Это не набор независимых постов, а серия.
@@ -357,8 +508,7 @@ def editor_node(state: SMMState) -> dict[str, Any]:
 9. Соблюдены ограничения Threads: не более
    {MAX_ITEM_LENGTH} символов в элементе.
 
-Для стратегии standalone_series каждая часть
-обязана обозначать серию и свой номер.
+{standalone_numbering}
 
 Для стратегии reply_thread нумерация в тексте
 не нужна, но каждый ответ обязан продолжать
@@ -386,17 +536,7 @@ def editor_node(state: SMMState) -> dict[str, Any]:
   качество» без конкретного основания из
   knowledge base — ничем не лучше прямой
   рекламы, просто без восклицательного знака.
-- Semantic guard в этом проекте убирает
-  выдуманное моделью ограничение из обращения
-  к каталогу — и в этом успешен. Известное,
-  задокументированное ограничение в другом:
-  формулировка финального ответа всё равно
-  может его повторить. Текст не должен путать
-  эти два утверждения: «guard иногда не
-  справляется» или «ограничение не устранено» —
-  искажение, даже если сама отсылка к guard
-  присутствует.
-
+{pilot_guard_note}
 Если есть существенные ошибки,
 установи approved=false и объясни,
 что конкретно нужно исправить.

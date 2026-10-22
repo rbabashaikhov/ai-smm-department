@@ -169,7 +169,27 @@ def split_series_label(text: str, series_title: str = "") -> tuple[str, str]:
     return text[: len(text) - len(rest)].rstrip(), rest
 
 
-def format_series_label(series_title: str, position: int, total: int) -> str:
+def series_label_language(language: str | None) -> str:
+    """"en" for an en / en-* project; "ru", the original, for anything else.
+
+    Only these two phrasings exist, and both are the ones _PART_LABEL_BODY
+    and _mentions_part_number already recognise ("часть N из M",
+    "part N of M"), so formatting and checking agree for either.
+    """
+
+    if language and (language == "en" or language.startswith("en-")):
+        return "en"
+
+    return "ru"
+
+
+def format_series_label(
+    series_title: str,
+    position: int,
+    total: int,
+    *,
+    language: str = "ru",
+) -> str:
     """The one deterministic label every standalone part opens with.
 
     Earlier versions left the Copywriter to word this itself, which
@@ -178,9 +198,17 @@ def format_series_label(series_title: str, position: int, total: int) -> str:
     the start. The Copywriter no longer writes this: the system puts it
     at the front of the body and checks the combined length, so there is
     exactly one format and it is always where the checks below expect it.
+
+    language is the project's default_language (series_label_language).
     """
 
     title = series_title.strip()
+
+    if series_label_language(language) == "en":
+        if title:
+            return f"{title} — part {position} of {total}"
+
+        return f"Part {position} of {total}"
 
     if title:
         return f"{title} — часть {position} из {total}"

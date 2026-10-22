@@ -8,6 +8,13 @@ from ai_smm.agents.pilot import (
     PILOT_STRATEGY_REASON,
     resolve_publishing_strategy,
 )
+from ai_smm.agents.profile import (
+    NO_KNOWLEDGE_RULES,
+    UNTRUSTED_DATA_RULE,
+    has_knowledge,
+    profile_block,
+    profile_of,
+)
 from ai_smm.state import SMMState
 from ai_smm.tracing import langchain_callbacks, observe
 
@@ -154,19 +161,60 @@ def strategist_node(state: SMMState) -> dict[str, Any]:
   Внимание: ответы в Threads — только текст, без изображений.
 """
 
+    profile = profile_of(state)
+
+    if profile is None:
+        # Legacy jobs and the publishing graph: the pilot's technical blog.
+        subject = "по одному техническому проекту."
+        facts_rule = """Используй ТОЛЬКО факты из knowledge base ниже.
+Ничего не выдумывай."""
+        genre_rules = """4. Это технический блог, а не рекламный канал.
+
+Для технического проекта обычно работает такая логика:
+обзор задачи → выбранное решение → проблема, ошибка
+или инженерный вывод. Но следуй фактам из knowledge base,
+а не этому шаблону."""
+        profile_section = ""
+    else:
+        language = profile["default_language"]
+        subject = "в рамках профиля проекта ниже."
+        facts_rule = (
+            """Используй ТОЛЬКО факты из knowledge base ниже.
+Ничего не выдумывай."""
+            if has_knowledge(knowledge)
+            else NO_KNOWLEDGE_RULES
+        )
+        genre_rules = f"""4. Тема, аудитория, цели и тон серии — из профиля
+   проекта. Не выходи за main_theme и topics и не касайся
+   excluded_topics. Это не рекламный канал: без
+   преувеличений и обещаний.
+
+5. Все тексты плана (series_title, series_description,
+   target_audience, narrative_goal, title, main_thesis,
+   standalone_value, переходы) пиши на языке
+   {language}."""
+        profile_section = profile_block(profile)
+
+        if topic_instruction:
+            topic_instruction += (
+                "Если подсказка противоречит профилю (main_theme, topics, "
+                "excluded_topics), следуй профилю.\n"
+            )
+
     prompt = f"""
 Ты — Strategist в AI SMM-команде.
 
 Твоя задача — подготовить не набор независимых постов,
 а СЕРИЮ из {series_size} публикаций для Threads
-по одному техническому проекту.
+{subject}
 
 Серия — это единое повествование: части читаются
 в заданном порядке и развивают одну мысль.
 
-Используй ТОЛЬКО факты из knowledge base ниже.
-Ничего не выдумывай.
+{facts_rule}
+{UNTRUSTED_DATA_RULE}
 {topic_instruction}
+{profile_section}
 
 СНАЧАЛА определи серию целиком:
 
@@ -205,12 +253,7 @@ def strategist_node(state: SMMState) -> dict[str, Any]:
 3. Разные смысловые углы. Не делай несколько частей
    об одном и том же.
 
-4. Это технический блог, а не рекламный канал.
-
-Для технического проекта обычно работает такая логика:
-обзор задачи → выбранное решение → проблема, ошибка
-или инженерный вывод. Но следуй фактам из knowledge base,
-а не этому шаблону.
+{genre_rules}
 
 Knowledge base:
 {knowledge}

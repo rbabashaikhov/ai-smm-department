@@ -30,8 +30,19 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from ai_smm.application.control_plane import require_mutations_enabled
+from ai_smm.application.projects import (
+    SETTINGS_SECTIONS,
+    validate_settings_sections,
+)
 from ai_smm.application.publications import Page
-from ai_smm.db.models import ContentGenerationJob, GenerationJobStatus, User
+from ai_smm.content_profile import PROFILE_PARAM, build_profile_snapshot
+from ai_smm.db.models import (
+    ContentGenerationJob,
+    GenerationJobStatus,
+    Project,
+    ProjectSettings,
+    User,
+)
 from ai_smm.queue import record_audit
 
 
@@ -111,6 +122,50 @@ def _validate_params(
         )
 
 
+def _profile_snapshot(db: Session, *, project_id: str) -> dict:
+    """The project's editorial profile as it is now, for the job to keep.
+
+    Read from the stored row as it is, not through get_settings_view,
+    which coerces a section to a dict: a stored [] or false would become
+    {} and its profile would silently vanish. Every section must be a JSON
+    object, and the known fields are validated again, because a PATCH only
+    checks the sections it supplies (docs/api.md).
+    """
+
+    project = db.get(Project, project_id)
+
+    if project is None:
+        raise GenerationUnavailable(f"Project {project_id!r} no longer exists.")
+
+    settings = db.get(ProjectSettings, project_id)
+    raw_sections = {
+        name: getattr(settings, name) if settings is not None else {}
+        for name in SETTINGS_SECTIONS
+    }
+
+    try:
+        for name, value in raw_sections.items():
+            if not isinstance(value, dict):
+                raise ValueError(
+                    f"{name} must be a JSON object, not "
+                    f"{type(value).__name__}."
+                )
+
+        sections = validate_settings_sections(raw_sections)
+
+        return build_profile_snapshot(
+            content_config=sections["content_config"],
+            brand_config=sections["brand_config"],
+            default_language=project.default_language,
+            settings_version=settings.version if settings is not None else None,
+        )
+    except ValueError as exc:
+        raise InvalidGenerationParams(
+            "The project content profile is invalid; fix it in the project "
+            f"settings first: {exc}"
+        ) from exc
+
+
 def _lock_generation_job(
     db: Session, *, job_id: uuid.UUID, expected_project_id: str
 ) -> ContentGenerationJob:
@@ -171,6 +226,8 @@ def create_generation_job(
     )
 
     now = now or utcnow()
+    # Captured once, here: retries and later settings edits never change it.
+    profile = _profile_snapshot(db, project_id=project_id)
 
     job = ContentGenerationJob(
         id=uuid.uuid4(),
@@ -182,6 +239,7 @@ def create_generation_job(
             "series_size": series_size,
             "publishing_strategy": publishing_strategy,
             "topic_hint": (topic_hint or "").strip() or None,
+            PROFILE_PARAM: profile,
         },
         created_at=now,
         updated_at=now,
@@ -199,6 +257,7 @@ def create_generation_job(
             "series_size": series_size,
             "publishing_strategy": publishing_strategy,
             "max_attempts": max_attempts,
+            "profile_settings_version": profile["settings_version"],
         },
     )
 

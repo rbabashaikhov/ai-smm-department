@@ -42,6 +42,8 @@ EDITORIAL_POLICY_PATH = DEFAULT_KNOWLEDGE_ROOT / "editorial_policy.md"
 
 def load_project_knowledge(
     project_id: str,
+    *,
+    allow_missing: bool = False,
 ) -> dict[str, Any]:
     """
     Load project-specific knowledge and global editorial policy.
@@ -56,6 +58,10 @@ def load_project_knowledge(
         knowledge/projects/<project_id>/assets/
 
     The editorial policy is shared across all projects.
+
+    allow_missing: a project without its own directory gets no files and
+    no assets instead of FileNotFoundError -- never another project's
+    directory. The editorial policy is still required.
     """
 
     # The id is a path segment. Ids can come from an HTTP request since
@@ -76,7 +82,9 @@ def load_project_knowledge(
 
     editorial_policy_path = root / "editorial_policy.md"
 
-    if not project_dir.is_dir():
+    project_dir_exists = project_dir.is_dir()
+
+    if not project_dir_exists and not allow_missing:
         raise FileNotFoundError(
             f"Knowledge directory not found: {project_dir}"
         )
@@ -105,6 +113,9 @@ def load_project_knowledge(
         raise ValueError(
             "Global editorial policy is empty."
         )
+
+    if not project_dir_exists:
+        return result
 
     # Load project-specific Markdown, text and YAML.
     for path in sorted(project_dir.iterdir()):
