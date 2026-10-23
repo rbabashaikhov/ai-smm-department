@@ -32,19 +32,20 @@ function useSingleIdeaCommand<T>(
   onSuccess: (value: T) => void,
 ) {
   const queryClient = useQueryClient();
-  const inFlight = useRef<Promise<T> | null>(null);
+  // Keep a successful command by idea id for the lifetime of this page.
+  // A completed idea no longer exposes an action after the list refreshes;
+  // retaining its promise also closes the narrow double-click window before
+  // that render happens.
+  const commands = useRef(new Map<string, Promise<T>>());
 
   return useMutation({
     retry: false,
     mutationFn: (ideaId: string) => {
-      if (inFlight.current) return inFlight.current;
+      const existing = commands.current.get(ideaId);
+      if (existing) return existing;
 
       const request = command(ideaId);
-      const clear = () => {
-        if (inFlight.current === request) inFlight.current = null;
-      };
-      inFlight.current = request;
-      void request.then(clear, clear);
+      commands.current.set(ideaId, request);
       return request;
     },
     onSuccess: async (value) => {
@@ -53,10 +54,13 @@ function useSingleIdeaCommand<T>(
       await queryClient.invalidateQueries({ queryKey: qk.generationJobs(projectId) });
     },
     onError: async (error) => {
+      // Errors are safe to try again only after the error handler has
+      // completed its state refresh.
       if (isIdeaOutcomeUnknown(error)) {
         // There is no single-idea read endpoint: refetch every active page for this project.
         await queryClient.refetchQueries({ queryKey: qk.contentIdeas(projectId) });
       }
+      commands.current.clear();
     },
   });
 }

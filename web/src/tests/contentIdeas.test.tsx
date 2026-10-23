@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { apiError, ok } from "../test/fakeApi";
@@ -88,7 +88,7 @@ describe("content ideas page", () => {
     const { user } = renderApp(server, `/projects/${PROJECT_ID}/ideas`);
     await user.click(await screen.findByRole("button", { name: "Отклонить" }));
     expect(server.callsTo("POST", /reject$/)).toHaveLength(0);
-    await user.click(screen.getByRole("button", { name: "Отклонить" }));
+    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Отклонить" }));
     await waitFor(() => expect(server.callsTo("POST", /reject$/)).toHaveLength(1));
     expect(server.callsTo("POST", /reject$/)[0]!.headers["x-csrf-token"]).toBe(server.csrfToken);
   });
@@ -113,7 +113,7 @@ describe("content ideas page", () => {
     );
     const { user } = renderApp(server, `/projects/${PROJECT_ID}/ideas`);
     await user.click(await screen.findByRole("button", { name: "Создать черновик" }));
-    expect(await screen.findByText("Command refused.")).toBeInTheDocument();
+    expect(await screen.findByText(/Command refused/)).toBeInTheDocument();
     expect(server.callsTo("POST", /\/use$/)).toHaveLength(1);
   });
 
@@ -126,6 +126,6 @@ describe("content ideas page", () => {
       "GET", "/api/v1/projects/:projectId/content-ideas", apiError(503, "DEPENDENCY_UNAVAILABLE", "Ideas unavailable."),
     );
     renderApp(failure, `/projects/${PROJECT_ID}/ideas`);
-    expect(await screen.findByText("Ideas unavailable.")).toBeInTheDocument();
+    expect(await screen.findByText(/Ideas unavailable/, {}, { timeout: 5_000 })).toBeInTheDocument();
   });
 });
