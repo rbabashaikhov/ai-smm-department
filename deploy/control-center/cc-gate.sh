@@ -80,7 +80,7 @@ readonly CC_PINNED_VERIFY_SHA256=39a93f49c14714fd2eab85d46595aebf25e91c44c06bf7b
 # mutation role, and the verify file of that role.
 readonly CC_RW_VERIFY_FILE_NAME=ai_smm_cc_rw.verify.sql
 readonly CC_PINNED_MUTATIONS_COMPOSE_SHA256=703e90838690e97bc5a20ff169137528a503142e341f38e288e31754bbe45bc2
-readonly CC_PINNED_RW_VERIFY_SHA256=a254224a3fb887e4c644c1b2c216575c44485dfa8a033ecc449d6b5937162ea9
+readonly CC_PINNED_RW_VERIFY_SHA256=207f997e9788102faadd92ced3b810ba61efe34bbb1c09d7bef3ad5e9fc30321
 # Whether THIS release may run business mutations at all. Every release
 # up to SMM-025D shipped `no`: `mutations enable` was refused before
 # anything ran and a mode file was never honoured. SMM-025D closed

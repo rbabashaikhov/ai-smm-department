@@ -310,9 +310,11 @@ GRANT UPDATE (status, updated_at, finished_at, claimed_by, claimed_at,
 -- guard, and the claim, attempt, result and error columns are the
 -- topic_ideation_* contracts' and are not granted at all. No UPDATE, and
 -- nothing on content_ideas but SELECT: its rows come from the contracts
--- only (guard_topic_ideation_write refuses the rest anyway).
+-- only (guard_topic_ideation_write refuses the rest anyway). params
+-- (SMM-035B3B1) is the profile snapshot and recent idea titles the API
+-- copies in when it queues the job; the insert guard fixes its shape.
 GRANT INSERT (id, project_id, requested_by_user_id, status, idea_count,
-              topic_hint, max_attempts)
+              topic_hint, params, max_attempts)
     ON topic_ideation_jobs TO ai_smm_cc_rw;
 
 -- materialize: a new delivery snapshot in `approved`. The ORM sends every column; the ones the API never sets (threads_post_id, published_at, the claim and series columns) go in as NULL. Not id: the sequence assigns it.

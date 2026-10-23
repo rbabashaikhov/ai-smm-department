@@ -36,13 +36,19 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 from ai_smm.db.guards import (
-    TOPIC_IDEATION_FUNCTIONS,
+    TOPIC_IDEATION_FUNCTIONS_V1,
     TOPIC_IDEATION_TRIGGERS,
     drop_function_statements,
     revoke_public_statements,
 )
-from ai_smm.db.ideation_contracts import TOPIC_IDEATION_CONTRACTS
+from ai_smm.db.ideation_contracts import TOPIC_IDEATION_CONTRACTS_V1
 from alembic import op
+
+
+# The frozen V1 definitions: a migration replays identically whatever the
+# code later says (1c9e4b7d2a05 replaces the insert guard and the claim).
+TOPIC_IDEATION_FUNCTIONS = TOPIC_IDEATION_FUNCTIONS_V1
+TOPIC_IDEATION_CONTRACTS = TOPIC_IDEATION_CONTRACTS_V1
 
 
 revision: str = "b3a7d2e91c4f"

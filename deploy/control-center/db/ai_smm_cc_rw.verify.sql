@@ -235,6 +235,7 @@ column_grants(relname, attname, privilege) AS (
         ('topic_ideation_jobs', 'status', 'INSERT'),
         ('topic_ideation_jobs', 'idea_count', 'INSERT'),
         ('topic_ideation_jobs', 'topic_hint', 'INSERT'),
+        ('topic_ideation_jobs', 'params', 'INSERT'),
         ('topic_ideation_jobs', 'max_attempts', 'INSERT'),
         ('publications', 'project_id', 'INSERT'),
         ('publications', 'platform', 'INSERT'),

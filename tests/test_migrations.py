@@ -388,8 +388,8 @@ EDITORIAL_REVISION = "3d4ac1986f07"
 SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
 #: Kept separately because guard migration tests upgrade to this revision.
 GUARDS_REVISION = "c4d81e2a9f63"
-#: Current migration head: topic ideation foundation (SMM-035B3A).
-HEAD_REVISION = "b3a7d2e91c4f"
+#: Current migration head: topic ideation job params (SMM-035B3B1).
+HEAD_REVISION = "1c9e4b7d2a05"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",
@@ -461,6 +461,94 @@ def test_generation_retry_policy_upgrade_and_downgrade(
                     "'public.generation_claim(text,integer,integer)') IS NOT NULL"
                 )
             ).scalar_one()
+    finally:
+        engine.dispose()
+
+
+IDEATION_FOUNDATION = "b3a7d2e91c4f"
+_CLAIM_HAS_PARAMS = text(
+    "SELECT 'params' = ANY (proargnames) FROM pg_proc"
+    " WHERE oid = to_regprocedure('public.topic_ideation_claim(text,integer)')"
+)
+
+
+def test_ideation_params_upgrade_keeps_jobs_and_downgrade_guards_them(
+    migration_db: str,
+) -> None:
+    """1c9e4b7d2a05 (SMM-035B3B1): an existing job gets params = {} and is
+    claimed with it; downgrade refuses while a job carries params, and
+    otherwise restores the V1 claim exactly."""
+
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+    command.upgrade(config, IDEATION_FOUNDATION)
+    engine = create_engine(migration_db)
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO projects (id, display_name, knowledge_path)"
+                    " VALUES ('legacy', 'Legacy', 'knowledge/legacy')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, email, password_hash, display_name)"
+                    " VALUES ('00000000-0000-0000-0000-000000000001',"
+                    " 'o@example.test', 'x', 'Owner')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO topic_ideation_jobs"
+                    " (id, project_id, requested_by_user_id, idea_count)"
+                    " VALUES ('00000000-0000-0000-0000-0000000000a1', 'legacy',"
+                    " '00000000-0000-0000-0000-000000000001', 2)"
+                )
+            )
+            assert connection.execute(_CLAIM_HAS_PARAMS).scalar_one() is False
+
+        command.upgrade(config, "1c9e4b7d2a05")
+
+        with engine.begin() as connection:
+            assert connection.execute(_CLAIM_HAS_PARAMS).scalar_one() is True
+            assert connection.execute(
+                text("SELECT params FROM topic_ideation_jobs")
+            ).scalar_one() == {}
+            claimed = connection.execute(
+                text("SELECT * FROM public.topic_ideation_claim('w', 60)")
+            ).mappings().one()
+            assert claimed["params"] == {}
+            assert not connection.execute(
+                text(
+                    "SELECT has_function_privilege('public',"
+                    " 'public.topic_ideation_claim(text,integer)', 'EXECUTE')"
+                )
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "UPDATE topic_ideation_jobs"
+                    " SET params = '{\"content_profile\": {}}'::jsonb"
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="carry params"):
+            command.downgrade(config, IDEATION_FOUNDATION)
+
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE topic_ideation_jobs SET params = '{}'"))
+
+        command.downgrade(config, IDEATION_FOUNDATION)
+
+        with engine.connect() as connection:
+            assert connection.execute(_CLAIM_HAS_PARAMS).scalar_one() is False
+            assert "params" not in {
+                column["name"]
+                for column in inspect(engine).get_columns("topic_ideation_jobs")
+            }
+
+        command.upgrade(config, "head")
     finally:
         engine.dispose()
 

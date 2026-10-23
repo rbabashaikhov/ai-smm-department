@@ -157,10 +157,17 @@ class Settings:
     generation_max_revisions: int = 3
 
     #: Topic ideation (SMM-035B3A): whether the API may queue an ideation
-    #: job. Deliberately not read from the environment: no ideation worker
-    #: exists yet, so nothing would ever consume a job, and no deployment
-    #: can switch it on. The stage that ships the worker wires it up.
+    #: job. Deliberately not read from the environment, so no deployment
+    #: can switch it on: the worker exists since SMM-035B3B1, but turning
+    #: real ideation on is a separately approved stage.
     topic_ideation_jobs_enabled: bool = False
+
+    # Topic ideation worker (SMM-035B3B1). A process of its own; see
+    # ai_smm.ideation_worker. One structured LLM call per attempt, so the
+    # lease only has to cover that call and the completion.
+    ideation_worker_id: str = "ideation-worker-1"
+    ideation_poll_interval_seconds: int = 30
+    ideation_lease_seconds: int = 300
 
     # Secret names that must never reach a log record.
     secret_env_names: tuple[str, ...] = field(
@@ -262,6 +269,14 @@ def load_settings() -> Settings:
         generation_max_revisions=_env_int(
             "AI_SMM_GENERATION_MAX_REVISIONS", 3
         ),
+        ideation_worker_id=(
+            _env("AI_SMM_IDEATION_WORKER_ID", "ideation-worker-1")
+            or "ideation-worker-1"
+        ),
+        ideation_poll_interval_seconds=_env_int(
+            "AI_SMM_IDEATION_POLL_INTERVAL_SECONDS", 30
+        ),
+        ideation_lease_seconds=_env_int("AI_SMM_IDEATION_LEASE_SECONDS", 300),
     )
 
 

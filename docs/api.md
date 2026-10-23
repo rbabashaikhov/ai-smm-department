@@ -904,19 +904,28 @@ same one.
 
 ---
 
-### Topic ideation (SMM-035B3A)
+### Topic ideation (SMM-035B3A, SMM-035B3B1)
 
 Suggested topics, kept apart from content generation: an ideation job has
 its own queue (`topic_ideation_jobs`) and produces rows in `content_ideas`,
-never a content item. This stage ships storage, database contracts and
-reads; there is no ideation worker, no LLM call, and no command that
+never a content item. SMM-035B3A shipped storage, database contracts and
+reads; SMM-035B3B1 adds the worker that runs a job
+([ideation-worker.md](ideation-worker.md)). There is still no command that
 rejects an idea or turns one into a generation job.
 
 - **Queuing is closed.** `POST .../topic-ideation-jobs` answers `403
   FEATURE_DISABLED` (and writes nothing) on every deployment:
   `Settings.topic_ideation_jobs_enabled` is not read from the environment
-  and stays `false` until the stage that ships the worker. Behind it, the
-  usual read-only gate, owner-only RBAC and the database guard apply.
+  and stays `false`; enabling it is a separately approved stage. Behind
+  it, the usual read-only gate, owner-only RBAC and the database guard
+  apply.
+- **What a job runs on.** When it queues a job the API copies into
+  `topic_ideation_jobs.params` the project's content profile snapshot (the
+  same one a generation job keeps, SMM-035B2) and up to 20 of the
+  project's most recent idea titles. A later settings change never
+  reaches a queued job. An invalid stored profile answers `422
+  VALIDATION_ERROR` and queues nothing. `params` is not part of the HTTP
+  response.
 - **Request.** `{"idea_count": 1..5 (default 3), "topic_hint": string ≤ 500
   or null}`, strict types, no other field: a client cannot supply ideas,
   statuses, attempts or any worker-owned column. The 500-character bound is
@@ -938,8 +947,8 @@ rejects an idea or turns one into a generation job.
 Ideas are written only by the SECURITY DEFINER contract
 `topic_ideation_complete`, which takes the project and job from the claimed
 job row and saves all of a result or none of it; a composite key keeps an
-idea in its job's project. No database role has EXECUTE on the
-`topic_ideation_*` contracts yet.
+idea in its job's project. Only the ideation worker's role,
+`ai_smm_ideation`, has EXECUTE on the `topic_ideation_*` contracts.
 
 ## 8. Errors and request ids
 

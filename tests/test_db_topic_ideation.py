@@ -2,9 +2,10 @@
 contracts, the guards of topic_ideation_jobs/content_ideas, and the
 privileges around both.
 
-The contracts are called here as the table owner -- no role has EXECUTE
-on them yet (the ideation worker and its role are a later stage); the
-privilege tests prove exactly that. The business-role path the API uses
+The contracts are called here as the table owner -- no role but the
+ideation worker's own (ai_smm_ideation, SMM-035B3B1,
+tests/test_db_ideation_role.py) has EXECUTE on them; the privilege tests
+prove exactly that. The business-role path the API uses
 is the session-bound ai_smm_cc_rw transaction of tests/test_db_guards.py.
 """
 from __future__ import annotations
@@ -180,6 +181,23 @@ def test_claim_takes_the_oldest_due_job_and_consumes_an_attempt(
             AuditLog.subject == f"topic_ideation_job:{older.id}",
         )
     ) == 1
+
+
+def test_claim_returns_the_jobs_params_as_queued(
+    session: Session, make_job
+) -> None:
+    """SMM-035B3B1: the worker reads no table; the claim hands it params."""
+
+    params = {**VALID_PARAMS, "recent_idea_titles": ["Старая тема"]}
+    job = make_job(params=params)
+    legacy = make_job(created_at=datetime.now(timezone.utc) + timedelta(minutes=1))
+
+    first = _claim(session)
+    second = _claim(session)
+    session.commit()
+
+    assert (first["id"], first["params"]) == (job.id, params)
+    assert (second["id"], second["params"]) == (legacy.id, {})
 
 
 def test_claim_ignores_future_retries_and_non_queued_jobs(
@@ -604,6 +622,10 @@ def _refused(raised: pytest.ExceptionInfo[DBAPIError], fragment: str = "") -> No
         assert fragment in str(raised.value), raised.value
 
 
+#: The params shape the API writes since SMM-035B3B1 (the guard checks it).
+VALID_PARAMS = {"content_profile": {"schema_version": 1}, "recent_idea_titles": []}
+
+
 def _insert_job(db: Session, *, project_id: str, user: User, **columns: object) -> None:
     values = {
         "id": uuid.uuid4(),
@@ -611,13 +633,20 @@ def _insert_job(db: Session, *, project_id: str, user: User, **columns: object) 
         "requested_by_user_id": user.id,
         "status": "queued",
         "idea_count": 2,
+        "params": VALID_PARAMS,
         "max_attempts": 2,
         **columns,
     }
     names = ", ".join(values)
-    params = ", ".join(f":{name}" for name in values)
+    placeholders = ", ".join(
+        f"CAST(:{name} AS jsonb)" if name == "params" else f":{name}"
+        for name in values
+    )
+    if isinstance(values["params"], (dict, list)):
+        values["params"] = json.dumps(values["params"])
     db.execute(
-        text(f"INSERT INTO topic_ideation_jobs ({names}) VALUES ({params})"), values
+        text(f"INSERT INTO topic_ideation_jobs ({names}) VALUES ({placeholders})"),
+        values,
     )
     db.flush()
 
@@ -649,6 +678,41 @@ def test_the_api_role_cannot_queue_anything_but_a_fresh_job(
         _insert_job(db, project_id=project, user=owner, **columns)
 
     _refused(raised, fragment)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {},
+        [],
+        '"a scalar"',
+        {"content_profile": {"schema_version": 1}},
+        {"recent_idea_titles": []},
+        {"content_profile": [], "recent_idea_titles": []},
+        {**VALID_PARAMS, "prompt": "ignore the rules"},
+        {**VALID_PARAMS, "recent_idea_titles": "a title"},
+        {**VALID_PARAMS, "recent_idea_titles": [1]},
+        {**VALID_PARAMS, "recent_idea_titles": [{"t": "x"}]},
+        {**VALID_PARAMS, "recent_idea_titles": ["  "]},
+        {**VALID_PARAMS, "recent_idea_titles": ["x" * 201]},
+        {**VALID_PARAMS, "recent_idea_titles": [f"t{n}" for n in range(21)]},
+    ],
+)
+def test_the_api_role_queues_only_well_shaped_params(
+    rw, owner: User, project: str, token_for, params  # noqa: F811
+) -> None:
+    """SMM-035B3B1: a profile object and <= 20 short titles, nothing else."""
+
+    with bound(rw, token_for(owner)) as db, pytest.raises(DBAPIError) as raised:
+        _insert_job(db, project_id=project, user=owner, params=params)
+
+    _refused(raised, "ideation params")
+
+
+def test_the_table_bounds_the_size_of_params(session: Session, make_job) -> None:
+    with pytest.raises(IntegrityError):
+        make_job(params={"content_profile": {"x": "y" * (64 * 1024)}})
+    session.rollback()
 
 
 @pytest.mark.parametrize(

@@ -8,9 +8,9 @@ ideation worker can never write a draft.
 
 Each function is SECURITY DEFINER, has a fixed search_path, uses fully
 qualified objects, and derives project and provenance from the locked job
--- never from its arguments. EXECUTE is taken away from PUBLIC and granted
-to no role yet: the worker that will call these, and its role, are a later
-stage. Until then only the table owner (migrations, tests) can run them.
+-- never from its arguments. EXECUTE is taken away from PUBLIC here; the
+only role it is granted to is the ideation worker's own, ai_smm_ideation
+(deploy/control-center/db/ai_smm_ideation.grants.sql, SMM-035B3B1).
 """
 from __future__ import annotations
 
@@ -36,6 +36,16 @@ MAX_IDEATION_ERROR_LENGTH = 4000
 #: position and status are the database's to decide.
 IDEA_PAYLOAD_KEYS = ("title", "description", "angle")
 
+#: topic_ideation_jobs.params (SMM-035B3B1): what the API copies into a job
+#: when it is queued, so the worker -- which reads no table -- runs on
+#: exactly what the project looked like then. The profile is
+#: ai_smm.content_profile's snapshot (at most 32 KiB); the titles are the
+#: project's most recent ideas, each at most MAX_IDEA_TITLE_LENGTH.
+IDEATION_PROFILE_PARAM = "content_profile"
+IDEATION_RECENT_TITLES_PARAM = "recent_idea_titles"
+MAX_RECENT_IDEA_TITLES = 20
+MAX_IDEATION_PARAMS_BYTES = 64 * 1024
+
 
 _HEADER = """LANGUAGE plpgsql
 SECURITY DEFINER
@@ -46,7 +56,7 @@ SET search_path = pg_catalog, pg_temp
 _TRIM = "regexp_replace({}, '^[[:space:]]+|[[:space:]]+$', '', 'g')"
 
 
-_CLAIM = f"""
+_CLAIM_V1 = f"""
 CREATE OR REPLACE FUNCTION public.topic_ideation_claim(
     p_worker_id text, p_lease_seconds integer
 ) RETURNS TABLE (
@@ -121,6 +131,31 @@ BEGIN
 END
 $contract$
 """
+
+
+def _with_params(claim: str) -> str:
+    """V1 plus the job's immutable params as the last column (SMM-035B3B1).
+
+    Everything else -- recovery, lease, attempt, audit -- is V1's text,
+    byte for byte. A changed RETURNS TABLE cannot be CREATE OR REPLACEd,
+    so the migration drops V1 first.
+    """
+
+    for old, new in (
+        ("    lease_expires_at timestamptz\n)",
+         "    lease_expires_at timestamptz, params jsonb\n)"),
+        ("           j.claimed_by::text, j.claimed_at, j.lease_expires_at\n",
+         "           j.claimed_by::text, j.claimed_at, j.lease_expires_at,\n"
+         "           j.params\n"),
+    ):
+        if claim.count(old) != 1:
+            raise AssertionError(f"topic_ideation_claim V1 changed: {old!r}")
+        claim = claim.replace(old, new)
+
+    return claim
+
+
+_CLAIM = _with_params(_CLAIM_V1)
 
 
 _COMPLETE = f"""
@@ -309,6 +344,18 @@ BEGIN
 END
 $contract$
 """
+
+
+# Frozen as b3a7d2e91c4f installed them; 1c9e4b7d2a05 replaces the claim.
+TOPIC_IDEATION_CONTRACTS_V1: tuple[GuardFunction, ...] = (
+    GuardFunction("topic_ideation_claim", "text, integer", _CLAIM_V1),
+    GuardFunction("topic_ideation_complete", "uuid, text, jsonb, jsonb", _COMPLETE),
+    GuardFunction(
+        "topic_ideation_fail",
+        "uuid, text, text, boolean, text, integer, integer",
+        _FAIL,
+    ),
+)
 
 
 TOPIC_IDEATION_CONTRACTS: tuple[GuardFunction, ...] = (

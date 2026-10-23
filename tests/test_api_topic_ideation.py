@@ -27,6 +27,7 @@ from ai_smm.db.models import (
     ContentIdea,
     ContentIdeaStatus,
     MembershipRole,
+    ProjectSettings,
     TopicIdeationJob,
     TopicIdeationJobStatus,
 )
@@ -238,6 +239,109 @@ def test_an_owner_can_queue_a_job(
     assert audit.actor == f"user:{owner.id}"
     assert audit.subject == f"topic_ideation_job:{body['id']}"
     assert audit.details["idea_count"] == 4
+
+
+# -- what the job runs on (SMM-035B3B1) -----------------------------------------
+
+
+def _set_profile(session, project: str, *, theme: str, version: int) -> None:
+    row = session.get(ProjectSettings, project)
+    if row is None:
+        row = ProjectSettings(project_id=project, version=version)
+        session.add(row)
+    row.content_config = {"main_theme": theme, "topics": ["рецепты"]}
+    row.brand_config = {"tone_of_voice": "дружелюбный"}
+    row.version = version
+    session.commit()
+
+
+def _stored_params(session, job_id: str) -> dict:
+    session.expire_all()
+    return session.get(TopicIdeationJob, uuid.UUID(job_id)).params
+
+
+def test_the_job_keeps_the_profile_it_was_queued_with(
+    client, login, member, session, project: str
+) -> None:
+    _set_profile(session, project, theme="Весенняя кухня", version=1)
+    csrf = login(member(MembershipRole.OWNER))
+
+    response = _create(client, project, csrf, {"idea_count": 2})
+    assert response.status_code == 202, response.text
+    job_id = response.json()["id"]
+
+    params = _stored_params(session, job_id)
+    assert set(params) == {"content_profile", "recent_idea_titles"}
+    profile = params["content_profile"]
+    assert profile["main_theme"] == "Весенняя кухня"
+    assert profile["topics"] == ["рецепты"]
+    assert profile["tone_of_voice"] == "дружелюбный"
+    assert profile["settings_version"] == 1
+    assert params["recent_idea_titles"] == []
+    # Not part of the HTTP shape: the response is unchanged.
+    assert "params" not in response.json()
+
+    _set_profile(session, project, theme="Зимняя кухня", version=2)
+
+    assert _stored_params(session, job_id)["content_profile"] == profile
+
+
+def test_recent_titles_are_this_projects_newest_twenty(
+    client, login, member, session, seed_job, make_other_project, project: str
+) -> None:
+    owner = member(MembershipRole.OWNER)
+    other = make_other_project
+    now = datetime.now(timezone.utc)
+    for n in range(5):
+        seed_job(user=owner, ideas=5, created_at=now - timedelta(hours=n))
+    seed_job(project_id=other, user=owner, ideas=1)
+    session.execute(
+        text("UPDATE content_ideas SET title = title || ' / ' || id::text")
+    )
+    session.execute(
+        text(
+            "UPDATE content_ideas SET title = 'Чужая тема' WHERE project_id = :p"
+        ),
+        {"p": other},
+    )
+    session.commit()
+    expected = list(
+        session.scalars(
+            select(ContentIdea.title)
+            .where(ContentIdea.project_id == project)
+            .order_by(
+                ContentIdea.created_at.desc(),
+                ContentIdea.ideation_job_id,
+                ContentIdea.position,
+            )
+            .limit(20)
+        )
+    )
+    csrf = login(owner)
+
+    response = _create(client, project, csrf, {"idea_count": 1})
+    assert response.status_code == 202, response.text
+
+    titles = _stored_params(session, response.json()["id"])["recent_idea_titles"]
+    assert titles == expected
+    assert len(titles) == 20
+    assert "Чужая тема" not in titles
+
+
+def test_an_invalid_stored_profile_queues_nothing(
+    client, login, member, session, project: str
+) -> None:
+    session.add(
+        ProjectSettings(project_id=project, version=1, content_config={"topics": "x"})
+    )
+    session.commit()
+    csrf = login(member(MembershipRole.OWNER))
+
+    response = _create(client, project, csrf, {"idea_count": 1})
+
+    assert response.status_code == 422, response.text
+    assert "content profile" in response.json()["error"]["message"]
+    assert _job_count(session) == 0
 
 
 def test_defaults_and_a_blank_hint(client, login, member, project: str) -> None:
