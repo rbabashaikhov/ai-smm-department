@@ -261,8 +261,9 @@ class TopicIdeationJobStatus(str, enum.Enum):
 
 
 class ContentIdeaStatus(str, enum.Enum):
-    """A suggested topic. Only `proposed` is ever written today; rejecting
-    an idea or using it for a generation job is a later stage."""
+    """A suggested topic. The ideation contract writes `proposed`; an owner
+    moves it to `rejected` or `used` (public.content_idea_* contracts,
+    SMM-035B3B2). Both are terminal."""
 
     PROPOSED = "proposed"
     REJECTED = "rejected"
@@ -1237,6 +1238,10 @@ class ContentGenerationJob(Base):
         ),
         Index("ix_generation_jobs_project", "project_id"),
         Index("ix_generation_jobs_status", "status"),
+        # The target of content_ideas' composite key (SMM-035B3B2).
+        UniqueConstraint(
+            "id", "project_id", name="uq_content_generation_jobs_id_project"
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -1451,8 +1456,11 @@ class ContentIdea(Base):
     project and the job from the locked job row; the composite key to
     (topic_ideation_jobs.id, project_id) makes an idea of one project
     pointing at another project's job impossible in the schema itself.
-    generation_job_id is reserved for the stage that turns an idea into a
-    generation job; nothing sets it yet.
+
+    generation_job_id is set when an owner uses the idea
+    (public.content_idea_finish_use, SMM-035B3B2): the composite key keeps
+    the job in the idea's project, the unique constraint lets a job be
+    linked once, and the check ties status 'used' to a linked job.
     """
 
     __tablename__ = "content_ideas"
@@ -1463,8 +1471,19 @@ class ContentIdea(Base):
             ondelete="RESTRICT",
             name="fk_content_ideas_ideation_job",
         ),
+        ForeignKeyConstraint(
+            ["generation_job_id", "project_id"],
+            ["content_generation_jobs.id", "content_generation_jobs.project_id"],
+            ondelete="RESTRICT",
+            name="fk_content_ideas_generation_job",
+        ),
         UniqueConstraint(
             "ideation_job_id", "position", name="uq_content_ideas_job_position"
+        ),
+        UniqueConstraint("generation_job_id", name="uq_content_ideas_generation_job"),
+        CheckConstraint(
+            "(status = 'used') = (generation_job_id IS NOT NULL)",
+            name="ck_content_ideas_used_job",
         ),
         CheckConstraint("position >= 1", name="ck_content_ideas_position"),
         CheckConstraint(
@@ -1511,12 +1530,7 @@ class ContentIdea(Base):
         server_default=ContentIdeaStatus.PROPOSED.value,
     )
     generation_job_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid(as_uuid=True),
-        ForeignKey(
-            "content_generation_jobs.id",
-            ondelete="RESTRICT",
-            name="fk_content_ideas_generation_job",
-        ),
+        Uuid(as_uuid=True)
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -2288,6 +2302,30 @@ for _statement in _guards.drop_function_statements(
         Base.metadata,
         "before_drop",
         DDL(_statement + " CASCADE").execute_if(dialect="postgresql"),
+    )
+
+
+# Topic idea selection (SMM-035B3B2): the owner-callable contracts, after
+# guard_require_owner and content_ideas exist.
+from ai_smm.db.idea_selection_contracts import (  # noqa: E402
+    IDEA_SELECTION_CONTRACTS as _IDEA_SELECTION_CONTRACTS,
+)
+
+
+for _statement in [
+    _function.ddl for _function in _IDEA_SELECTION_CONTRACTS
+] + _guards.revoke_public_statements(_IDEA_SELECTION_CONTRACTS):
+    event.listen(
+        Base.metadata,
+        "after_create",
+        DDL(_statement.replace("%", "%%")).execute_if(dialect="postgresql"),
+    )
+
+for _statement in _guards.drop_function_statements(_IDEA_SELECTION_CONTRACTS):
+    event.listen(
+        Base.metadata,
+        "before_drop",
+        DDL(_statement).execute_if(dialect="postgresql"),
     )
 
 

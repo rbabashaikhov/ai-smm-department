@@ -1,11 +1,12 @@
 """Topic ideation over HTTP (SMM-035B3A).
 
 Reads for every member: the project's ideation jobs and the ideas they
-suggested. One owner command, queuing a job, which is closed on every
-deployment until an ideation worker exists
-(Settings.topic_ideation_jobs_enabled) -- and behind the read-only
-mutation gate like every other command. There is no route that rejects or
-uses an idea, and none that touches content, approvals or publications.
+suggested. Owner commands: queuing a job, which is closed on every
+deployment until the feature is enabled
+(Settings.topic_ideation_jobs_enabled); rejecting an idea; and using one,
+which queues exactly one generation job (SMM-035B3B2). All are behind the
+read-only mutation gate like every other command. No route here touches
+content, approvals or publications, or calls a model.
 
 Every route is addressed under its project, so isolation is the project
 filter of the query itself: a job or idea of another project answers 404,
@@ -16,7 +17,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
 from ai_smm.api.dependencies import (
     AppSettings,
@@ -27,15 +28,24 @@ from ai_smm.api.dependencies import (
 )
 from ai_smm.api.errors import ApiError, ErrorCode, not_found
 from ai_smm.api.mutation_gate import mutations_disabled
+from ai_smm.api.routers.generation import _job_out as _generation_job_out
 from ai_smm.api.schemas import (
     ContentIdeaList,
     ContentIdeaOut,
+    ContentIdeaUseOut,
     TopicIdeationJobCreate,
     TopicIdeationJobList,
     TopicIdeationJobOut,
 )
 from ai_smm.application.control_plane import MutationsDisabled
+from ai_smm.application.generation import (
+    GenerationUnavailable,
+    InvalidGenerationParams,
+)
 from ai_smm.application.topic_ideation import (
+    IdeaLocked,
+    IdeaUnavailable,
+    InvalidIdeaTransition,
     InvalidTopicIdeationParams,
     TopicIdeationDisabled,
     TopicIdeationProjectInactive,
@@ -43,6 +53,8 @@ from ai_smm.application.topic_ideation import (
     get_topic_ideation_job,
     list_content_ideas_page,
     list_topic_ideation_jobs_page,
+    reject_content_idea,
+    use_content_idea,
 )
 from ai_smm.db.models import (
     ContentIdea,
@@ -181,7 +193,99 @@ def list_ideas(
     )
 
 
+@router.post(
+    "/projects/{project_id}/content-ideas/{idea_id}/reject",
+    response_model=ContentIdeaOut,
+    summary="Reject a proposed topic; no job is created (owner)",
+)
+def reject_idea(
+    idea_id: uuid.UUID,
+    db: DbSession,
+    settings: AppSettings,
+    context: OwnerProject,
+) -> ContentIdeaOut:
+    idea = _idea_command(
+        lambda: reject_content_idea(
+            db,
+            project=context.project,
+            idea_id=idea_id,
+            actor_user=context.authenticated.user,
+            mutations_enabled=settings.api_mutations_enabled,
+        )
+    )
+
+    return _idea_out(idea)
+
+
+@router.post(
+    "/projects/{project_id}/content-ideas/{idea_id}/use",
+    response_model=ContentIdeaUseOut,
+    status_code=202,
+    summary=(
+        "Use a proposed topic: queue exactly one generation job for it "
+        "(owner); 200 with the same job when it was already used"
+    ),
+)
+def use_idea(
+    idea_id: uuid.UUID,
+    response: Response,
+    db: DbSession,
+    settings: AppSettings,
+    context: OwnerProject,
+) -> ContentIdeaUseOut:
+    used = _idea_command(
+        lambda: use_content_idea(
+            db,
+            project=context.project,
+            idea_id=idea_id,
+            actor_user=context.authenticated.user,
+            mutations_enabled=settings.api_mutations_enabled,
+            max_attempts=settings.generation_max_attempts,
+        )
+    )
+
+    if used.replayed:
+        response.status_code = 200
+
+    return ContentIdeaUseOut(
+        idea=_idea_out(used.idea),
+        generation_job_id=used.job.id,
+        generation_job=_generation_job_out(used.job),
+        replayed=used.replayed,
+        topic_includes=list(used.topic_includes),
+    )
+
+
 # -- translation ---------------------------------------------------------
+
+
+def _idea_command(command):
+    try:
+        return command()
+    except MutationsDisabled as exc:
+        raise mutations_disabled(exc.command) from exc
+    except (IdeaUnavailable, GenerationUnavailable) as exc:
+        # Another project's idea reads exactly like a missing one.
+        raise not_found("Topic idea not found.") from exc
+    except InvalidIdeaTransition as exc:
+        raise ApiError(
+            status_code=409,
+            code=ErrorCode.INVALID_STATE_TRANSITION,
+            message=str(exc),
+            details={"command": exc.command, "status": exc.status.value},
+        ) from exc
+    except IdeaLocked as exc:
+        raise ApiError(
+            status_code=503,
+            code=ErrorCode.DEPENDENCY_UNAVAILABLE,
+            message="This idea is being changed; retry in a moment.",
+            details={"reason": "idea_locked"},
+            headers={"Retry-After": "2"},
+        ) from exc
+    except InvalidGenerationParams as exc:
+        raise ApiError(
+            status_code=422, code=ErrorCode.VALIDATION_ERROR, message=str(exc)
+        ) from exc
 
 
 def _job_out(job: TopicIdeationJob) -> TopicIdeationJobOut:

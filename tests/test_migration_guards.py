@@ -20,10 +20,10 @@ from tests.test_migrations import migration_db as migration_db  # noqa: F401  (f
 
 SOCIAL = "a7c2e5f19b40"
 GUARDS = "c4d81e2a9f63"
-#: Whatever is above GUARDS today (through 1c9e4b7d2a05, additive):
+#: Whatever is above GUARDS today (through e6b1f3a9c205, additive):
 #: a downgrade refused at GUARDS rolls back the whole multi-step command,
 #: landing back at head, not at GUARDS itself.
-HEAD = "1c9e4b7d2a05"
+HEAD = "e6b1f3a9c205"
 SWITCH = "AI_SMM_DOWNGRADE_REMOVES_MUTATION_GUARDS"
 
 _BODIES = text(

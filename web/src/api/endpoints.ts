@@ -25,6 +25,10 @@ import type {
   PageParams,
   Credential,
   CredentialInput,
+  ContentIdea,
+  ContentIdeaFilters,
+  ContentIdeaList,
+  ContentIdeaUseResult,
   GenerationJob,
   GenerationJobCreate,
   GenerationJobFilters,
@@ -121,6 +125,21 @@ export function createEndpoints(client: ApiClient) {
         client.get<GenerationJob>(`${V1}/generation-jobs/${enc(jobId)}`),
       cancel: (jobId: string) =>
         client.post<GenerationJob>(`${V1}/generation-jobs/${enc(jobId)}/cancel`),
+    },
+
+    ideas: {
+      list: (projectId: string, filters: ContentIdeaFilters, page: PageParams) =>
+        client.get<ContentIdeaList>(`${V1}/projects/${enc(projectId)}/content-ideas`, {
+          query: { ...page, status: filters.status },
+        }),
+      reject: (projectId: string, ideaId: string) =>
+        client.post<ContentIdea>(
+          `${V1}/projects/${enc(projectId)}/content-ideas/${enc(ideaId)}/reject`,
+        ),
+      use: (projectId: string, ideaId: string) =>
+        client.post<ContentIdeaUseResult>(
+          `${V1}/projects/${enc(projectId)}/content-ideas/${enc(ideaId)}/use`,
+        ),
     },
 
     publications: {

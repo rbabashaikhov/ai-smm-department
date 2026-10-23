@@ -33,7 +33,11 @@ guard_functions(signature) AS (
            ('guard_context_session()'),
            ('guard_require_owner(text,text)'),
            ('guard_publication_problem(bigint)'),
-           ('guard_consume_approval_grant(uuid,uuid,uuid)')
+           ('guard_consume_approval_grant(uuid,uuid,uuid)'),
+           -- SMM-035B3B2: the idea commands (SECURITY DEFINER contracts)
+           ('content_idea_begin_use(text,uuid)'),
+           ('content_idea_finish_use(text,uuid,uuid)'),
+           ('content_idea_reject(text,uuid)')
 ),
 -- The designed matrix. Anything not listed here must be false.
 table_grants(relname, privilege) AS (

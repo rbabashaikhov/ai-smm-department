@@ -65,6 +65,9 @@ def test_the_api_exposes_exactly_the_planned_routes(api_app) -> None:
             "/api/v1/projects/{project_id}/topic-ideation-jobs",
             "/api/v1/projects/{project_id}/topic-ideation-jobs/{job_id}",
             "/api/v1/projects/{project_id}/content-ideas",
+            # SMM-035B3B2: an owner rejects an idea or uses it for one job.
+            "/api/v1/projects/{project_id}/content-ideas/{idea_id}/reject",
+            "/api/v1/projects/{project_id}/content-ideas/{idea_id}/use",
             "/api/v1/content-items/{content_item_id}",
             "/api/v1/content-items/{content_item_id}/revisions",
             "/api/v1/content-items/{content_item_id}/approvals",

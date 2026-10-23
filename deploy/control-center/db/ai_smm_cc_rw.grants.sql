@@ -65,7 +65,11 @@ DECLARE
         'public.guard_context_session()',
         'public.guard_require_owner(text, text)',
         'public.guard_publication_problem(bigint)',
-        'public.guard_consume_approval_grant(uuid, uuid, uuid)'
+        'public.guard_consume_approval_grant(uuid, uuid, uuid)',
+        -- SMM-035B3B2
+        'public.content_idea_begin_use(text, uuid)',
+        'public.content_idea_finish_use(text, uuid, uuid)',
+        'public.content_idea_reject(text, uuid)'
     ];
     missing text[];
     owners text[];
@@ -87,7 +91,7 @@ BEGIN
      WHERE to_regprocedure(f) IS NULL;
 
     IF missing IS NOT NULL THEN
-        RAISE EXCEPTION 'ai_smm_cc_rw: guard functions missing in %: % -- migrate to c4d81e2a9f63 first',
+        RAISE EXCEPTION 'ai_smm_cc_rw: guard functions missing in %: % -- migrate to e6b1f3a9c205 first',
             current_database(), missing;
     END IF;
 
@@ -349,6 +353,16 @@ GRANT EXECUTE ON FUNCTION
     public.guard_require_owner(text, text),
     public.guard_publication_problem(bigint),
     public.guard_consume_approval_grant(uuid, uuid, uuid)
+TO ai_smm_cc_rw;
+
+-- POST /projects/{id}/content-ideas/{idea_id}/reject and /use (SMM-035B3B2).
+-- content_ideas stays SELECT-only: these SECURITY DEFINER contracts are
+-- the only way this role changes an idea, and each demands a session-bound
+-- transaction whose user owns the named project (guard_require_owner).
+GRANT EXECUTE ON FUNCTION
+    public.content_idea_begin_use(text, uuid),
+    public.content_idea_finish_use(text, uuid, uuid),
+    public.content_idea_reject(text, uuid)
 TO ai_smm_cc_rw;
 
 -- Fail closed on what this file cannot grant away: a privilege that

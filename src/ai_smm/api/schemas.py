@@ -736,3 +736,17 @@ class ContentIdeaOut(BaseModel):
 
 class ContentIdeaList(PageMeta):
     items: list[ContentIdeaOut]
+
+
+class ContentIdeaUseOut(BaseModel):
+    """The idea after it was used, and the one generation job it produced
+    (or, on a replay, already had)."""
+
+    idea: ContentIdeaOut
+    generation_job_id: uuid.UUID
+    generation_job: GenerationJobOut
+    #: True when the idea had already been used: nothing new was queued.
+    replayed: bool
+    #: Which of title/description/angle the job's topic_hint carries; empty
+    #: on a replay. A part that did not fit is omitted, never truncated.
+    topic_includes: list[str]

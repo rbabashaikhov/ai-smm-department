@@ -388,8 +388,8 @@ EDITORIAL_REVISION = "3d4ac1986f07"
 SOCIAL_ACCOUNTS_REVISION = "a7c2e5f19b40"
 #: Kept separately because guard migration tests upgrade to this revision.
 GUARDS_REVISION = "c4d81e2a9f63"
-#: Current migration head: topic ideation job params (SMM-035B3B1).
-HEAD_REVISION = "1c9e4b7d2a05"
+#: Current migration head: topic idea selection (SMM-035B3B2).
+HEAD_REVISION = "e6b1f3a9c205"
 EDITORIAL_TABLES = {
     "content_items",
     "content_revisions",
@@ -547,6 +547,140 @@ def test_ideation_params_upgrade_keeps_jobs_and_downgrade_guards_them(
                 column["name"]
                 for column in inspect(engine).get_columns("topic_ideation_jobs")
             }
+
+        command.upgrade(config, "head")
+    finally:
+        engine.dispose()
+
+
+_IDEA_CONTRACTS = (
+    "public.content_idea_begin_use(text,uuid)",
+    "public.content_idea_finish_use(text,uuid,uuid)",
+    "public.content_idea_reject(text,uuid)",
+)
+_IDEA_FK = text(
+    "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+    " WHERE conname = 'fk_content_ideas_generation_job'"
+)
+
+
+def test_idea_selection_upgrade_keeps_ideas_and_downgrade_is_safe(
+    migration_db: str,
+) -> None:
+    """e6b1f3a9c205 (SMM-035B3B2): an existing idea survives untouched; the
+    link to a generation job becomes project-consistent; downgrade restores
+    the single-column key and loses no row, even a used one."""
+
+    from sqlalchemy.exc import IntegrityError
+
+    os.environ["AI_SMM_DATABASE_URL"] = migration_db
+    config = _alembic_config(migration_db)
+    command.upgrade(config, "1c9e4b7d2a05")
+    engine = create_engine(migration_db)
+    user = "00000000-0000-0000-0000-000000000001"
+    ideation = "00000000-0000-0000-0000-0000000000a1"
+    idea = "00000000-0000-0000-0000-0000000000b1"
+    job_own = "00000000-0000-0000-0000-0000000000c1"
+    job_foreign = "00000000-0000-0000-0000-0000000000c2"
+
+    try:
+        with engine.begin() as connection:
+            for project in ("legacy", "other"):
+                connection.execute(
+                    text(
+                        "INSERT INTO projects (id, display_name, knowledge_path)"
+                        " VALUES (:p, :p, 'knowledge/x')"
+                    ),
+                    {"p": project},
+                )
+            connection.execute(
+                text(
+                    "INSERT INTO users (id, email, password_hash, display_name)"
+                    " VALUES (:u, 'o@example.test', 'x', 'Owner')"
+                ),
+                {"u": user},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO topic_ideation_jobs"
+                    " (id, project_id, requested_by_user_id, idea_count)"
+                    " VALUES (:j, 'legacy', :u, 1)"
+                ),
+                {"j": ideation, "u": user},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_ideas (id, project_id, ideation_job_id,"
+                    " position, title, description)"
+                    " VALUES (:i, 'legacy', :j, 1, 'T', 'D')"
+                ),
+                {"i": idea, "j": ideation},
+            )
+            for job, project in ((job_own, "legacy"), (job_foreign, "other")):
+                connection.execute(
+                    text(
+                        "INSERT INTO content_generation_jobs"
+                        " (id, project_id, requested_by_user_id, params)"
+                        " VALUES (:j, :p, :u, '{}')"
+                    ),
+                    {"j": job, "p": project, "u": user},
+                )
+            before_fk = connection.execute(_IDEA_FK).scalar_one()
+            assert "(generation_job_id)" in before_fk
+
+        command.upgrade(config, "e6b1f3a9c205")
+
+        with engine.begin() as connection:
+            assert connection.execute(
+                text("SELECT status::text, generation_job_id FROM content_ideas")
+            ).one() == ("proposed", None)
+            assert "(generation_job_id, project_id)" in connection.execute(
+                _IDEA_FK
+            ).scalar_one()
+            for contract in _IDEA_CONTRACTS:
+                assert not connection.execute(
+                    text(
+                        "SELECT has_function_privilege('public',"
+                        " to_regprocedure(:f), 'EXECUTE')"
+                    ),
+                    {"f": contract},
+                ).scalar_one(), contract
+
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE content_ideas SET status = 'used',"
+                    " generation_job_id = :j"
+                ),
+                {"j": job_foreign},
+            )
+
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE content_ideas SET status = 'used',"
+                    " generation_job_id = :j"
+                ),
+                {"j": job_own},
+            )
+
+        command.downgrade(config, "1c9e4b7d2a05")
+
+        with engine.begin() as connection:
+            assert connection.execute(
+                text("SELECT status::text, generation_job_id::text FROM content_ideas")
+            ).one() == ("used", job_own)
+            assert connection.execute(_IDEA_FK).scalar_one() == before_fk
+            for contract in _IDEA_CONTRACTS:
+                assert connection.execute(
+                    text("SELECT to_regprocedure(:f)"), {"f": contract}
+                ).scalar_one() is None, contract
+            assert {
+                constraint["name"]
+                for constraint in inspect(engine).get_unique_constraints(
+                    "content_generation_jobs"
+                )
+            }.isdisjoint({"uq_content_generation_jobs_id_project"})
 
         command.upgrade(config, "head")
     finally:

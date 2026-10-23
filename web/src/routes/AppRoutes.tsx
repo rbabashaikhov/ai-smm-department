@@ -10,6 +10,7 @@ import { AccountsPage } from "../pages/AccountsPage";
 import { AttentionPage } from "../pages/AttentionPage";
 import { AuditPage } from "../pages/AuditPage";
 import { ContentDetailPage } from "../pages/ContentDetailPage";
+import { ContentIdeasPage } from "../pages/ContentIdeasPage";
 import { ContentListPage } from "../pages/ContentListPage";
 import { CreateContentPage } from "../pages/CreateContentPage";
 import { CreateProjectPage } from "../pages/CreateProjectPage";
@@ -82,6 +83,7 @@ export function AppRoutes() {
             <Route index element={<DashboardPage />} />
             <Route path="content" element={<ContentListPage />} />
             <Route path="content/new" element={<CreateContentPage />} />
+            <Route path="ideas" element={<ContentIdeasPage />} />
             <Route path="generation" element={<GenerationJobsPage />} />
             <Route path="generation/:jobId" element={<GenerationJobPage />} />
             <Route path="publications" element={<PublicationsPage />} />

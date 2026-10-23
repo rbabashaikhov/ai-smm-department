@@ -4,6 +4,7 @@
 
 import type {
   ContentFilters,
+  ContentIdeaFilters,
   GenerationJobFilters,
   PageParams,
   PublicationFilters,
@@ -36,6 +37,10 @@ export const qk = {
   ) => ["projects", projectId, "generation-jobs", "list", { ...filters, ...page }] as const,
   generationJob: (projectId: string, jobId: string) =>
     ["projects", projectId, "generation-jobs", jobId] as const,
+
+  contentIdeas: (projectId: string) => ["projects", projectId, "content-ideas"] as const,
+  contentIdeaList: (projectId: string, filters: ContentIdeaFilters, page: PageParams) =>
+    ["projects", projectId, "content-ideas", "list", { ...filters, ...page }] as const,
 
   projectContent: (projectId: string) => ["projects", projectId, "content"] as const,
   contentList: (projectId: string, filters: ContentFilters, page: PageParams) =>
