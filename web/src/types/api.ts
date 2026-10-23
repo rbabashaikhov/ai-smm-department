@@ -360,6 +360,44 @@ export interface ContentIdeaFilters {
   status?: ContentIdeaStatus[];
 }
 
+// -- topic ideation jobs -------------------------------------------------
+
+export type TopicIdeationJobStatus = "queued" | "claimed" | "succeeded" | "failed";
+
+export const TOPIC_IDEATION_JOB_STATUSES: readonly TopicIdeationJobStatus[] = [
+  "queued",
+  "claimed",
+  "succeeded",
+  "failed",
+];
+
+export interface TopicIdeationJob {
+  id: string;
+  project_id: string;
+  requested_by_user_id: string;
+  status: TopicIdeationJobStatus;
+  idea_count: number;
+  topic_hint: string | null;
+  result: JsonObject;
+  last_error: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+export interface TopicIdeationJobCreate {
+  idea_count: number;
+  topic_hint?: string;
+}
+
+export interface TopicIdeationJobFilters {
+  status?: TopicIdeationJobStatus[];
+}
+
+export type TopicIdeationJobList = Page<TopicIdeationJob>;
+
 /** POST .../use returns 202, or 200 with replayed=true for an already used idea. */
 export interface ContentIdeaUseResult {
   idea: ContentIdea;

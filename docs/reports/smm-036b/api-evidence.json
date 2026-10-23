@@ -1,0 +1,289 @@
+{
+  "/auth/me": {
+    "status": 200,
+    "body": {
+      "user": {
+        "id": "dc1bdb74-63c7-4779-b511-6e6dc71eea70",
+        "email": "browser-036b@local.test",
+        "display_name": "Browser 036B",
+        "is_active": true,
+        "last_login_at": "2026-10-23T16:45:46.619943Z",
+        "created_at": "2026-10-23T16:36:20.678071Z"
+      },
+      "projects": [
+        {
+          "project_id": "browser-e2e",
+          "display_name": "Browser E2E",
+          "role": "owner"
+        }
+      ],
+      "control_plane": {
+        "mutations_enabled": true
+      }
+    }
+  },
+  "/projects/browser-e2e": {
+    "status": 200,
+    "body": {
+      "id": "browser-e2e",
+      "display_name": "Browser E2E",
+      "description": "",
+      "default_platform": "threads",
+      "default_timezone": "Europe/Moscow",
+      "default_language": "ru",
+      "is_active": true,
+      "version": 1,
+      "created_at": "2026-10-23T15:19:00.366926Z",
+      "updated_at": "2026-10-23T15:19:00.366926Z",
+      "role": "owner",
+      "legacy_publishing": false
+    }
+  },
+  "/projects/browser-e2e/topic-ideation-jobs": {
+    "status": 200,
+    "body": {
+      "total": 2,
+      "limit": 50,
+      "offset": 0,
+      "items": [
+        {
+          "id": "cb6deef0-a0dc-4f98-9142-3a2ff3b9682f",
+          "project_id": "browser-e2e",
+          "requested_by_user_id": "dc1bdb74-63c7-4779-b511-6e6dc71eea70",
+          "status": "succeeded",
+          "idea_count": 3,
+          "topic_hint": "SMM-036B corrected worktree",
+          "result": {
+            "model": "gpt-4.1-mini",
+            "tokens": {
+              "input": 0,
+              "cached": 0,
+              "output": 0
+            },
+            "seconds": 0.0,
+            "cost_usd": 0.0,
+            "idea_ids": [
+              "49a93d27-2c62-4861-9351-14773ad2e96b",
+              "a7127d11-d21b-4c3c-a873-d74433dd9262",
+              "82bf963e-3e6f-4b19-9e10-3c3c9ebbe002"
+            ],
+            "suggested": 3,
+            "profile_settings_version": 1
+          },
+          "last_error": null,
+          "attempt_count": 1,
+          "max_attempts": 2,
+          "created_at": "2026-10-23T16:39:27.672654Z",
+          "updated_at": "2026-10-23T16:40:45.285050Z",
+          "finished_at": "2026-10-23T16:40:45.285050Z"
+        },
+        {
+          "id": "56cd5780-a8cf-4cd8-8946-1dd832a9f88f",
+          "project_id": "browser-e2e",
+          "requested_by_user_id": "dc1bdb74-63c7-4779-b511-6e6dc71eea70",
+          "status": "failed",
+          "idea_count": 3,
+          "topic_hint": "SMM-036B browser acceptance",
+          "result": {},
+          "last_error": "the job has no content profile snapshot (queued before SMM-035B3B1); queue a new one",
+          "attempt_count": 1,
+          "max_attempts": 2,
+          "created_at": "2026-10-23T16:36:57.871630Z",
+          "updated_at": "2026-10-23T16:38:09.340425Z",
+          "finished_at": "2026-10-23T16:38:09.340425Z"
+        }
+      ]
+    }
+  },
+  "/projects/browser-e2e/content-ideas": {
+    "status": 200,
+    "body": {
+      "total": 3,
+      "limit": 50,
+      "offset": 0,
+      "items": [
+        {
+          "id": "49a93d27-2c62-4861-9351-14773ad2e96b",
+          "project_id": "browser-e2e",
+          "ideation_job_id": "cb6deef0-a0dc-4f98-9142-3a2ff3b9682f",
+          "position": 1,
+          "title": "Тема 1",
+          "description": "Описание 1",
+          "angle": null,
+          "status": "used",
+          "generation_job_id": "2fa129cc-673f-49c8-a361-654812dfb400",
+          "created_at": "2026-10-23T16:40:45.285050Z",
+          "updated_at": "2026-10-23T16:41:08.685676Z"
+        },
+        {
+          "id": "a7127d11-d21b-4c3c-a873-d74433dd9262",
+          "project_id": "browser-e2e",
+          "ideation_job_id": "cb6deef0-a0dc-4f98-9142-3a2ff3b9682f",
+          "position": 2,
+          "title": "Тема 2",
+          "description": "Описание 2",
+          "angle": null,
+          "status": "used",
+          "generation_job_id": "820f9589-3610-4bf4-b00d-85de4ed87cc5",
+          "created_at": "2026-10-23T16:40:45.285050Z",
+          "updated_at": "2026-10-23T16:43:20.099305Z"
+        },
+        {
+          "id": "82bf963e-3e6f-4b19-9e10-3c3c9ebbe002",
+          "project_id": "browser-e2e",
+          "ideation_job_id": "cb6deef0-a0dc-4f98-9142-3a2ff3b9682f",
+          "position": 3,
+          "title": "Тема 3",
+          "description": "Описание 3",
+          "angle": null,
+          "status": "rejected",
+          "generation_job_id": null,
+          "created_at": "2026-10-23T16:40:45.285050Z",
+          "updated_at": "2026-10-23T16:41:03.543777Z"
+        }
+      ]
+    }
+  },
+  "/content-items/357a4134-2df2-4f2f-b153-e76127b46253": {
+    "status": 200,
+    "body": {
+      "id": "357a4134-2df2-4f2f-b153-e76127b46253",
+      "project_id": "browser-e2e",
+      "title": "Часть 1",
+      "content_type": "post",
+      "status": "draft",
+      "current_revision_id": "1f89f21a-64ca-4c6d-a1bd-33899361c1f4",
+      "approved_revision_id": null,
+      "version": 1,
+      "created_by_user_id": null,
+      "created_at": "2026-10-23T16:43:40.142197Z",
+      "updated_at": "2026-10-23T16:43:40.142197Z",
+      "archived_at": null,
+      "current_revision": {
+        "id": "1f89f21a-64ca-4c6d-a1bd-33899361c1f4",
+        "content_item_id": "357a4134-2df2-4f2f-b153-e76127b46253",
+        "revision_number": 1,
+        "title": null,
+        "body": "Текст первой части.",
+        "format": "text",
+        "images": [],
+        "items": [],
+        "metadata": {
+          "model": "gpt-4.1-mini",
+          "usage": {
+            "tokens": {
+              "input": 0,
+              "cached": 0,
+              "output": 0
+            },
+            "seconds": 0.0,
+            "cost_usd": 0.0
+          },
+          "run_id": "57db369c-f7fd-4a46-8a54-6b49c2541638",
+          "version": 1,
+          "position": 1,
+          "series_title": "Серия",
+          "series_total": 1,
+          "editor_verdict": {
+            "score": 9.0,
+            "issues": [],
+            "approved": true,
+            "revision_count": 0,
+            "narrative_score": 9.0
+          },
+          "generation_job_id": "820f9589-3610-4bf4-b00d-85de4ed87cc5",
+          "publishing_strategy": "standalone_series"
+        },
+        "source": "copywriter",
+        "source_ref": "generation_job:820f9589-3610-4bf4-b00d-85de4ed87cc5:run:57db369c-f7fd-4a46-8a54-6b49c2541638",
+        "editor_score": 9.0,
+        "editor_notes": "ok",
+        "content_hash": "389b8d2f28917fc76d466858ee0fc85b5cdf041d945d83d3f83e5c78ac00e249",
+        "created_by_user_id": null,
+        "created_at": "2026-10-23T16:43:40.142197Z",
+        "social_account_id": null
+      },
+      "approval_in_effect": false
+    }
+  },
+  "db_checks": {
+    "ideation_snapshots": [
+      {
+        "id": "56cd5780-a8cf-4cd8-8946-1dd832a9f88f",
+        "status": "failed",
+        "has_profile": false,
+        "last_error": "the job has no content profile snapshot (queued before SMM-035B3B1); queue a new one"
+      },
+      {
+        "id": "cb6deef0-a0dc-4f98-9142-3a2ff3b9682f",
+        "status": "succeeded",
+        "has_profile": true,
+        "last_error": null
+      }
+    ],
+    "draft": [
+      {
+        "id": "357a4134-2df2-4f2f-b153-e76127b46253",
+        "status": "draft",
+        "approved_revision_id": null
+      }
+    ],
+    "approvals": [
+      {
+        "count": 0
+      }
+    ],
+    "publications": [
+      {
+        "count": 0
+      }
+    ]
+  },
+  "/generation-jobs/820f9589-3610-4bf4-b00d-85de4ed87cc5": {
+    "status": 200,
+    "body": {
+      "id": "820f9589-3610-4bf4-b00d-85de4ed87cc5",
+      "project_id": "browser-e2e",
+      "requested_by_user_id": "dc1bdb74-63c7-4779-b511-6e6dc71eea70",
+      "status": "succeeded",
+      "params": {
+        "topic_hint": "Тема 2\n\nОписание 2",
+        "series_size": 1,
+        "content_profile": {
+          "goals": [],
+          "topics": [],
+          "audience": "",
+          "guidelines": "",
+          "main_theme": "",
+          "tone_of_voice": "",
+          "schema_version": 1,
+          "excluded_topics": [],
+          "forbidden_terms": [],
+          "default_language": "ru",
+          "settings_version": 1
+        },
+        "publishing_strategy": "standalone_series"
+      },
+      "result": {
+        "tokens": {
+          "input": 0,
+          "cached": 0,
+          "output": 0
+        },
+        "seconds": 0.0,
+        "cost_usd": 0.0,
+        "series_title": "Серия",
+        "revision_count": 0,
+        "content_item_ids": [
+          "357a4134-2df2-4f2f-b153-e76127b46253"
+        ]
+      },
+      "last_error": null,
+      "attempt_count": 1,
+      "max_attempts": 2,
+      "created_at": "2026-10-23T16:43:20.114283Z",
+      "updated_at": "2026-10-23T16:43:40.142197Z",
+      "finished_at": "2026-10-23T16:43:40.142197Z"
+    }
+  }
+}

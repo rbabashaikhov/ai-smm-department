@@ -1,0 +1,107 @@
+- complementary:
+  - generic: SMM Control Center
+  - navigation "Основная навигация":
+    - link "Проекты":
+      - /url: /projects
+    - link "Dashboard":
+      - /url: /projects/browser-e2e
+    - link "Content":
+      - /url: /projects/browser-e2e/content
+    - link "Content Ideas":
+      - /url: /projects/browser-e2e/ideas
+    - link "AI Generation":
+      - /url: /projects/browser-e2e/generation
+    - link "Publications":
+      - /url: /projects/browser-e2e/publications
+    - link "Attention":
+      - /url: /projects/browser-e2e/attention
+    - link "Audit":
+      - /url: /projects/browser-e2e/audit
+    - link "Knowledge Base":
+      - /url: /projects/browser-e2e/knowledge
+    - link "Аккаунты":
+      - /url: /projects/browser-e2e/accounts
+    - link "Учётные данные":
+      - /url: /projects/browser-e2e/credentials
+    - link "Настройки":
+      - /url: /projects/browser-e2e/settings
+  - generic: Публикует только worker. Здесь — только очередь и редакция.
+- banner:
+  - generic: Проект
+  - combobox "Project switcher":
+    - option "— выберите —"
+    - option "Browser E2E (owner)" [selected]
+  - generic "Ваша роль в проекте": owner
+  - generic: Browser 036B
+  - button "Выйти"
+- main:
+  - strong: Browser E2E
+  - generic: browser-e2e · threads · Europe/Moscow
+  - generic: owner
+  - heading "Content Ideas" [level=1]
+  - generic: Browser E2E
+  - heading "Generate Topics" [level=2]
+  - form "Generate topics":
+    - text: Количество идей
+    - spinbutton "Idea count": "3"
+    - text: Topic hint
+    - textbox "Topic hint":
+      - /placeholder: Необязательная тема или направление
+    - generic: 0 / 500
+    - button "Generate Topics"
+  - region "Topic ideation jobs":
+    - heading "Topic ideation jobs" [level=2]
+    - list:
+      - generic: succeeded
+      - text: 3 ideas
+      - generic: failed
+      - text: 3 ideas · the job has no content profile snapshot (queued before SMM-035B3B1); queue a new one
+  - text: Status
+  - combobox "Idea status filter":
+    - option "все" [selected]
+    - option "proposed"
+    - option "rejected"
+    - option "used"
+  - table:
+    - rowgroup:
+      - row "Идея Angle Status Создана Действия":
+        - columnheader "Идея"
+        - columnheader "Angle"
+        - columnheader "Status"
+        - columnheader "Создана"
+        - columnheader "Действия"
+    - rowgroup:
+      - row "Тема 1 Описание 1 — used 23.10.2026, 19:40 (UTC+03:00) Generation job":
+        - cell "Тема 1 Описание 1":
+          - strong: Тема 1
+          - generic: Описание 1
+        - cell "—"
+        - cell "used":
+          - generic: used
+        - cell "23.10.2026, 19:40 (UTC+03:00)"
+        - cell "Generation job":
+          - link "Generation job":
+            - /url: /projects/browser-e2e/generation/2fa129cc-673f-49c8-a361-654812dfb400
+      - row "Тема 2 Описание 2 — used 23.10.2026, 19:40 (UTC+03:00) Generation job":
+        - cell "Тема 2 Описание 2":
+          - strong: Тема 2
+          - generic: Описание 2
+        - cell "—"
+        - cell "used":
+          - generic: used
+        - cell "23.10.2026, 19:40 (UTC+03:00)"
+        - cell "Generation job":
+          - link "Generation job":
+            - /url: /projects/browser-e2e/generation/820f9589-3610-4bf4-b00d-85de4ed87cc5
+      - row "Тема 3 Описание 3 — rejected 23.10.2026, 19:40 (UTC+03:00)":
+        - cell "Тема 3 Описание 3":
+          - strong: Тема 3
+          - generic: Описание 3
+        - cell "—"
+        - cell "rejected":
+          - generic: rejected
+        - cell "23.10.2026, 19:40 (UTC+03:00)"
+        - cell
+  - generic: 1–3 из 3
+  - button "← Назад" [disabled]
+  - button "Вперёд →" [disabled]

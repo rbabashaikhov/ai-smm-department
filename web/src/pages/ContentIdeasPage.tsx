@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
 
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { Empty, Loading, PageHeader, Pagination, StatusBadge } from "../components/ui";
+import { Card, Empty, Loading, PageHeader, Pagination, StatusBadge } from "../components/ui";
 import {
+  isIdeaOutcomeUnknown,
   useContentIdeas,
+  useCreateTopicIdeationJob,
   useRejectContentIdea,
+  useTopicIdeationJobs,
   useUseContentIdea,
 } from "../features/ideas/hooks";
 import {
@@ -38,8 +41,24 @@ export function ContentIdeasPage() {
   const offset = Math.max(0, Number(params.get("offset") ?? 0) || 0);
   const page = { limit: PAGE_SIZE, offset };
   const ideas = useContentIdeas(projectId, { status: status ? [status] : undefined }, page);
+  const ideationJobs = useTopicIdeationJobs(projectId, {}, { limit: 5, offset: 0 });
+  const createIdeation = useCreateTopicIdeationJob(projectId);
   const reject = useRejectContentIdea(projectId);
   const useIdea = useUseContentIdea(projectId);
+  const completedJobs = useRef(new Set<string>());
+  const [ideaCount, setIdeaCount] = useState("3");
+  const [topicHint, setTopicHint] = useState("");
+  const [ideationValidationError, setIdeationValidationError] = useState<string | null>(null);
+  const [verifyBeforeCreate, setVerifyBeforeCreate] = useState(false);
+
+  useEffect(() => {
+    for (const job of ideationJobs.data?.items ?? []) {
+      if (job.status === "succeeded" && !completedJobs.current.has(job.id)) {
+        completedJobs.current.add(job.id);
+        void ideas.refetch();
+      }
+    }
+  }, [ideationJobs.data, ideas]);
 
   const update = (changes: Record<string, string | null>) => {
     const next = new URLSearchParams(params);
@@ -69,12 +88,87 @@ export function ContentIdeasPage() {
     reject.mutate(rejecting.id, { onSuccess: () => setRejecting(null) });
   };
 
+  const submitIdeation = (event: FormEvent) => {
+    event.preventDefault();
+    if (createIdeation.isPending || verifyBeforeCreate) return;
+    const count = Number(ideaCount);
+    const hint = topicHint.trim();
+    if (!Number.isInteger(count) || count < 1 || count > 5) {
+      setIdeationValidationError("Количество идей должно быть целым числом от 1 до 5.");
+      return;
+    }
+    if (hint.length > 500) {
+      setIdeationValidationError("Topic hint не должен превышать 500 символов.");
+      return;
+    }
+    setIdeationValidationError(null);
+    createIdeation.reset();
+    createIdeation.mutate(
+      { idea_count: count, ...(hint ? { topic_hint: hint } : {}) },
+      {
+        onSuccess: () => setTopicHint(""),
+        onError: (error) => setVerifyBeforeCreate(isIdeaOutcomeUnknown(error)),
+      },
+    );
+  };
+
+  const verifyIdeationJobs = async () => {
+    const result = await ideationJobs.refetch();
+    // refetch resolves with an error result on failure; it does not throw.
+    if (!result.isSuccess) return;
+    setVerifyBeforeCreate(false);
+    createIdeation.reset();
+  };
+
   return (
     <>
       <PageHeader
         title="Content Ideas"
         subtitle={project.data ? project.data.display_name : undefined}
       />
+      {can.canEditContent ? (
+        <Card title="Generate Topics">
+          <form className="revision-form" onSubmit={submitIdeation} aria-label="Generate topics">
+            <div className="form-row">
+              <label>
+                Количество идей
+                <input aria-label="Idea count" type="number" min={1} max={5} step={1} required value={ideaCount} onChange={(event) => setIdeaCount(event.target.value)} />
+              </label>
+              <label className="grow">
+                Topic hint
+                <input aria-label="Topic hint" maxLength={500} value={topicHint} onChange={(event) => setTopicHint(event.target.value)} placeholder="Необязательная тема или направление" />
+              </label>
+            </div>
+            <div className="muted small">{topicHint.length} / 500</div>
+            {ideationValidationError ? <div className="banner banner-error" role="alert">{ideationValidationError}</div> : null}
+            {createIdeation.isError ? <ErrorBanner error={createIdeation.error} /> : null}
+            {createIdeation.isError && isIdeaOutcomeUnknown(createIdeation.error) ? (
+              <div className="banner banner-warn" role="status">
+                Ответ сервера не получен. Новая заявка не будет отправлена автоматически — сначала проверьте состояние очереди.
+              </div>
+            ) : null}
+            <div className="form-actions">
+              {verifyBeforeCreate ? (
+                <button type="button" onClick={() => { void verifyIdeationJobs(); }} disabled={ideationJobs.isFetching}>Проверить задания</button>
+              ) : (
+                <button type="submit" className="btn-primary" disabled={createIdeation.isPending}>
+                  {createIdeation.isPending ? "Создание…" : "Generate Topics"}
+                </button>
+              )}
+            </div>
+          </form>
+        </Card>
+      ) : null}
+      <section aria-label="Topic ideation jobs">
+        <h2>Topic ideation jobs</h2>
+        {ideationJobs.isPending ? <Loading label="Загрузка заявок…" /> : null}
+        {ideationJobs.isError ? <ErrorBanner error={ideationJobs.error} onRetry={() => ideationJobs.refetch()} /> : null}
+        {ideationJobs.data?.items.length ? (
+          <ul className="plain-list">
+            {ideationJobs.data.items.map((job) => <li key={job.id}><StatusBadge status={job.status} /> {job.idea_count} ideas{job.last_error ? ` · ${job.last_error}` : ""}</li>)}
+          </ul>
+        ) : <div className="muted small">Заявок пока нет.</div>}
+      </section>
       <div className="filters">
         <label>
           Status

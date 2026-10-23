@@ -8,6 +8,7 @@ import type {
   GenerationJobFilters,
   PageParams,
   PublicationFilters,
+  TopicIdeationJobFilters,
 } from "../types/api";
 
 export const qk = {
@@ -41,6 +42,13 @@ export const qk = {
   contentIdeas: (projectId: string) => ["projects", projectId, "content-ideas"] as const,
   contentIdeaList: (projectId: string, filters: ContentIdeaFilters, page: PageParams) =>
     ["projects", projectId, "content-ideas", "list", { ...filters, ...page }] as const,
+  topicIdeationJobs: (projectId: string) =>
+    ["projects", projectId, "topic-ideation-jobs"] as const,
+  topicIdeationJobList: (
+    projectId: string,
+    filters: TopicIdeationJobFilters,
+    page: PageParams,
+  ) => ["projects", projectId, "topic-ideation-jobs", "list", { ...filters, ...page }] as const,
 
   projectContent: (projectId: string) => ["projects", projectId, "content"] as const,
   contentList: (projectId: string, filters: ContentFilters, page: PageParams) =>

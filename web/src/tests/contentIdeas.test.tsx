@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { apiError, ok } from "../test/fakeApi";
-import { PROJECT_B_ID, PROJECT_ID, createServer, createTwoProjectServer, page } from "../test/fixtures";
+import { PROJECT_B_ID, PROJECT_ID, createServer, createTwoProjectServer, makeMe, makeTopicIdeationJob, page } from "../test/fixtures";
 import { currentPath, renderApp } from "../test/render";
 import type { ContentIdea, GenerationJob, Role } from "../types/api";
 
@@ -44,6 +44,100 @@ function ideasServer(role: Role, ideas: ContentIdea[] = []) {
 }
 
 describe("content ideas page", () => {
+  it("shows Generate Topics after owner login returns to the protected ideas URL", async () => {
+    let signedIn = false;
+    const server = ideasServer("owner").on("GET", "/api/v1/auth/me", () =>
+      signedIn ? ok(makeMe("owner")) : apiError(401, "AUTH_REQUIRED"),
+    ).on("POST", "/api/v1/auth/login", () => {
+      signedIn = true;
+      return ok({ user: makeMe("owner").user, csrf_token: "test-csrf" });
+    });
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/ideas`);
+    await user.type(await screen.findByLabelText("Email"), "operator@example.com");
+    await user.type(screen.getByLabelText("Password"), "test-password");
+    await user.click(screen.getByRole("button", { name: "Войти" }));
+
+    expect(await screen.findByRole("button", { name: "Generate Topics" })).toBeEnabled();
+    expect(currentPath()).toBe(`/projects/${PROJECT_ID}/ideas`);
+  });
+
+  it("lets an owner queue topic ideation once and shows its status", async () => {
+    const queued = makeTopicIdeationJob({ topic_hint: "Весенние рецепты" });
+    const server = ideasServer("owner").on(
+      "GET", "/api/v1/projects/:projectId/topic-ideation-jobs", ok(page([queued])),
+    ).on(
+      "POST", `/api/v1/projects/${PROJECT_ID}/topic-ideation-jobs`, ok(queued, 202),
+    );
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/ideas`);
+
+    await user.clear(await screen.findByLabelText("Idea count"));
+    await user.type(screen.getByLabelText("Idea count"), "2");
+    await user.type(screen.getByLabelText("Topic hint"), "Весенние рецепты");
+    await user.click(screen.getByRole("button", { name: "Generate Topics" }));
+
+    await waitFor(() => expect(server.callsTo("POST", /topic-ideation-jobs$/)).toHaveLength(1));
+    expect(server.callsTo("POST", /topic-ideation-jobs$/)[0]!.body).toEqual({ idea_count: 2, topic_hint: "Весенние рецепты" });
+    expect(screen.getByText("queued")).toBeInTheDocument();
+  });
+
+  it("keeps topic creation blocked when verification fails after a lost POST response", async () => {
+    const server = ideasServer("owner").on(
+      "POST", `/api/v1/projects/${PROJECT_ID}/topic-ideation-jobs`, async () => {
+        throw new TypeError("connection lost after sending");
+      },
+    );
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/ideas`);
+    await user.click(await screen.findByRole("button", { name: "Generate Topics" }));
+    await screen.findByRole("button", { name: "Проверить задания" });
+    server.on("GET", "/api/v1/projects/:projectId/topic-ideation-jobs",
+      apiError(500, "INTERNAL_ERROR", "Queue verification failed."));
+
+    await user.click(screen.getByRole("button", { name: "Проверить задания" }));
+    await screen.findByText(/Queue verification failed/);
+    expect(screen.getByRole("button", { name: "Проверить задания" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Generate Topics" })).not.toBeInTheDocument();
+    expect(server.callsTo("POST", /topic-ideation-jobs$/)).toHaveLength(1);
+
+    server.on("GET", "/api/v1/projects/:projectId/topic-ideation-jobs", ok(page([])));
+    await user.click(screen.getByRole("button", { name: "Проверить задания" }));
+    expect(await screen.findByRole("button", { name: "Generate Topics" })).toBeEnabled();
+    expect(server.callsTo("POST", /topic-ideation-jobs$/)).toHaveLength(1);
+  });
+
+  it("resets the topic form and uncertain outcome when switching projects", async () => {
+    const server = createTwoProjectServer({ roles: { demo: "owner", beta: "owner" } }).on(
+      "GET", "/api/v1/projects/:projectId/content-ideas", ok(page([])),
+    ).on("GET", "/api/v1/projects/:projectId/topic-ideation-jobs", ok(page([])))
+      .on("POST", `/api/v1/projects/${PROJECT_ID}/topic-ideation-jobs`, async () => {
+        throw new TypeError("connection lost after sending");
+      });
+    const { user } = renderApp(server, `/projects/${PROJECT_ID}/ideas`);
+    await user.type(await screen.findByLabelText("Topic hint"), "Private topic for project A");
+    await user.click(screen.getByRole("button", { name: "Generate Topics" }));
+    await screen.findByRole("button", { name: "Проверить задания" });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Project switcher" }), PROJECT_B_ID);
+    await waitFor(() => expect(currentPath()).toBe(`/projects/${PROJECT_B_ID}/ideas`));
+
+    expect(screen.getByLabelText("Topic hint")).toHaveValue("");
+    expect(screen.getByRole("button", { name: "Generate Topics" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Проверить задания" })).not.toBeInTheDocument();
+  });
+
+  it("polls active topic jobs and refreshes ideas when they succeed", async () => {
+    let complete = false;
+    const server = ideasServer("owner").on(
+      "GET", "/api/v1/projects/:projectId/topic-ideation-jobs", () =>
+        ok(page([makeTopicIdeationJob({ status: complete ? "succeeded" : "queued" })])),
+    ).on("GET", "/api/v1/projects/:projectId/content-ideas", () =>
+      ok(page(complete ? [makeIdea()] : [])),
+    );
+    renderApp(server, `/projects/${PROJECT_ID}/ideas`);
+    await screen.findByText("queued");
+    complete = true;
+    expect(await screen.findByText("Осенний запуск", {}, { timeout: 5_000 })).toBeInTheDocument();
+    expect(screen.getByText("succeeded")).toBeInTheDocument();
+  });
+
   it("lists idea details, used job link, filters and pagination", async () => {
     const server = ideasServer("viewer", [makeIdea("used")]).on(
       "GET", "/api/v1/projects/:projectId/content-ideas", (request) =>
@@ -83,6 +177,7 @@ describe("content ideas page", () => {
     await screen.findByText("Осенний запуск");
     expect(screen.queryByRole("button", { name: "Создать черновик" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Отклонить" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate Topics" })).not.toBeInTheDocument();
   });
 
   it("does not offer commands to an owner while mutations are disabled", async () => {
@@ -93,6 +188,7 @@ describe("content ideas page", () => {
     await screen.findByText("Осенний запуск");
     expect(screen.queryByRole("button", { name: "Создать черновик" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Отклонить" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Generate Topics" })).not.toBeInTheDocument();
   });
 
   it("rejects only after confirmation and refreshes the list", async () => {

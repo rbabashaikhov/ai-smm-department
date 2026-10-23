@@ -4,7 +4,22 @@ import { useCallback, useRef, useState } from "react";
 import { useApi } from "../../api/context";
 import { ApiError, ErrorCode } from "../../api/errors";
 import { qk } from "../../api/queryKeys";
-import type { ContentIdeaFilters, ContentIdeaUseResult, PageParams } from "../../types/api";
+import type {
+  ContentIdeaFilters,
+  ContentIdeaUseResult,
+  PageParams,
+  TopicIdeationJob,
+  TopicIdeationJobCreate,
+  TopicIdeationJobFilters,
+} from "../../types/api";
+
+export const TOPIC_IDEATION_POLL_INTERVAL_MS = 3_000;
+
+function topicIdeationPollingInterval(jobs: TopicIdeationJob[] | undefined): number | false {
+  return jobs?.some((job) => job.status === "queued" || job.status === "claimed")
+    ? TOPIC_IDEATION_POLL_INTERVAL_MS
+    : false;
+}
 
 /** A failed POST may have reached the API. Refresh the server state before another command. */
 export const isIdeaOutcomeUnknown = (error: unknown): error is ApiError =>
@@ -23,6 +38,45 @@ export function useContentIdeas(
     queryKey: qk.contentIdeaList(projectId ?? "", filters, page),
     queryFn: () => api.ideas.list(projectId!, filters, page),
     enabled: Boolean(projectId),
+  });
+}
+
+export function useTopicIdeationJobs(
+  projectId: string | undefined,
+  filters: TopicIdeationJobFilters,
+  page: PageParams,
+) {
+  const api = useApi();
+
+  return useQuery({
+    queryKey: qk.topicIdeationJobList(projectId ?? "", filters, page),
+    queryFn: () => api.ideas.listJobs(projectId!, filters, page),
+    enabled: Boolean(projectId),
+    refetchInterval: (query) => topicIdeationPollingInterval(query.state.data?.items),
+  });
+}
+
+/** A lost create response is never retried; the owner explicitly rereads jobs first. */
+export function useCreateTopicIdeationJob(projectId: string) {
+  const api = useApi();
+  const queryClient = useQueryClient();
+  const inFlight = useRef<Promise<TopicIdeationJob> | null>(null);
+
+  return useMutation({
+    retry: false,
+    mutationFn: (body: TopicIdeationJobCreate) => {
+      if (inFlight.current) return inFlight.current;
+      const request = api.ideas.createJob(projectId, body);
+      const clear = () => {
+        if (inFlight.current === request) inFlight.current = null;
+      };
+      inFlight.current = request;
+      void request.then(clear, clear);
+      return request;
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: qk.topicIdeationJobs(projectId) });
+    },
   });
 }
 

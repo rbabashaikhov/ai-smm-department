@@ -29,6 +29,10 @@ import type {
   ContentIdeaFilters,
   ContentIdeaList,
   ContentIdeaUseResult,
+  TopicIdeationJob,
+  TopicIdeationJobCreate,
+  TopicIdeationJobFilters,
+  TopicIdeationJobList,
   GenerationJob,
   GenerationJobCreate,
   GenerationJobFilters,
@@ -128,6 +132,12 @@ export function createEndpoints(client: ApiClient) {
     },
 
     ideas: {
+      listJobs: (projectId: string, filters: TopicIdeationJobFilters, page: PageParams) =>
+        client.get<TopicIdeationJobList>(`${V1}/projects/${enc(projectId)}/topic-ideation-jobs`, {
+          query: { ...page, status: filters.status },
+        }),
+      createJob: (projectId: string, body: TopicIdeationJobCreate) =>
+        client.post<TopicIdeationJob>(`${V1}/projects/${enc(projectId)}/topic-ideation-jobs`, body),
       list: (projectId: string, filters: ContentIdeaFilters, page: PageParams) =>
         client.get<ContentIdeaList>(`${V1}/projects/${enc(projectId)}/content-ideas`, {
           query: { ...page, status: filters.status },
