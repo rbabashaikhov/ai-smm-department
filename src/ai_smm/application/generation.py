@@ -122,8 +122,10 @@ def _validate_params(
         )
 
 
-def _profile_snapshot(db: Session, *, project_id: str) -> dict:
+def project_profile_snapshot(db: Session, *, project_id: str) -> dict:
     """The project's editorial profile as it is now, for the job to keep.
+
+    Also what a topic ideation job keeps (ai_smm.application.topic_ideation).
 
     Read from the stored row as it is, not through get_settings_view,
     which coerces a section to a dict: a stored [] or false would become
@@ -227,7 +229,7 @@ def create_generation_job(
 
     now = now or utcnow()
     # Captured once, here: retries and later settings edits never change it.
-    profile = _profile_snapshot(db, project_id=project_id)
+    profile = project_profile_snapshot(db, project_id=project_id)
 
     job = ContentGenerationJob(
         id=uuid.uuid4(),

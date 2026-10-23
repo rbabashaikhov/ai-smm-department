@@ -48,6 +48,7 @@ from ai_smm.db.ideation_contracts import (
     MAX_IDEA_TITLE_LENGTH,
     MAX_IDEAS_PER_JOB,
     MAX_IDEATION_ERROR_LENGTH,
+    MAX_IDEATION_PARAMS_BYTES,
     MAX_TOPIC_HINT_LENGTH,
     MIN_IDEAS_PER_JOB,
 )
@@ -1356,6 +1357,11 @@ class TopicIdeationJob(Base):
             "jsonb_typeof(result) = 'object'",
             name="ck_topic_ideation_jobs_result",
         ),
+        CheckConstraint(
+            "jsonb_typeof(params) = 'object' AND octet_length(params::text) "
+            f"<= {MAX_IDEATION_PARAMS_BYTES}",
+            name="ck_topic_ideation_jobs_params",
+        ),
         # The target of content_ideas' (ideation_job_id, project_id) key:
         # an idea can only ever reference a job of its own project.
         UniqueConstraint(
@@ -1397,6 +1403,12 @@ class TopicIdeationJob(Base):
     )
     idea_count: Mapped[int] = mapped_column(Integer, nullable=False)
     topic_hint: Mapped[str | None] = mapped_column(Text)
+    #: What the job runs on, copied by the API when it is queued and never
+    #: changed after (SMM-035B3B1): the project's profile snapshot and its
+    #: recent idea titles. {} on a job queued before that stage.
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
     #: The worker's run summary (usage, model) plus "idea_ids"; written
     #: only by topic_ideation_complete.
     result: Mapped[dict[str, Any]] = mapped_column(

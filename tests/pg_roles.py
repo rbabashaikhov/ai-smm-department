@@ -302,3 +302,41 @@ def provision_generation(admin_url: str, database_url: str) -> ApiRole:
 
 def retire_generation(admin_url: str) -> None:
     run_script(admin_url, GENERATION_REVOKE_SQL)
+
+
+# -- topic ideation worker (SMM-035B3B1) --------------------------------------
+IDEATION_ROLE = "ai_smm_ideation"
+IDEATION_GRANTS_SQL = DB_DIR / "ai_smm_ideation.grants.sql"
+IDEATION_VERIFY_SQL = DB_DIR / "ai_smm_ideation.verify.sql"
+IDEATION_REVOKE_SQL = DB_DIR / "ai_smm_ideation.revoke.sql"
+
+
+def verify_ideation(admin_url: str) -> list[str]:
+    return [
+        row[0]
+        for row in query_admin(
+            admin_url, IDEATION_VERIFY_SQL.read_text(encoding="utf-8")
+        )
+    ]
+
+
+def provision_ideation(admin_url: str, database_url: str) -> ApiRole:
+    run_script(admin_url, IDEATION_GRANTS_SQL)
+    password = secrets.token_hex(24)
+    run_admin(
+        admin_url,
+        sql.SQL("ALTER ROLE ai_smm_ideation PASSWORD {}").format(
+            sql.Literal(password)
+        ),
+    )
+    return ApiRole(
+        url=make_url(database_url)
+        .set(username=IDEATION_ROLE, password=password)
+        .render_as_string(hide_password=False),
+        others_before=[],
+        others_after=[],
+    )
+
+
+def retire_ideation(admin_url: str) -> None:
+    run_script(admin_url, IDEATION_REVOKE_SQL)

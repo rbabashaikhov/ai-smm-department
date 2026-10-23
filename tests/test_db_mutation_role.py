@@ -141,10 +141,11 @@ BUSINESS_WRITES: dict[tuple[str, str], frozenset[str]] = {
     ),
     # POST /projects/{id}/topic-ideation-jobs (SMM-035B3A): the request
     # columns only, exactly what ai_smm.application.topic_ideation inserts.
-    # No UPDATE, and no write to content_ideas at all.
+    # No UPDATE, and no write to content_ideas at all. params since
+    # SMM-035B3B1: the profile snapshot and recent titles.
     ("topic_ideation_jobs", "INSERT"): _cols(
         "id, project_id, requested_by_user_id, status, idea_count,"
-        " topic_hint, max_attempts"
+        " topic_hint, params, max_attempts"
     ),
 }
 

@@ -1183,9 +1183,7 @@ GENERATION_TRIGGERS: tuple[GuardTrigger, ...] = (
 # every content_ideas row -- belongs to the topic_ideation_* SECURITY
 # DEFINER contracts (ai_smm.db.ideation_contracts), which run as the owner.
 
-_TOPIC_IDEATION_JOBS_INSERT = _trigger_fn(
-    "guard_topic_ideation_jobs_insert",
-    f"""
+_TOPIC_IDEATION_JOBS_INSERT_BODY_V1 = f"""
         v_user := public.guard_require_owner(NEW.project_id, 'starting topic ideation');
 
         IF NEW.requested_by_user_id IS DISTINCT FROM v_user THEN
@@ -1217,7 +1215,57 @@ _TOPIC_IDEATION_JOBS_INSERT = _trigger_fn(
 
         NEW.created_at := now();
         NEW.updated_at := now();
-""",
+"""
+
+_TOPIC_IDEATION_JOBS_INSERT_V1 = _trigger_fn(
+    "guard_topic_ideation_jobs_insert",
+    _TOPIC_IDEATION_JOBS_INSERT_BODY_V1,
+    declare="    v_user uuid;",
+)
+
+#: SMM-035B3B1: V1, plus the shape of params -- exactly the profile
+#: snapshot (an object) and the recent idea titles (at most 20 non-empty
+#: strings of at most 200 characters), nothing else. Their content is the
+#: API's to build and the worker's to validate again; this only keeps a
+#: business role from handing the worker anything else. The size bound is
+#: the table's (ck_topic_ideation_jobs_params).
+#: Three IFs, not one OR: the order PostgreSQL evaluates an OR in is not
+#: guaranteed, and jsonb_object_keys/jsonb_array_length raise on the wrong
+#: type -- each type is established before a function that needs it runs.
+_TOPIC_IDEATION_PARAMS_CHECK = f"""
+        IF jsonb_typeof(NEW.params) IS DISTINCT FROM 'object' THEN
+            {_raise('ideation params are a profile snapshot and recent titles, nothing more')}
+        END IF;
+
+        IF EXISTS (
+               SELECT 1 FROM jsonb_object_keys(NEW.params) AS k(key)
+                WHERE k.key NOT IN ('content_profile', 'recent_idea_titles'))
+           OR jsonb_typeof(NEW.params->'content_profile') IS DISTINCT FROM 'object'
+           OR jsonb_typeof(NEW.params->'recent_idea_titles') IS DISTINCT FROM 'array' THEN
+            {_raise('ideation params are a profile snapshot and recent titles, nothing more')}
+        END IF;
+
+        IF jsonb_array_length(NEW.params->'recent_idea_titles') > 20
+           OR EXISTS (
+               SELECT 1
+                 FROM jsonb_array_elements(NEW.params->'recent_idea_titles') AS t(value)
+                WHERE CASE WHEN jsonb_typeof(t.value) = 'string'
+                           THEN btrim(t.value #>> '{{}}') = ''
+                                OR char_length(t.value #>> '{{}}') > 200
+                           ELSE true END) THEN
+            {_raise('ideation params are a profile snapshot and recent titles, nothing more')}
+        END IF;
+"""
+
+_CREATED_AT_LINE = "\n        NEW.created_at := now();\n"
+if _TOPIC_IDEATION_JOBS_INSERT_BODY_V1.count(_CREATED_AT_LINE) != 1:
+    raise AssertionError("guard_topic_ideation_jobs_insert V1 changed")
+
+_TOPIC_IDEATION_JOBS_INSERT = _trigger_fn(
+    "guard_topic_ideation_jobs_insert",
+    _TOPIC_IDEATION_JOBS_INSERT_BODY_V1.replace(
+        _CREATED_AT_LINE, _TOPIC_IDEATION_PARAMS_CHECK + _CREATED_AT_LINE
+    ),
     declare="    v_user uuid;",
 )
 
@@ -1230,7 +1278,15 @@ _TOPIC_IDEATION_WRITE = _trigger_fn(
 """,
 )
 
-#: Depends on guard_require_owner (FUNCTIONS_V1).
+# Frozen as b3a7d2e91c4f installed them; 1c9e4b7d2a05 replaces the insert
+# guard. Both depend on guard_require_owner (FUNCTIONS_V1).
+TOPIC_IDEATION_FUNCTIONS_V1: tuple[GuardFunction, ...] = (
+    GuardFunction(
+        "guard_topic_ideation_jobs_insert", "", _TOPIC_IDEATION_JOBS_INSERT_V1
+    ),
+    GuardFunction("guard_topic_ideation_write", "", _TOPIC_IDEATION_WRITE),
+)
+
 TOPIC_IDEATION_FUNCTIONS: tuple[GuardFunction, ...] = (
     GuardFunction(
         "guard_topic_ideation_jobs_insert", "", _TOPIC_IDEATION_JOBS_INSERT

@@ -42,7 +42,7 @@ from ai_smm.security.credentials import CredentialOpener
 
 #: The schema this code is written for. tests/test_preflight.py keeps it
 #: equal to the Alembic head, so a new migration cannot be forgotten here.
-EXPECTED_SCHEMA_REVISION = "b3a7d2e91c4f"
+EXPECTED_SCHEMA_REVISION = "1c9e4b7d2a05"
 
 #: EX_CONFIG from sysexits.h: the worker's configuration is wrong.
 EXIT_CONFIG = 78

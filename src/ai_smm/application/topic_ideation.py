@@ -8,14 +8,17 @@ content_ideas, always filtered by the project the caller was authorised
 for: a row of another project is never returned, not even by id.
 
 **One safe command.** create. It writes the single row a guarded role may
-write (guard_topic_ideation_jobs_insert): a freshly queued job. Claiming,
+write (guard_topic_ideation_jobs_insert): a freshly queued job, with the
+project's profile snapshot and recent idea titles in its params
+(SMM-035B3B1) -- the ideation worker reads no table. Claiming,
 outcomes and every content_ideas row belong to the topic_ideation_*
 SECURITY DEFINER contracts (ai_smm.db.ideation_contracts), which nothing
 in this module calls. There is no reject or use command yet.
 
 Creation is closed twice: by the control plane's mutation switch, like
 every command, and by Settings.topic_ideation_jobs_enabled, which no
-runtime can turn on until an ideation worker exists.
+runtime can turn on yet (the worker exists since SMM-035B3B1; enabling
+the API is a separately approved stage).
 """
 
 from __future__ import annotations
@@ -26,9 +29,16 @@ from sqlalchemy import Select, func, insert, select
 from sqlalchemy.orm import Session
 
 from ai_smm.application.control_plane import require_mutations_enabled
+from ai_smm.application.generation import (
+    InvalidGenerationParams,
+    project_profile_snapshot,
+)
 from ai_smm.application.publications import Page
 from ai_smm.db.ideation_contracts import (
+    IDEATION_PROFILE_PARAM,
+    IDEATION_RECENT_TITLES_PARAM,
     MAX_IDEAS_PER_JOB,
+    MAX_RECENT_IDEA_TITLES,
     MAX_TOPIC_HINT_LENGTH,
     MIN_IDEAS_PER_JOB,
 )
@@ -107,7 +117,7 @@ def create_topic_ideation_job(
 ) -> TopicIdeationJob:
     """Queue a job. Both switches are checked before anything is read or
     written; nothing is claimed or generated until an ideation worker
-    (a later stage) picks the row up."""
+    (ai_smm.ideation_worker) picks the row up."""
 
     require_mutations_enabled(mutations_enabled, command="start topic ideation")
     require_topic_ideation_enabled(ideation_enabled)
@@ -118,6 +128,15 @@ def create_topic_ideation_job(
         raise TopicIdeationProjectInactive(
             f"Project {project.id!r} is not active."
         )
+
+    # Captured once, here (SMM-035B3B1): the worker reads no table, and a
+    # retry or a later settings edit never changes what the job runs on.
+    try:
+        profile = project_profile_snapshot(db, project_id=project.id)
+    except InvalidGenerationParams as exc:
+        raise InvalidTopicIdeationParams(str(exc)) from exc
+
+    recent_titles = _recent_idea_titles(db, project_id=project.id)
 
     # The request columns only, not an ORM add(): that would name every
     # column, the worker-owned ones as NULL, and need a grant on each
@@ -132,6 +151,10 @@ def create_topic_ideation_job(
             status=TopicIdeationJobStatus.QUEUED,
             idea_count=idea_count,
             topic_hint=hint,
+            params={
+                IDEATION_PROFILE_PARAM: profile,
+                IDEATION_RECENT_TITLES_PARAM: recent_titles,
+            },
             max_attempts=DEFAULT_IDEATION_MAX_ATTEMPTS,
         )
         .returning(TopicIdeationJob)
@@ -146,10 +169,46 @@ def create_topic_ideation_job(
             "project_id": project.id,
             "idea_count": idea_count,
             "max_attempts": job.max_attempts,
+            "profile_settings_version": profile["settings_version"],
+            "recent_idea_titles": len(recent_titles),
         },
     )
 
     return job
+
+
+def _recent_idea_titles(db: Session, *, project_id: str) -> list[str]:
+    """The project's newest idea titles, whatever their status, so the
+    model is told what not to suggest again. Only this project's; at most
+    MAX_RECENT_IDEA_TITLES, case-insensitively distinct."""
+
+    rows = db.scalars(
+        select(ContentIdea.title)
+        .where(ContentIdea.project_id == project_id)
+        .order_by(
+            ContentIdea.created_at.desc(),
+            ContentIdea.ideation_job_id,
+            ContentIdea.position,
+        )
+        .limit(MAX_RECENT_IDEA_TITLES * 5)
+    )
+
+    titles: list[str] = []
+    seen: set[str] = set()
+
+    for title in rows:
+        key = title.casefold()
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+        titles.append(title)
+
+        if len(titles) == MAX_RECENT_IDEA_TITLES:
+            break
+
+    return titles
 
 
 # -- reads -----------------------------------------------------------------

@@ -285,6 +285,30 @@ def generation_session_factory(
 
 
 @pytest.fixture
+def ideation_role(
+    engine: Engine,
+    admin_database_url: str,
+    database_url: str,
+) -> Iterator[pg_roles.ApiRole]:
+    """EXECUTE-only topic ideation role (SMM-035B3B1), retired after."""
+
+    del engine  # contracts must exist before grants are provisioned
+    role = pg_roles.provision_ideation(admin_database_url, database_url)
+    yield role
+    from ai_smm.db.session import reset_engine
+
+    reset_engine()
+    pg_roles.retire_ideation(admin_database_url)
+
+
+@pytest.fixture
+def ideation_engine(ideation_role: pg_roles.ApiRole) -> Iterator[Engine]:
+    role_engine = create_db_engine(ideation_role.url, settings=_base_settings())
+    yield role_engine
+    role_engine.dispose()
+
+
+@pytest.fixture
 def settings(database_url: str, tmp_path: Path) -> Settings:
     return replace(
         load_settings(),

@@ -1,0 +1,98 @@
+# AI SMM topic ideation worker -- a compose project of its own (SMM-035B3B1).
+# It claims queued topic ideation jobs, asks the model for topics once per
+# attempt and saves them as content_ideas. It writes no content item, no
+# approval and no publication, and it is neither the publish worker
+# (project "ai-smm", compose.yaml) nor the generation worker
+# (compose.generation.yml): nothing here touches either.
+#
+# NOT TO BE STARTED in SMM-035B3B1. Starting it -- and the validating
+# wrapper (like deploy/control-center/gen-compose.sh) that must sit in
+# front of `up` -- is a separately approved stage. Until then the API
+# cannot queue a job anyway (Settings.topic_ideation_jobs_enabled is not
+# read from the environment and stays false).
+#
+# What it has, and does not have:
+#   * the image ai-smm:<release> already on the host (pull_policy: never);
+#   * ONE database login, ai_smm_ideation: EXECUTE on the three
+#     topic_ideation_* contracts, no table, sequence or credential access,
+#     no generation or publication contract
+#     (deploy/control-center/db/ai_smm_ideation.grants.sql); the worker
+#     refuses to start as any role with more, or without OPENAI_API_KEY
+#     (exit 2);
+#   * ideation.env: exactly AI_SMM_DATABASE_URL and OPENAI_API_KEY
+#     (deploy/control-center/ideation.env.example). The values below are
+#     LITERALS: `environment:` outranks `env_file:`;
+#   * no knowledge base, no media, no credential-key mount, no Docker
+#     socket; a tmpfs /tmp for the heartbeat;
+#   * one instance (container_name refuses --scale; one job at a time),
+#     256 MiB, 0.25 CPU, 64 pids. Retries are per JOB (max_attempts, 1..10).
+
+name: ai-smm-ideation
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  smm-ideation:
+    image: ai-smm:${SMM_IDEATION_VERSION:?set SMM_IDEATION_VERSION to an image tag, never latest}
+    pull_policy: never
+    container_name: ai-smm-ideation-worker
+    entrypoint: ["/app/.venv/bin/ai-smm-ideation-worker"]
+    env_file:
+      - ideation.env
+    environment:
+      TZ: UTC
+      AI_SMM_DRY_RUN: "true"
+      AI_SMM_IDEATION_WORKER_ID: prod-ideation-1
+      AI_SMM_IDEATION_POLL_INTERVAL_SECONDS: "30"
+      AI_SMM_IDEATION_LEASE_SECONDS: "300"
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+      # Defence in depth: no publishing, storage or tracing credential.
+      # Empty Langfuse keys alone do not stop the SDK from exporting
+      # (SMM-035C): the flag turns tracing off.
+      LANGFUSE_TRACING_ENABLED: "false"
+      THREADS_ACCESS_TOKEN: ""
+      THREADS_API_BASE_URL: http://127.0.0.1:9
+      STORAGE_SSH_PASSWORD: ""
+      STORAGE_SSH_KEY_PATH: ""
+      LANGFUSE_PUBLIC_KEY: ""
+      LANGFUSE_SECRET_KEY: ""
+    networks:
+      - shared
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    labels:
+      traefik.enable: "false"
+      ai-smm.component: ideation-worker
+    healthcheck:
+      test: ["CMD", "/app/.venv/bin/ai-smm-ideation-worker", "--check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: "no"
+    # Room to finish the call in flight; a kill is safe anyway (the ideas
+    # and the job's outcome are saved by one contract call, and the
+    # expired lease returns the job while attempts remain).
+    stop_grace_period: 60s
+    cpus: 0.25
+    mem_limit: 256m
+    memswap_limit: 256m
+    pids_limit: 64
+    logging: *logging
+
+networks:
+  # EXTERNAL: created by another project, never created or removed here.
+  shared:
+    name: ${SMM_IDEATION_SHARED_NETWORK:?set SMM_IDEATION_SHARED_NETWORK to the network the database container is on}
+    external: true

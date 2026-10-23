@@ -77,6 +77,7 @@ def test_the_migration_and_the_models_enforce_the_same_bounds(
         "constraint:topic_ideation_jobs:ck_topic_ideation_jobs_topic_hint",
         "constraint:topic_ideation_jobs:ck_topic_ideation_jobs_max_attempts",
         "constraint:topic_ideation_jobs:ck_topic_ideation_jobs_last_error",
+        "constraint:topic_ideation_jobs:ck_topic_ideation_jobs_params",
         "constraint:content_ideas:ck_content_ideas_title",
         "constraint:content_ideas:ck_content_ideas_description",
         "constraint:content_ideas:ck_content_ideas_angle",
