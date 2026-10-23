@@ -329,6 +329,46 @@ export interface GenerationJobFilters {
   status?: GenerationJobStatus[];
 }
 
+// -- content ideas -----------------------------------------------------
+
+export type ContentIdeaStatus = "proposed" | "rejected" | "used";
+
+export const CONTENT_IDEA_STATUSES: readonly ContentIdeaStatus[] = [
+  "proposed",
+  "rejected",
+  "used",
+];
+
+/** A topic proposed by a completed topic-ideation job. */
+export interface ContentIdea {
+  id: string;
+  project_id: string;
+  ideation_job_id: string;
+  position: number;
+  title: string;
+  description: string;
+  angle: string | null;
+  status: ContentIdeaStatus;
+  generation_job_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ContentIdeaList = Page<ContentIdea>;
+
+export interface ContentIdeaFilters {
+  status?: ContentIdeaStatus[];
+}
+
+/** POST .../use returns 202, or 200 with replayed=true for an already used idea. */
+export interface ContentIdeaUseResult {
+  idea: ContentIdea;
+  generation_job_id: string;
+  generation_job: GenerationJob;
+  replayed: boolean;
+  topic_includes: string[];
+}
+
 /** Validated usage projection for presentation; raw result remains arbitrary JSON. */
 export interface GenerationTokenUsage {
   input: number;

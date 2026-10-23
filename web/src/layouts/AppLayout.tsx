@@ -16,7 +16,7 @@ interface SwitcherOption {
 
 /** Sections that exist in every project; "" is the dashboard. */
 const PROJECT_SECTION =
-  /^\/projects\/[^/]+(?:\/(content|generation|publications|attention|audit|knowledge|settings|accounts|credentials))?\/?$/;
+  /^\/projects\/[^/]+(?:\/(content|ideas|generation|publications|attention|audit|knowledge|settings|accounts|credentials))?\/?$/;
 
 /**
  * Where choosing another project leads: the same section when it exists
@@ -91,6 +91,7 @@ export function AppLayout() {
                 Dashboard
               </NavLink>
               <NavLink to={`${base}/content`}>Content</NavLink>
+              <NavLink to={`${base}/ideas`}>Content Ideas</NavLink>
               <NavLink to={`${base}/generation`}>AI Generation</NavLink>
               <NavLink to={`${base}/publications`}>Publications</NavLink>
               <NavLink to={`${base}/attention`}>Attention</NavLink>
