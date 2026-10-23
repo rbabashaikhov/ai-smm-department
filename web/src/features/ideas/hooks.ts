@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { useApi } from "../../api/context";
 import { ApiError, ErrorCode } from "../../api/errors";
@@ -53,14 +53,8 @@ function useSingleIdeaCommand<T>(
       await queryClient.invalidateQueries({ queryKey: qk.contentIdeas(projectId) });
       await queryClient.invalidateQueries({ queryKey: qk.generationJobs(projectId) });
     },
-    onError: async (error) => {
-      // Errors are safe to try again only after the error handler has
-      // completed its state refresh.
-      if (isIdeaOutcomeUnknown(error)) {
-        // There is no single-idea read endpoint: refetch every active page for this project.
-        await queryClient.refetchQueries({ queryKey: qk.contentIdeas(projectId) });
-      }
-      commands.current.clear();
+    onError: (_error, ideaId) => {
+      commands.current.delete(ideaId);
     },
   });
 }
@@ -74,15 +68,64 @@ export function useRejectContentIdea(projectId: string) {
 export function useUseContentIdea(projectId: string) {
   const api = useApi();
   const queryClient = useQueryClient();
+  const commands = useRef(new Map<string, Promise<ContentIdeaUseResult>>());
+  const [verification, setVerification] = useState<Record<string, "checking" | "failed">>({});
 
-  return useSingleIdeaCommand<ContentIdeaUseResult>(
-    projectId,
-    (ideaId) => api.ideas.use(projectId, ideaId),
-    (result) => {
+  const rereadIdeaState = useCallback(async (ideaId: string) => {
+    setVerification((current) => ({ ...current, [ideaId]: "checking" }));
+
+    try {
+      // Only a successful server read permits another command. throwOnError
+      // matters here: refetchQueries otherwise resolves even when its query
+      // failed, which would re-offer an action from stale cache data.
+      await queryClient.refetchQueries(
+        { queryKey: qk.contentIdeas(projectId), type: "active" },
+        { throwOnError: true },
+      );
+      commands.current.delete(ideaId);
+      setVerification((current) => {
+        const { [ideaId]: _verified, ...rest } = current;
+        return rest;
+      });
+      return true;
+    } catch {
+      setVerification((current) => ({ ...current, [ideaId]: "failed" }));
+      return false;
+    }
+  }, [projectId, queryClient]);
+
+  const mutation = useMutation({
+    retry: false,
+    mutationFn: (ideaId: string) => {
+      const existing = commands.current.get(ideaId);
+      if (existing) return existing;
+
+      const request = api.ideas.use(projectId, ideaId);
+      commands.current.set(ideaId, request);
+      return request;
+    },
+    onSuccess: async (result) => {
       queryClient.setQueryData(
         qk.generationJob(result.generation_job.project_id, result.generation_job.id),
         result.generation_job,
       );
+      await queryClient.invalidateQueries({ queryKey: qk.contentIdeas(projectId) });
+      await queryClient.invalidateQueries({ queryKey: qk.generationJobs(projectId) });
     },
-  );
+    onError: async (error, ideaId) => {
+      if (isIdeaOutcomeUnknown(error)) {
+        await rereadIdeaState(ideaId);
+        return;
+      }
+      commands.current.delete(ideaId);
+    },
+  });
+
+  return {
+    ...mutation,
+    isIdeaBlocked: (ideaId: string) => verification[ideaId] !== undefined,
+    isIdeaVerifying: (ideaId: string) => verification[ideaId] === "checking",
+    isIdeaBusy: (ideaId: string) => mutation.isPending && mutation.variables === ideaId,
+    verifyIdeaState: rereadIdeaState,
+  };
 }

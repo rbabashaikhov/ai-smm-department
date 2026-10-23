@@ -5,7 +5,6 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { Empty, Loading, PageHeader, Pagination, StatusBadge } from "../components/ui";
 import {
-  isIdeaOutcomeUnknown,
   useContentIdeas,
   useRejectContentIdea,
   useUseContentIdea,
@@ -53,7 +52,7 @@ export function ContentIdeasPage() {
   };
 
   const handleUseProposal = (idea: ContentIdea) => {
-    if (useIdea.isPending) return;
+    if (useIdea.isIdeaBlocked(idea.id) || useIdea.isIdeaBusy(idea.id)) return;
     useIdea.reset();
     useIdea.mutate(idea.id, {
       onSuccess: (result) => {
@@ -111,8 +110,19 @@ export function ContentIdeasPage() {
                     ) : null}
                     {idea.status === "proposed" && can.canEditContent ? (
                       <div className="form-actions">
-                        <button type="button" className="btn-primary" onClick={() => handleUseProposal(idea)} disabled={useIdea.isPending || reject.isPending}>Создать черновик</button>
-                        <button type="button" className="btn-danger" onClick={() => { reject.reset(); setRejecting(idea); }} disabled={useIdea.isPending || reject.isPending}>Отклонить</button>
+                        {useIdea.isIdeaBlocked(idea.id) ? (
+                          <>
+                            <button type="button" onClick={() => { void useIdea.verifyIdeaState(idea.id); }} disabled={useIdea.isIdeaVerifying(idea.id)}>
+                              {useIdea.isIdeaVerifying(idea.id) ? "Проверка…" : "Проверить состояние"}
+                            </button>
+                            <span className="muted small" role="status">Состояние идеи не подтверждено.</span>
+                          </>
+                        ) : (
+                          <>
+                            <button type="button" className="btn-primary" onClick={() => handleUseProposal(idea)} disabled={useIdea.isIdeaBusy(idea.id)}>Создать черновик</button>
+                            <button type="button" className="btn-danger" onClick={() => { reject.reset(); setRejecting(idea); }} disabled={useIdea.isIdeaBusy(idea.id) || (reject.isPending && reject.variables === idea.id)}>Отклонить</button>
+                          </>
+                        )}
                       </div>
                     ) : null}
                   </td>
@@ -124,9 +134,6 @@ export function ContentIdeasPage() {
         </>
       ) : null}
       {useIdea.isError ? <ErrorBanner error={useIdea.error} /> : null}
-      {useIdea.isError && isIdeaOutcomeUnknown(useIdea.error) ? (
-        <div className="banner banner-warn" role="status">Ответ на создание черновика не получен. Состояние идей перечитано с сервера; не отправляйте команду повторно, пока не проверите результат.</div>
-      ) : null}
       {rejecting ? (
         <ConfirmDialog title="Отклонить идею?" confirmLabel="Отклонить" danger pending={reject.isPending} error={reject.error} onCancel={() => { if (!reject.isPending) setRejecting(null); }} onConfirm={confirmReject}>
           Идея «{rejecting.title}» будет отклонена. Черновик создан не будет.
