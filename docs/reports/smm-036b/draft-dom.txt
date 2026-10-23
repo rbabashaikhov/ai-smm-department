@@ -1,0 +1,144 @@
+- complementary:
+  - generic: SMM Control Center
+  - navigation "Основная навигация":
+    - link "Проекты":
+      - /url: /projects
+    - link "Dashboard":
+      - /url: /projects/browser-e2e
+    - link "Content":
+      - /url: /projects/browser-e2e/content
+    - link "Content Ideas":
+      - /url: /projects/browser-e2e/ideas
+    - link "AI Generation":
+      - /url: /projects/browser-e2e/generation
+    - link "Publications":
+      - /url: /projects/browser-e2e/publications
+    - link "Attention":
+      - /url: /projects/browser-e2e/attention
+    - link "Audit":
+      - /url: /projects/browser-e2e/audit
+    - link "Knowledge Base":
+      - /url: /projects/browser-e2e/knowledge
+    - link "Аккаунты":
+      - /url: /projects/browser-e2e/accounts
+    - link "Учётные данные":
+      - /url: /projects/browser-e2e/credentials
+    - link "Настройки":
+      - /url: /projects/browser-e2e/settings
+  - generic: Публикует только worker. Здесь — только очередь и редакция.
+- banner:
+  - generic: Проект
+  - combobox "Project switcher":
+    - option "— выберите —"
+    - option "Browser E2E (owner)" [selected]
+  - generic "Ваша роль в проекте": owner
+  - generic: Browser 036B
+  - button "Выйти"
+- main:
+  - list:
+    - link "Проекты":
+      - /url: /projects
+    - text: ›
+    - link "Browser E2E":
+      - /url: /projects/browser-e2e
+    - text: ›
+    - link "Content":
+      - /url: /projects/browser-e2e/content
+    - listitem: ›Часть 1
+  - heading "Часть 1" [level=1]
+  - generic: draft
+  - text: "· post · version 1 · revision #1 ·"
+  - link "browser-e2e":
+    - /url: /projects/browser-e2e/content
+  - button "New Revision"
+  - button "Submit Review"
+  - 'heading "Current revision #1" [level=2]'
+  - strong: "Аккаунт публикации:"
+  - text: не выбран — отправка на согласование невозможна
+  - text: "format:"
+  - code: text
+  - text: · 19 chars · 0 images · 0 items
+  - generic: Текст первой части.
+  - region "AI Editor verdict":
+    - strong: "AI Editor:"
+    - text: Passed — AI Editor не нашёл блокирующих замечаний
+    - list:
+      - listitem: "Editor score: 9"
+      - listitem: "Narrative score: 9"
+      - listitem: "Revision count (доработок AI Editor): 0"
+    - strong: "Feedback:"
+    - text: ok
+    - paragraph: Это оценка AI, а не одобрение человеком. Одобрение даёт только человек в Approval.
+  - term: revision_id
+  - definition:
+    - code: 1f89f21a-64ca-4c6d-a1bd-33899361c1f4
+  - term: content_hash
+  - definition:
+    - code: 389b8d2f28917fc76d466858ee0fc85b5cdf041d945d83d3f83e5c78ac00e249
+  - term: source
+  - definition: copywriter
+  - term: source_ref
+  - definition: generation_job:820f9589-3610-4bf4-b00d-85de4ed87cc5:run:57db369c-f7fd-4a46-8a54-6b49c2541638
+  - term: editor_score
+  - definition: "9"
+  - term: editor_notes
+  - definition: ok
+  - term: created_by
+  - definition: agent:copywriter
+  - term: created
+  - definition: 23.10.2026, 19:43 (UTC+03:00)
+  - term: metadata
+  - definition:
+    - generic: "{ \"model\": \"gpt-4.1-mini\", \"usage\": { \"tokens\": { \"input\": 0, \"cached\": 0, \"output\": 0 }, \"seconds\": 0, \"cost_usd\": 0 }, \"run_id\": \"57db369c-f7fd-4a46-8a54-6b49c2541638\", \"version\": 1, \"position\": 1, \"series_title\": \"Серия\", \"series_total\": 1, \"editor_verdict\": { \"score\": 9, \"issues\": [], \"approved\": true, \"revision_count\": 0, \"narrative_score\": 9 }, \"generation_job_id\": \"820f9589-3610-4bf4-b00d-85de4ed87cc5\", \"publishing_strategy\": \"standalone_series\" }"
+  - heading "Item" [level=2]
+  - term: id
+  - definition:
+    - code: 357a4134-2df2-4f2f-b153-e76127b46253
+  - term: status
+  - definition:
+    - generic: draft
+  - term: version
+  - definition: "1"
+  - term: current_revision_id
+  - definition:
+    - code: 1f89f21a-64ca-4c6d-a1bd-33899361c1f4
+  - term: approved_revision_id
+  - definition: —
+  - term: approval_in_effect
+  - definition: "no"
+  - term: created
+  - definition: 23.10.2026, 19:43 (UTC+03:00)
+  - term: updated
+  - definition: 23.10.2026, 19:43 (UTC+03:00)
+  - term: platform
+  - definition: threads
+  - heading "Delivery" [level=2]
+  - paragraph: Материализация создаёт неизменяемый delivery snapshot (Publication в статусе approved). Ставит в очередь только owner; публикует только worker.
+  - paragraph: Текущий API не отдаёт список snapshot-ов материала; ссылка появляется после «Подготовить публикацию» или при конфликте с предыдущим snapshot.
+  - heading "Approval history" [level=2]
+  - paragraph: Решений пока нет.
+  - heading "Revision history" [level=2]
+  - table:
+    - rowgroup:
+      - row "# Title / body Format Source Hash Created":
+        - columnheader "#"
+        - columnheader "Title / body"
+        - columnheader "Format"
+        - columnheader "Source"
+        - columnheader "Hash"
+        - columnheader "Created"
+        - columnheader
+    - rowgroup:
+      - row "1 text copywriter generation_job:820f9589-3610-4bf4-b00d-85de4ed87cc5:run:57db369c-f7fd-4a46-8a54-6b49c2541638 389b8d2f2891 23.10.2026, 19:43 (UTC+03:00) current":
+        - cell "1"
+        - cell:
+          - generic "Текст первой части."
+        - cell "text"
+        - cell "copywriter generation_job:820f9589-3610-4bf4-b00d-85de4ed87cc5:run:57db369c-f7fd-4a46-8a54-6b49c2541638":
+          - text: copywriter
+          - generic: generation_job:820f9589-3610-4bf4-b00d-85de4ed87cc5:run:57db369c-f7fd-4a46-8a54-6b49c2541638
+        - cell "389b8d2f2891":
+          - code: 389b8d2f2891
+        - cell "23.10.2026, 19:43 (UTC+03:00)"
+        - cell "current":
+          - generic: current

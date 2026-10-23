@@ -13,6 +13,7 @@ import type {
   Revision,
   Role,
   SocialAccount,
+  TopicIdeationJob,
 } from "../types/api";
 import { FakeApi, ok } from "./fakeApi";
 
@@ -22,6 +23,27 @@ export const REV1_ID = "22222222-2222-4222-8222-222222222221";
 export const REV2_ID = "22222222-2222-4222-8222-222222222222";
 export const USER_ID = "33333333-3333-4333-8333-333333333333";
 export const PUBLICATION_ID = 42;
+
+export function makeTopicIdeationJob(
+  overrides: Partial<TopicIdeationJob> = {},
+): TopicIdeationJob {
+  return {
+    id: "99999999-9999-4999-8999-999999999999",
+    project_id: PROJECT_ID,
+    requested_by_user_id: USER_ID,
+    status: "queued",
+    idea_count: 3,
+    topic_hint: null,
+    result: {},
+    last_error: null,
+    attempt_count: 0,
+    max_attempts: 2,
+    created_at: T0,
+    updated_at: T0,
+    finished_at: null,
+    ...overrides,
+  };
+}
 
 const T0 = "2026-10-10T09:00:00+00:00";
 
@@ -297,6 +319,7 @@ export function createServer(
       ok(makeSummary({ api_mutations_enabled: mutationsEnabled })),
     )
     .on("GET", "/api/v1/projects/:projectId/operations/attention", ok(page([])))
+    .on("GET", "/api/v1/projects/:projectId/topic-ideation-jobs", ok(page([])))
     .on("GET", "/api/v1/projects/:projectId/audit", ok(page([])))
     .on("GET", "/api/v1/projects/:projectId/content-items", ok(page([item])))
     .on("GET", "/api/v1/projects/:projectId/publications", ok(page([publication])))

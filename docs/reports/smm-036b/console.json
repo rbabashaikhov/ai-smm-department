@@ -1,0 +1,38 @@
+[
+  {
+    "level": "error",
+    "message": "Could not establish connection. Receiving end does not exist.",
+    "timestamp": "2026-10-23T16:34:13.957Z",
+    "url": "chrome-extension://hfdhpmpfpcnbboppkkkblilhbloejijj/content-scripts/cs_index.js"
+  },
+  {
+    "level": "error",
+    "message": "An error occurred while initializing the plugin Error: Could not establish connection. Receiving end does not exist.",
+    "timestamp": "2026-10-23T16:34:13.958Z",
+    "url": "chrome-extension://hfdhpmpfpcnbboppkkkblilhbloejijj/content-scripts/cs_similar_goods.js"
+  },
+  {
+    "level": "error",
+    "message": "Error: Could not establish connection. Receiving end does not exist.",
+    "timestamp": "2026-10-23T16:34:13.966Z",
+    "url": "chrome-extension://hfdhpmpfpcnbboppkkkblilhbloejijj/content-scripts/cs_search_integration.js"
+  },
+  {
+    "level": "error",
+    "message": "Could not establish connection. Receiving end does not exist.",
+    "timestamp": "2026-10-23T16:39:10.007Z",
+    "url": "chrome-extension://hfdhpmpfpcnbboppkkkblilhbloejijj/content-scripts/cs_index.js"
+  },
+  {
+    "level": "error",
+    "message": "An error occurred while initializing the plugin Error: Could not establish connection. Receiving end does not exist.",
+    "timestamp": "2026-10-23T16:39:10.010Z",
+    "url": "chrome-extension://hfdhpmpfpcnbboppkkkblilhbloejijj/content-scripts/cs_similar_goods.js"
+  },
+  {
+    "level": "error",
+    "message": "Error: Could not establish connection. Receiving end does not exist.",
+    "timestamp": "2026-10-23T16:39:10.019Z",
+    "url": "chrome-extension://hfdhpmpfpcnbboppkkkblilhbloejijj/content-scripts/cs_search_integration.js"
+  }
+]
