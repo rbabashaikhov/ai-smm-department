@@ -294,6 +294,8 @@ subdomain.
 | `GET` | `/api/v1/projects/{id}/topic-ideation-jobs/{job_id}` | viewer+; 404 for another project's job |
 | `POST` | `/api/v1/projects/{id}/topic-ideation-jobs` | **owner**, CSRF; **disabled on every deployment** (`403 FEATURE_DISABLED`) until an ideation worker exists |
 | `GET` | `/api/v1/projects/{id}/content-ideas` | viewer+, paginated, `status` and `ideation_job_id` filters |
+| `POST` | `/api/v1/projects/{id}/content-ideas/{idea_id}/reject` | **owner**, CSRF; `proposed → rejected`, no job (SMM-035B3B2) |
+| `POST` | `/api/v1/projects/{id}/content-ideas/{idea_id}/use` | **owner**, CSRF; `proposed → used` with exactly one queued generation job; `202`, or `200` with the same job on a repeat (SMM-035B3B2) |
 
 Every unsafe route except login and logout is additionally refused, for
 every role, while `AI_SMM_API_MUTATIONS_ENABLED` is `false` — the
@@ -904,14 +906,14 @@ same one.
 
 ---
 
-### Topic ideation (SMM-035B3A, SMM-035B3B1)
+### Topic ideation (SMM-035B3A, SMM-035B3B1, SMM-035B3B2)
 
 Suggested topics, kept apart from content generation: an ideation job has
 its own queue (`topic_ideation_jobs`) and produces rows in `content_ideas`,
 never a content item. SMM-035B3A shipped storage, database contracts and
 reads; SMM-035B3B1 adds the worker that runs a job
-([ideation-worker.md](ideation-worker.md)). There is still no command that
-rejects an idea or turns one into a generation job.
+([ideation-worker.md](ideation-worker.md)); SMM-035B3B2 adds the two owner
+commands that choose an idea (below).
 
 - **Queuing is closed.** `POST .../topic-ideation-jobs` answers `403
   FEATURE_DISABLED` (and writes nothing) on every deployment:
@@ -938,17 +940,53 @@ rejects an idea or turns one into a generation job.
   `topic_hint`, `result` (the worker's summary plus `idea_ids`),
   `last_error`, `attempt_count`, `max_attempts`, `created_at`,
   `updated_at`, `finished_at`.
-- **Idea** (`proposed`; `rejected` and `used` are reserved): `id`,
+- **Idea** (`proposed`, then `rejected` or `used`, both terminal): `id`,
   `project_id`, `ideation_job_id`, `position` (1-based within the job),
   `title`, `description`, `angle` (nullable), `status`,
-  `generation_job_id` (reserved, always null today), `created_at`,
+  `generation_job_id` (set exactly when `used`), `created_at`,
   `updated_at`.
+- **Reject** (`POST .../content-ideas/{idea_id}/reject`, no body): only a
+  `proposed` idea; returns the idea. No job, no content. Rejecting a
+  `rejected` or `used` idea is `409 INVALID_STATE_TRANSITION`
+  (`details`: `command`, `status`) and changes nothing.
+- **Use** (`POST .../content-ideas/{idea_id}/use`, no body): only a
+  `proposed` idea. In one transaction it queues exactly one generation job
+  through the ordinary `create_generation_job` (same validation, profile
+  snapshot, `max_attempts` and `generation.queued` audit as `POST
+  .../generation-jobs`), with `series_size = 1`,
+  `publishing_strategy = "standalone_series"` and the idea as
+  `topic_hint`: the title always, then the description, then the angle,
+  each only if the whole text stays within the 500-character hint limit.
+  A part that does not fit is left out whole, never cut, and the response
+  names what went in (`topic_includes`). Answers `202` with `{idea,
+  generation_job_id, generation_job, replayed: false, topic_includes}`; if
+  anything fails, the idea stays `proposed` and no job exists. A repeat on
+  a `used` idea answers `200` with the same job and `replayed: true`
+  (nothing is created); a `rejected` idea is `409 INVALID_STATE_TRANSITION`.
+  No model is called and no content is created: drafts appear only when
+  the generation worker later runs the job.
+- **Both commands**: owner only; an idea of another project (or an unknown
+  id) is `404 NOT_FOUND`; refused with `403 MUTATIONS_DISABLED` in
+  read-only mode; `503 DEPENDENCY_UNAVAILABLE` with `Retry-After` if the
+  idea's row lock is held too long. The idea row is locked until COMMIT, so
+  concurrent uses create one job and a reject/use race ends in one state.
+  Audit actions: `generation.idea_rejected`, `generation.idea_used`.
 
 Ideas are written only by the SECURITY DEFINER contract
 `topic_ideation_complete`, which takes the project and job from the claimed
 job row and saves all of a result or none of it; a composite key keeps an
 idea in its job's project. Only the ideation worker's role,
 `ai_smm_ideation`, has EXECUTE on the `topic_ideation_*` contracts.
+
+The business role (`ai_smm_cc_rw`) cannot write `content_ideas` at all. It
+has EXECUTE on three other SECURITY DEFINER contracts,
+`content_idea_begin_use`, `content_idea_finish_use` and
+`content_idea_reject`, each of which first requires a session-bound
+transaction whose user owns the project. The schema itself keeps a linked
+job in the idea's project (composite key), lets a job be linked once
+(unique) and ties `status = 'used'` to a linked job (check). Migration
+`e6b1f3a9c205` and `deploy/control-center/db/ai_smm_cc_rw.grants.sql` must
+both be applied, in that order, before the routes can work on a deployment.
 
 ## 8. Errors and request ids
 

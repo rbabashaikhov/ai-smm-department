@@ -374,6 +374,23 @@ GATED: dict[str, tuple[str, str, Any]] = {
         "/api/v1/projects/{project_id}/topic-ideation-jobs",
         lambda w, p: (f"/api/v1/projects/{p}/topic-ideation-jobs", {}),
     ),
+    # SMM-035B3B2: choosing a suggested topic.
+    "reject_content_idea": (
+        "POST",
+        "/api/v1/projects/{project_id}/content-ideas/{idea_id}/reject",
+        lambda w, p: (
+            f"/api/v1/projects/{p}/content-ideas/{uuid.uuid4()}/reject",
+            None,
+        ),
+    ),
+    "use_content_idea": (
+        "POST",
+        "/api/v1/projects/{project_id}/content-ideas/{idea_id}/use",
+        lambda w, p: (
+            f"/api/v1/projects/{p}/content-ideas/{uuid.uuid4()}/use",
+            None,
+        ),
+    ),
 }
 
 #: The session lifecycle: the only unsafe routes open in read-only mode.
